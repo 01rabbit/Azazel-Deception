@@ -1,0 +1,118 @@
+name: Reference Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - images/reference-web/**
+      - runtime/compose/nginx.conf
+      - runtime/compose/html/**
+      - .github/workflows/reference-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/01rabbit/azazel-deception-reference-web
+
+jobs:
+  build-native:
+    name: build-native (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build native image
+        run: |
+          docker build \
+            --pull \
+            --platform "${{ matrix.platform }}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -f images/reference-web/Dockerfile \
+            -t "$IMAGE:sha-${GITHUB_SHA}-${{ matrix.arch }}" \
+            .
+      - name: Push native image
+        run: docker push "$IMAGE:sha-${GITHUB_SHA}-${{ matrix.arch }}"
+      - name: Record native digest
+        run: |
+          mkdir -p artifacts
+          digest="$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA}-${{ matrix.arch }}" | awk '/^Digest:/ {print $2; exit}')"
+          test -n "$digest"
+          printf '%s\n' "$digest" | tee "artifacts/${{ matrix.arch }}.digest"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference-image-${{ matrix.arch }}
+          path: artifacts/${{ matrix.arch }}.digest
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-manifest:
+    name: publish multi-arch manifest and provenance
+    needs: build-native
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - uses: actions/download-artifact@v4
+        with:
+          name: reference-image-amd64
+          path: artifacts/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: reference-image-arm64
+          path: artifacts/arm64
+      - name: Publish manifest list
+        run: |
+          amd64_digest="$(cat artifacts/amd64/amd64.digest)"
+          arm64_digest="$(cat artifacts/arm64/arm64.digest)"
+          docker buildx imagetools create \
+            -t "$IMAGE:sha-${GITHUB_SHA}" \
+            -t "$IMAGE:phase1" \
+            "$IMAGE@$amd64_digest" \
+            "$IMAGE@$arm64_digest"
+      - name: Record multi-arch manifest metadata
+        id: manifest
+        run: |
+          manifest_digest="$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA}" | awk '/^Digest:/ {print $2; exit}')"
+          test -n "$manifest_digest"
+          amd64_digest="$(cat artifacts/amd64/amd64.digest)"
+          arm64_digest="$(cat artifacts/arm64/arm64.digest)"
+          mkdir -p artifacts/manifest
+          jq -n \
+            --arg image "$IMAGE" \
+            --arg tag "sha-${GITHUB_SHA}" \
+            --arg manifest_digest "$manifest_digest" \
+            --arg amd64_digest "$amd64_digest" \
+            --arg arm64_digest "$arm64_digest" \
+            --arg source_sha "$GITHUB_SHA" \
+            '{schema_version:"az06-reference-image/v0.1", image:$image, tag:$tag, manifest_digest:$manifest_digest, platforms:{amd64:$amd64_digest, arm64:$arm64_digest}, source_sha:$source_sha}' \
+            | tee artifacts/manifest/reference-image.json
+          echo "digest=$manifest_digest" >> "$GITHUB_OUTPUT"
+      - name: Generate GitHub provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/01rabbit/azazel-deception-reference-web
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference-image-manifest
+          path: artifacts/manifest/reference-image.json
+          if-no-files-found: error
+          retention-days: 90
