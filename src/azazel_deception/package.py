@@ -1,9 +1,13 @@
 """Canonical deception-package loading and fail-closed validation.
 
 External/runtime-facing package semantics are owned by
-``azazel_fabric.deception_contracts``.  The original bootstrap-v0.1 shape is
+``azazel_fabric.deception_contracts``. The original bootstrap-v0.1 shape is
 accepted only as a temporary compatibility input and is normalized immediately
 into the canonical Fabric ``DeceptionPackage`` model.
+
+For canonical packages, ``package_digest`` is a deterministic semantic content
+digest defined by ``azazel_fabric.deception_integrity``. It binds all package
+semantics except the digest field itself and the detached signature locator.
 """
 
 from __future__ import annotations
@@ -16,6 +20,12 @@ import yaml
 from pydantic import ValidationError
 
 from azazel_fabric.deception_contracts import DeceptionPackage
+from azazel_fabric.deception_integrity import (
+    PackageIntegrityError,
+    assert_package_content_digest,
+    canonical_package_signing_bytes,
+    package_content_digest,
+)
 
 CANONICAL_SCHEMA = "deception-package/v0.1"
 BOOTSTRAP_SCHEMA = "deception-package/bootstrap-v0.1"
@@ -40,9 +50,10 @@ def _sha(value: str) -> str:
 def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
     """Convert the repository's pre-Fabric bootstrap shape into v0.1.
 
-    Generated digest/provenance values are explicitly unverified placeholders;
-    they exist only to preserve dry-run compatibility. Live activation must
-    reject packages whose ImageManifest ``verified`` flag is false.
+    Generated image digest/provenance values remain explicitly unverified
+    placeholders. The normalized package itself receives a real deterministic
+    content digest so compatibility input cannot bypass the canonical integrity
+    rule. Live activation still rejects unverified selected images.
     """
 
     req = data.get("runtime_requirements") or {}
@@ -120,13 +131,14 @@ def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
         "storage_mb": max(int(item["storage_mb"]) for item in tier_minima),
         "max_connections": max(int(item["max_connections"]) for item in tier_minima),
         "max_duration_seconds": max(int(item["max_duration_seconds"]) for item in tier_minima),
+        "bandwidth_kbps": int(safety.get("bandwidth_kbps", 10000)),
     }
 
-    return {
+    payload: dict[str, Any] = {
         "schema_version": CANONICAL_SCHEMA,
         "package_id": data.get("package_id"),
         "package_version": data.get("version"),
-        "package_digest": _sha(f"bootstrap:{data.get('package_id')}:{data.get('version')}"),
+        "package_digest": "sha256:" + "0" * 64,
         "narrative": {
             "narrative_id": f"{data.get('package_id')}-narrative",
             "purpose": narrative.get("purpose") or "bootstrap deception environment",
@@ -167,8 +179,10 @@ def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
         },
         "credentials": [],
         "signer_ref": "bootstrap:unverified",
-        "signature_ref": "bootstrap:unverified",
+        "signature_ref": "bootstrap:detached-unverified",
     }
+    payload["package_digest"] = package_content_digest(payload)
+    return payload
 
 
 def canonical_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -180,10 +194,34 @@ def canonical_payload(data: dict[str, Any]) -> dict[str, Any]:
     raise PackageValidationError(f"unsupported schema_version: {schema!r}")
 
 
+def calculate_package_digest(data: dict[str, Any]) -> str:
+    """Calculate the canonical content digest without trusting the declaration."""
+
+    payload = canonical_payload(data)
+    try:
+        model = DeceptionPackage.model_validate(payload)
+    except ValidationError as exc:
+        raise PackageValidationError(str(exc)) from exc
+    return package_content_digest(model)
+
+
+def package_signing_bytes(data: dict[str, Any]) -> bytes:
+    """Return the detached canonical bytes covered by the package attestation."""
+
+    payload = canonical_payload(data)
+    try:
+        model = DeceptionPackage.model_validate(payload)
+    except ValidationError as exc:
+        raise PackageValidationError(str(exc)) from exc
+    return canonical_package_signing_bytes(model)
+
+
 def parse_package(data: dict[str, Any]) -> DeceptionPackage:
     try:
-        return DeceptionPackage.model_validate(canonical_payload(data))
-    except ValidationError as exc:
+        model = DeceptionPackage.model_validate(canonical_payload(data))
+        assert_package_content_digest(model)
+        return model
+    except (ValidationError, PackageIntegrityError) as exc:
         raise PackageValidationError(str(exc)) from exc
 
 
