@@ -1,8 +1,8 @@
-"""Small deterministic runtime-state and evidence store.
+"""Small deterministic runtime-state, evidence, and anti-replay store.
 
 Authoritative package/decision data remains external. This store records the
-local materialization lifecycle and uses atomic replacement so a crash does not
-leave a partially-written state document.
+local materialization lifecycle and uses atomic replacement / exclusive-create
+operations so crashes or concurrent requests do not silently reuse authority.
 """
 
 from __future__ import annotations
@@ -19,9 +19,16 @@ class RuntimeStateStore:
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "environments").mkdir(exist_ok=True)
         (self.root / "evidence").mkdir(exist_ok=True)
+        (self.root / "decisions").mkdir(exist_ok=True)
 
     def _state_path(self, environment_id: str) -> Path:
         return self.root / "environments" / f"{environment_id}.json"
+
+    def _decision_path(self, decision_id: str) -> Path:
+        safe = "".join(ch for ch in decision_id if ch.isalnum() or ch in "-_.")
+        if not safe or safe != decision_id:
+            raise ValueError("decision_id contains unsupported filesystem characters")
+        return self.root / "decisions" / f"{safe}.json"
 
     def read(self, environment_id: str) -> dict[str, Any] | None:
         path = self._state_path(environment_id)
@@ -38,6 +45,36 @@ class RuntimeStateStore:
         payload = json.dumps(state, sort_keys=True, indent=2) + "\n"
         tmp.write_text(payload, encoding="utf-8")
         os.replace(tmp, path)
+
+    def consume_decision(self, decision_id: str, record: dict[str, Any]) -> bool:
+        """Atomically record a one-shot Edge decision.
+
+        Returns ``False`` if the decision ID was already consumed. A decision
+        stays consumed even when the following runtime operation fails; a new
+        Edge decision is required to retry.
+        """
+
+        path = self._decision_path(decision_id)
+        payload = json.dumps(record, sort_keys=True, indent=2, default=str) + "\n"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise
+        return True
+
+    def decision_consumed(self, decision_id: str) -> bool:
+        return self._decision_path(decision_id).exists()
 
     def append_evidence(self, environment_id: str, event: dict[str, Any]) -> Path:
         path = self.root / "evidence" / f"{environment_id}.jsonl"
