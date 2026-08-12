@@ -21,11 +21,22 @@ def host(arch="arm64", memory=8192, storage=65536, docker=True):
     }
 
 
-def test_lite_plan_is_deterministic_and_non_executing():
-    plan = build_placement_plan(load_package(PACKAGE), host(), "lite")
-    assert plan["selected_tier"] == "lite"
-    assert plan["components"] == ["intranet-web"]
-    assert plan["live_execution"] is False
+def test_lite_plan_is_deterministic_and_descriptive_only():
+    first = build_placement_plan(load_package(PACKAGE), host(), "lite")
+    second = build_placement_plan(load_package(PACKAGE), host(), "lite")
+    assert first == second
+    assert first["schema_version"] == "placement-plan/v0.1"
+    assert first["selected_tier"] == "lite"
+    assert first["component_ids"] == ["intranet-web"]
+    assert first["authority"] == "descriptive_only"
+    assert first["edge_decision_id"] is None
+
+
+def test_edge_decision_reference_is_descriptive_binding_only():
+    plan = build_placement_plan(
+        load_package(PACKAGE), host(), "lite", edge_decision_id="edge-shadow-1"
+    )
+    assert plan["edge_decision_id"] == "edge-shadow-1"
     assert plan["authority"] == "descriptive_only"
 
 
