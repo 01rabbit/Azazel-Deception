@@ -141,16 +141,33 @@ class DockerComposeAdapter:
         return result
 
     @staticmethod
-    def _assert_verified_images(package: DeceptionPackage) -> None:
-        unverified = [
-            component.component_id
-            for component in package.components
-            if not component.image.verified
-        ]
+    def _assert_verified_images(
+        package: DeceptionPackage,
+        placement: PlacementPlan,
+    ) -> None:
+        """Require verified OCI state for every component selected to run.
+
+        Optional package components that are not part of the selected deployment
+        tier do not participate in the live materialization and therefore do not
+        block that placement. Required/selected components always fail closed.
+        """
+
+        selected = set(placement.component_ids)
+        manifests = {component.component_id: component for component in package.components}
+        missing = sorted(selected - set(manifests))
+        if missing:
+            raise RuntimeGateError(
+                "placement references components absent from package: " + ", ".join(missing)
+            )
+        unverified = sorted(
+            component_id
+            for component_id in selected
+            if not manifests[component_id].image.verified
+        )
         if unverified:
             raise RuntimeGateError(
-                "live activation requires verified OCI provenance for every component: "
-                + ", ".join(sorted(unverified))
+                "live activation requires verified OCI provenance for every selected component: "
+                + ", ".join(unverified)
             )
 
     @staticmethod
@@ -255,7 +272,7 @@ class DockerComposeAdapter:
             }
 
         self._assert_activation_binding(package, placement, decision)
-        self._assert_verified_images(package)
+        self._assert_verified_images(package, placement)
         self.validate_runtime_policy()
         self.validate_live_preflight(package, placement)
 
