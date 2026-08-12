@@ -1,0 +1,24 @@
+services:
+  intranet-web:
+    image: nginx:1.27-alpine
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.50
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+    networks:
+      - decoy_internal
+
+networks:
+  decoy_internal:
+    internal: true
+
+# Bootstrap reference only.
+# No host ports are published and no external network is attached.
+# Edge-approved routing/exposure will be added only after Fabric#9 / Edge#325
+# contracts and safety tests are implemented.
