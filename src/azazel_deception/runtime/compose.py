@@ -1,9 +1,9 @@
 """Docker Compose lifecycle adapter for AZ-06.
 
-Live execution is disabled by default.  Enabling it still does not grant
-runtime authority: an accepted, unexpired Azazel-Edge activation decision,
-matching package/placement data, verified OCI provenance, and a statically
-safe Compose asset are all required.
+Live execution is disabled by default. Enabling it still does not grant runtime
+authority: an accepted, unexpired, one-shot Azazel-Edge decision, matching
+package/placement data, package-bounded resource budget, verified OCI
+provenance, and a statically safe Compose asset are all required.
 """
 
 from __future__ import annotations
@@ -148,6 +148,28 @@ class DockerComposeAdapter:
             raise RuntimeGateError("activation decision tier binding mismatch")
         if placement.edge_decision_id != decision.decision_id:
             raise RuntimeGateError("placement is not bound to the activation decision")
+        if not decision.budget.is_within(package.maximum_budget):
+            raise RuntimeGateError("Edge decision budget exceeds package maximum budget")
+
+        tiers = {tier.tier_id: tier for tier in package.deployment_tiers}
+        tier = tiers.get(placement.selected_tier)
+        if tier is None:
+            raise RuntimeGateError("placement references an unknown package tier")
+        if not tier.minimum.is_within(decision.budget):
+            raise RuntimeGateError("Edge decision budget is below selected tier minimum")
+
+    def _consume_decision(self, decision_id: str, kind: str, environment_id: str) -> None:
+        consumed = self.state.consume_decision(
+            decision_id,
+            {
+                "decision_id": decision_id,
+                "kind": kind,
+                "environment_id": environment_id,
+                "consumed_at": _utcnow().isoformat(),
+            },
+        )
+        if not consumed:
+            raise RuntimeGateError(f"Edge decision already consumed: {decision_id}")
 
     def activate_environment(
         self,
@@ -176,6 +198,7 @@ class DockerComposeAdapter:
         if existing and existing.get("state") not in {"reset", "terminated", "failed"}:
             raise RuntimeGateError("environment already has non-terminal runtime state")
 
+        self._consume_decision(decision.decision_id, "activation", environment_id)
         self._compose(environment_id, "up", "-d", "--remove-orphans")
         event = EnvironmentEvent(
             event_id=f"{environment_id}-activated",
@@ -217,7 +240,10 @@ class DockerComposeAdapter:
         decision = EnvironmentTerminationDecision.model_validate(decision_data)
         if decision.environment_id != environment_id:
             raise RuntimeGateError("termination decision environment binding mismatch")
+        if decision.expires_at <= _utcnow():
+            raise RuntimeGateError("termination decision is expired")
 
+        self._consume_decision(decision.decision_id, "termination", environment_id)
         current = self.state.read(environment_id)
         if current is None:
             return {"environment_id": environment_id, "status": "absent"}
