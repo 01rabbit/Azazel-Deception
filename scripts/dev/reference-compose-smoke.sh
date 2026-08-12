@@ -76,5 +76,12 @@ nano_cpus="$(docker inspect "$cid" --format '{{.HostConfig.NanoCpus}}')"
 
 docker compose -p "$PROJECT" -f "$COMPOSE_FILE" exec -T intranet-web nginx -t >/dev/null
 
+if [[ -n "${AZ06_EVIDENCE_OUT:-}" ]]; then
+  python3 "$ROOT_DIR/scripts/dev/collect-portability-evidence.py" \
+    --project "$PROJECT" \
+    --compose-file "$COMPOSE_FILE" \
+    --output "$AZ06_EVIDENCE_OUT"
+fi
+
 echo "[az06] reference Compose smoke passed"
 echo "[az06] native image architecture=$image_arch internal_network=true published_ports=none"
