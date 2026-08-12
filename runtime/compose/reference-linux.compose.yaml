@@ -1,6 +1,6 @@
 services:
   intranet-web:
-    image: nginx:1.27-alpine
+    image: ghcr.io/01rabbit/azazel-deception-reference-web@sha256:7278ffb05be16e2f93501c938a26cad371b92a8a8452368dd05c8ea23888433e
     user: "101:101"
     read_only: true
     cap_drop:
@@ -10,9 +10,6 @@ services:
     pids_limit: 128
     mem_limit: 256m
     cpus: 0.50
-    volumes:
-      - ./html:/usr/share/nginx/html:ro
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m
     networks:
@@ -23,6 +20,8 @@ networks:
     internal: true
 
 # Phase-1 reference only.
-# No host ports are published and no external network is attached.
-# Nginx runs as non-root on TCP/8080 with all Linux capabilities dropped.
-# Edge-approved routing/exposure remains outside this Compose asset.
+# The image is pinned to the attested multi-architecture manifest produced by
+# Reference Image run 31640821303. No host ports are published and no external
+# network is attached. The image runs non-root on TCP/8080 with all Linux
+# capabilities dropped. Edge-approved routing/exposure remains outside this
+# Compose asset.
