@@ -2,7 +2,8 @@
 
 Live execution is disabled by default.  Enabling it still does not grant
 runtime authority: an accepted, unexpired Azazel-Edge activation decision,
-matching package/placement data, and verified OCI provenance are all required.
+matching package/placement data, verified OCI provenance, and a statically
+safe Compose asset are all required.
 """
 
 from __future__ import annotations
@@ -22,8 +23,9 @@ from azazel_fabric.deception_contracts import (
     PlacementPlan,
 )
 
-from azazel_deception.package import PackageValidationError, parse_package
+from azazel_deception.package import parse_package
 from azazel_deception.planner import build_placement_plan
+from azazel_deception.runtime.policy import require_safe_compose
 from azazel_deception.runtime.state import RuntimeStateStore
 
 
@@ -59,6 +61,12 @@ class DockerComposeAdapter:
         if package.runtime_requirements.runtime_adapter != self.adapter_id:
             raise RuntimeGateError("package requires a different runtime adapter")
         return package
+
+    def validate_runtime_policy(self) -> None:
+        try:
+            require_safe_compose(self.compose_file)
+        except (OSError, ValueError) as exc:
+            raise RuntimeGateError(f"runtime isolation policy failed: {exc}") from exc
 
     def plan_deployment(
         self,
@@ -162,6 +170,7 @@ class DockerComposeAdapter:
 
         self._assert_activation_binding(package, placement, decision)
         self._assert_verified_images(package)
+        self.validate_runtime_policy()
 
         existing = self.state.read(environment_id)
         if existing and existing.get("state") not in {"reset", "terminated", "failed"}:
