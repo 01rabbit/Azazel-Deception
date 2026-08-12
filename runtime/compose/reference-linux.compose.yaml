@@ -1,6 +1,7 @@
 services:
   intranet-web:
     image: nginx:1.27-alpine
+    user: "101:101"
     read_only: true
     cap_drop:
       - ALL
@@ -11,6 +12,9 @@ services:
     cpus: 0.50
     volumes:
       - ./html:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
     networks:
       - decoy_internal
 
@@ -18,7 +22,7 @@ networks:
   decoy_internal:
     internal: true
 
-# Bootstrap reference only.
+# Phase-1 reference only.
 # No host ports are published and no external network is attached.
-# Edge-approved routing/exposure will be added only after Fabric#9 / Edge#325
-# contracts and safety tests are implemented.
+# Nginx runs as non-root on TCP/8080 with all Linux capabilities dropped.
+# Edge-approved routing/exposure remains outside this Compose asset.
