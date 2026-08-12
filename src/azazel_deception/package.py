@@ -1,19 +1,25 @@
-"""Bootstrap deception-package loading and fail-closed validation.
+"""Canonical deception-package loading and fail-closed validation.
 
-These local shapes are temporary bootstrap data, not a replacement for the
-canonical Azazel-Fabric contracts tracked in Azazel-Fabric#9.
+External/runtime-facing package semantics are owned by
+``azazel_fabric.deception_contracts``.  The original bootstrap-v0.1 shape is
+accepted only as a temporary compatibility input and is normalized immediately
+into the canonical Fabric ``DeceptionPackage`` model.
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
-SUPPORTED_SCHEMA = "deception-package/bootstrap-v0.1"
-SUPPORTED_ARCHITECTURES = {"arm64", "amd64"}
-SUPPORTED_ADAPTERS = {"docker_compose"}
+from azazel_fabric.deception_contracts import DeceptionPackage
+
+CANONICAL_SCHEMA = "deception-package/v0.1"
+BOOTSTRAP_SCHEMA = "deception-package/bootstrap-v0.1"
+SUPPORTED_SCHEMAS = {CANONICAL_SCHEMA, BOOTSTRAP_SCHEMA}
 
 
 class PackageValidationError(ValueError):
@@ -27,64 +33,162 @@ def load_package(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def validate_package(data: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    required = ["schema_version", "package_id", "version", "runtime_requirements", "safety", "components", "deployment_tiers"]
-    for field in required:
-        if field not in data:
-            errors.append(f"missing required field: {field}")
+def _sha(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    if data.get("schema_version") != SUPPORTED_SCHEMA:
-        errors.append(f"unsupported schema_version: {data.get('schema_version')!r}")
+
+def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert the repository's pre-Fabric bootstrap shape into v0.1.
+
+    Generated digest/provenance values are explicitly unverified placeholders;
+    they exist only to preserve dry-run compatibility.  Live activation must
+    reject packages whose ImageManifest ``verified`` flag is false.
+    """
 
     req = data.get("runtime_requirements") or {}
-    archs = set(req.get("architectures") or [])
-    if not archs:
-        errors.append("runtime_requirements.architectures must not be empty")
-    if archs - SUPPORTED_ARCHITECTURES:
-        errors.append(f"unsupported architectures: {sorted(archs - SUPPORTED_ARCHITECTURES)}")
-    adapter = req.get("runtime_adapter")
-    if adapter not in SUPPORTED_ADAPTERS:
-        errors.append(f"unsupported runtime adapter: {adapter!r}")
-
     safety = data.get("safety") or {}
-    if safety.get("outbound_allowed") is not False:
-        errors.append("safety.outbound_allowed must be false in bootstrap profiles")
-    if safety.get("production_access") is not False:
-        errors.append("safety.production_access must be false")
-    if not isinstance(safety.get("max_duration_seconds"), int) or safety.get("max_duration_seconds", 0) <= 0:
-        errors.append("safety.max_duration_seconds must be a positive integer")
+    raw_components = data.get("components") or []
+    components: list[dict[str, Any]] = []
+    for component in raw_components:
+        image = str(component.get("image") or "bootstrap-missing-image")
+        platforms = [
+            {"architecture": arch, "digest": _sha(f"{image}:{arch}:bootstrap")}
+            for arch in req.get("architectures", [])
+            if arch in {"arm64", "amd64"}
+        ]
+        surfaces = []
+        if component.get("container_port"):
+            surfaces.append(
+                {
+                    "surface_id": f"{component.get('id')}-surface",
+                    "protocol": "tcp",
+                    "port": int(component["container_port"]),
+                    "service": str(component.get("exposed_service") or "unknown"),
+                }
+            )
+        components.append(
+            {
+                "component_id": component.get("id"),
+                "required": bool(component.get("required", False)),
+                "image": {
+                    "image": image,
+                    "manifest_digest": _sha(f"{image}:manifest:bootstrap"),
+                    "platforms": platforms,
+                    "provenance_ref": "bootstrap:unverified",
+                    "sbom_ref": "bootstrap:unverified",
+                    "verified": False,
+                },
+                "privileged": False,
+                "host_network": False,
+                "read_only_rootfs": True,
+                "surfaces": surfaces,
+            }
+        )
 
-    components = data.get("components") or []
-    if not isinstance(components, list) or not components:
-        errors.append("components must be a non-empty list")
-    else:
-        ids: set[str] = set()
-        for component in components:
-            if not isinstance(component, dict):
-                errors.append("every component must be a mapping")
-                continue
-            cid = component.get("id")
-            if not cid or cid in ids:
-                errors.append(f"component id must be unique and non-empty: {cid!r}")
-            ids.add(cid)
-            if component.get("privileged") is True:
-                errors.append(f"component {cid!r} may not be privileged")
-            if component.get("host_network") is True:
-                errors.append(f"component {cid!r} may not use host networking")
+    tiers = []
+    for tier_id, tier in (data.get("deployment_tiers") or {}).items():
+        minimum = tier.get("minimum") or {}
+        tiers.append(
+            {
+                "tier_id": tier_id,
+                "minimum": {
+                    "cpu_cores": float(minimum.get("cpu_cores", 1)),
+                    "memory_mb": int(minimum.get("memory_mb", 1)),
+                    "storage_mb": int(minimum.get("storage_mb", 1)),
+                    "max_connections": int(safety.get("max_connections", 100)),
+                    "max_duration_seconds": int(safety.get("max_duration_seconds", 300)),
+                },
+                "include_components": list(tier.get("include") or []),
+            }
+        )
 
-    tiers = data.get("deployment_tiers") or {}
-    if not isinstance(tiers, dict) or not tiers:
-        errors.append("deployment_tiers must be a non-empty mapping")
-
+    narrative = data.get("narrative") or {}
     consistency = data.get("narrative_consistency") or {}
-    if consistency.get("fatal_contradictions"):
-        errors.append("package has unresolved fatal narrative contradictions")
+    minimum_tier = min(tiers, key=lambda item: item["minimum"]["memory_mb"]) if tiers else None
+    minimum = (minimum_tier or {}).get("minimum") or {
+        "cpu_cores": 1,
+        "memory_mb": 1,
+        "storage_mb": 1,
+        "max_connections": 100,
+        "max_duration_seconds": int(safety.get("max_duration_seconds", 300)),
+    }
 
-    return errors
+    return {
+        "schema_version": CANONICAL_SCHEMA,
+        "package_id": data.get("package_id"),
+        "package_version": data.get("version"),
+        "package_digest": _sha(
+            f"bootstrap:{data.get('package_id')}:{data.get('version')}"
+        ),
+        "narrative": {
+            "narrative_id": f"{data.get('package_id')}-narrative",
+            "purpose": narrative.get("purpose") or "bootstrap deception environment",
+            "environment_profile_id": f"{data.get('package_id')}-environment",
+            "synthetic_only": bool(narrative.get("synthetic_only", True)),
+            "locale": narrative.get("locale") or "en-US",
+            "timezone": narrative.get("timezone") or "UTC",
+            "engage_objective": narrative.get("engage_objective"),
+            "engage_approach": narrative.get("engage_approach"),
+            "engage_activities": list(narrative.get("engage_activities") or []),
+        },
+        "runtime_requirements": {
+            "architectures": list(req.get("architectures") or []),
+            "runtime_adapter": req.get("runtime_adapter") or "docker_compose",
+            "minimum": minimum,
+            "kvm_required": bool(req.get("kvm_required", False)),
+            "gpu_required": bool(req.get("gpu_required", False)),
+            "required_runtime_features": [
+                "isolated_network",
+                "resource_limits",
+            ],
+            "required_profile_classes": ["static_linux"],
+        },
+        "safety": {
+            "outbound_allowed": False,
+            "production_access": False,
+            "privileged_containers": False,
+            "host_network": False,
+            "runtime_socket_exposed_to_decoys": False,
+            "edge_control_access_from_decoys": False,
+        },
+        "components": components,
+        "deployment_tiers": tiers,
+        "consistency": {
+            "report_id": f"{data.get('package_id')}-bootstrap-consistency",
+            "fatal_contradictions": list(consistency.get("fatal_contradictions") or []),
+            "warnings": list(consistency.get("warnings") or [])
+            + ["normalized from bootstrap-v0.1; image provenance is unverified"],
+            "waivers": [],
+        },
+        "credentials": [],
+        "signer_ref": "bootstrap:unverified",
+        "signature_ref": "bootstrap:unverified",
+    }
 
 
-def require_valid_package(data: dict[str, Any]) -> None:
-    errors = validate_package(data)
-    if errors:
-        raise PackageValidationError("; ".join(errors))
+def canonical_payload(data: dict[str, Any]) -> dict[str, Any]:
+    schema = data.get("schema_version")
+    if schema == BOOTSTRAP_SCHEMA:
+        return _adapt_bootstrap(data)
+    if schema == CANONICAL_SCHEMA:
+        return data
+    raise PackageValidationError(f"unsupported schema_version: {schema!r}")
+
+
+def parse_package(data: dict[str, Any]) -> DeceptionPackage:
+    try:
+        return DeceptionPackage.model_validate(canonical_payload(data))
+    except ValidationError as exc:
+        raise PackageValidationError(str(exc)) from exc
+
+
+def validate_package(data: dict[str, Any]) -> list[str]:
+    try:
+        parse_package(data)
+    except PackageValidationError as exc:
+        return [str(exc)]
+    return []
+
+
+def require_valid_package(data: dict[str, Any]) -> DeceptionPackage:
+    return parse_package(data)
