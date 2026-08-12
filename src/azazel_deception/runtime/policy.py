@@ -20,14 +20,23 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _is_non_root_user(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if not text or text == "root":
+        return False
+    uid = text.split(":", 1)[0]
+    return uid not in {"0", "root"}
+
+
 def validate_compose_policy(path: str | Path) -> list[str]:
     """Return deterministic safety violations for a Docker Compose document.
 
     Phase-1 AZ-06 attacker-facing Compose assets must be isolated by
     construction. Published host ports are forbidden because exposure/routing
-    belongs to Edge. Runtime sockets, host namespaces, and local image builds
-    are forbidden: live workloads must resolve to package-declared verified OCI
-    images.
+    belongs to Edge. Runtime sockets, host namespaces, local image builds,
+    root execution, and capability re-addition are forbidden.
     """
 
     document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
@@ -57,6 +66,8 @@ def validate_compose_policy(path: str | Path) -> list[str]:
             violations.append(prefix + "local_build_forbidden")
         if not config.get("image"):
             violations.append(prefix + "image_missing")
+        if not _is_non_root_user(config.get("user")):
+            violations.append(prefix + "non_root_user_required")
         if config.get("privileged") is True:
             violations.append(prefix + "privileged")
         if config.get("network_mode") == "host":
@@ -75,6 +86,8 @@ def validate_compose_policy(path: str | Path) -> list[str]:
         cap_drop = {str(item).upper() for item in _as_list(config.get("cap_drop"))}
         if "ALL" not in cap_drop:
             violations.append(prefix + "cap_drop_all_missing")
+        if _as_list(config.get("cap_add")):
+            violations.append(prefix + "capability_readdition_forbidden")
         security_opt = {str(item).lower() for item in _as_list(config.get("security_opt"))}
         if "no-new-privileges:true" not in security_opt:
             violations.append(prefix + "no_new_privileges_missing")
