@@ -15,12 +15,15 @@ jobs:
           - label: linux-amd64
             runner: ubuntu-24.04
             expected_arch: amd64
+            local_plan: true
           - label: linux-arm64
             runner: ubuntu-24.04-arm
             expected_arch: arm64
+            local_plan: true
           - label: macos-arm64
             runner: macos-15
             expected_arch: arm64
+            local_plan: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +50,20 @@ jobs:
           assert payload["authority"] == "descriptive_only", payload
           PY
       - run: python -m azazel_deception validate examples/packages/municipal-linux-v1/package.yaml
-      - run: python -m azazel_deception plan examples/packages/municipal-linux-v1/package.yaml --tier lite
+      - name: Plan against native Docker-capable host
+        if: ${{ matrix.local_plan }}
+        run: python -m azazel_deception plan examples/packages/municipal-linux-v1/package.yaml --tier lite
+      - name: Confirm macOS host remains descriptive without Linux runtime
+        if: ${{ !matrix.local_plan }}
+        run: |
+          python - <<'PY'
+          from azazel_deception.capabilities import detect_host_capabilities
+          payload = detect_host_capabilities()
+          assert payload["architecture"] == "arm64"
+          assert payload["kvm_available"] is False
+          assert payload["network_features"]["network_namespace"] is False
+          assert payload["network_features"]["nftables"] is False
+          PY
 
   native-compose-smoke:
     name: native-compose-smoke (${{ matrix.label }})
