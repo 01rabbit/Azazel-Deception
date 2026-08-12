@@ -3,9 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from azazel_deception.package import load_package
+from azazel_deception.package import load_package, parse_package
 from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.compose import DockerComposeAdapter, RuntimeGateError
+from azazel_fabric.deception_contracts import PlacementPlan
 
 PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
 COMPOSE = Path("runtime/compose/reference-linux.compose.yaml")
@@ -85,6 +86,15 @@ def _verified_reference_package():
     return package
 
 
+def _verified_lite_only_package():
+    package = load_package(PACKAGE)
+    for component in package["components"]:
+        component["image"]["verified"] = component["component_id"] == "intranet-web"
+    package["signer_ref"] = "test:trusted-signer"
+    package["signature_ref"] = "test:trusted-signature"
+    return package
+
+
 def _accept_all_test_verifier(package):
     return True
 
@@ -108,6 +118,17 @@ def test_unverified_oci_blocks_live_before_docker(tmp_path):
         adapter.activate_environment("env-1", package, plan, _decision(package, plan))
     assert adapter.collect_status("env-1")["state"] == "absent"
     assert adapter.state.decision_consumed("edge-decision-1") is False
+
+
+def test_unselected_optional_component_does_not_block_lite_verification():
+    raw = _verified_lite_only_package()
+    plan_data = build_placement_plan(raw, _host(), "lite", edge_decision_id="edge-decision-1")
+    package = parse_package(raw)
+    plan = PlacementPlan.model_validate(plan_data)
+    DockerComposeAdapter._assert_verified_images(package, plan)
+    assert plan.component_ids == ["intranet-web"]
+    optional = next(item for item in package.components if item.component_id == "evidence-sidecar-placeholder")
+    assert optional.image.verified is False
 
 
 def test_verified_flag_alone_is_not_trusted_package_verification(tmp_path):
@@ -167,9 +188,10 @@ def test_live_allocation_requires_explicit_bandwidth_budget(tmp_path):
 def test_compose_image_must_match_package_manifest(tmp_path):
     package = _verified_reference_package()
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
+    expected_image = package["components"][0]["image"]["image"]
     compose = tmp_path / "compose.yaml"
     compose.write_text(
-        COMPOSE.read_text(encoding="utf-8").replace("nginx:1.27-alpine", "nginx:latest"),
+        COMPOSE.read_text(encoding="utf-8").replace(expected_image, "nginx:latest"),
         encoding="utf-8",
     )
     adapter = DockerComposeAdapter(
