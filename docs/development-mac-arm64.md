@@ -20,6 +20,11 @@ On the local Mac with Docker Desktop or a compatible Linux-container runtime:
 - CPU, memory, and PID limits
 - machine-readable portability evidence
 
+The reference image is pulled by immutable GHCR digest. If the package is not
+publicly readable in your local Docker session, authenticate to `ghcr.io`
+before running the preflight using a GitHub token with package read access.
+Do not store that token in the repository or pass it as a Docker build argument.
+
 Run:
 
 ```bash
@@ -42,7 +47,15 @@ The `Portability` workflow runs the same contract/package tests natively on:
 - `ubuntu-24.04-arm` (`arm64`)
 - `macos-15` (`arm64` host logic)
 
-The two Linux jobs also start the same isolated reference Compose runtime and archive a JSON evidence artifact. This provides continuous native Linux ARM64/AMD64 software portability evidence without requiring a physical AMD64 workstation.
+The two Linux jobs also start the same digest-pinned isolated reference Compose
+runtime and archive a JSON evidence artifact. This provides continuous native
+Linux ARM64/AMD64 software portability evidence without requiring a physical
+AMD64 workstation.
+
+The `Reference Image` workflow separately builds the reference web image on
+native Linux AMD64 and ARM64 runners, combines the platform manifests into one
+immutable multi-architecture OCI manifest, and records GitHub/Sigstore build
+provenance.
 
 ## What this does not prove
 
