@@ -3,7 +3,8 @@
 Live execution is disabled by default. Enabling it still does not grant runtime
 authority: an accepted, unexpired, one-shot Azazel-Edge decision, matching
 package/placement data, package-bounded resource budget, verified OCI
-provenance, and a statically safe Compose asset are all required.
+provenance, a trusted package-verification hook, and a statically safe Compose
+asset exactly bound to the package manifest are all required.
 """
 
 from __future__ import annotations
@@ -23,9 +24,15 @@ from azazel_fabric.deception_contracts import (
     PlacementPlan,
 )
 
+from azazel_deception.capabilities import detect_host_capabilities
 from azazel_deception.package import parse_package
 from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.policy import require_safe_compose
+from azazel_deception.runtime.preflight import (
+    PackageVerifier,
+    require_compose_package_binding,
+    require_trusted_package_verifier,
+)
 from azazel_deception.runtime.state import RuntimeStateStore
 
 
@@ -45,9 +52,11 @@ class DockerComposeAdapter:
         compose_file: str | Path,
         state_root: str | Path,
         live_enabled: bool | None = None,
+        package_verifier: PackageVerifier | None = None,
     ) -> None:
         self.compose_file = Path(compose_file)
         self.state = RuntimeStateStore(state_root)
+        self.package_verifier = package_verifier
         if live_enabled is None:
             live_enabled = os.environ.get("AZAZEL_DECEPTION_LIVE", "0") == "1"
         self.live_enabled = bool(live_enabled)
@@ -55,6 +64,9 @@ class DockerComposeAdapter:
     @property
     def adapter_id(self) -> str:
         return "docker_compose"
+
+    def inspect_capabilities(self) -> dict[str, Any]:
+        return detect_host_capabilities()
 
     def validate_package(self, raw_package: dict[str, Any]) -> DeceptionPackage:
         package = parse_package(raw_package)
@@ -67,6 +79,17 @@ class DockerComposeAdapter:
             require_safe_compose(self.compose_file)
         except (OSError, ValueError) as exc:
             raise RuntimeGateError(f"runtime isolation policy failed: {exc}") from exc
+
+    def validate_live_preflight(
+        self,
+        package: DeceptionPackage,
+        placement: PlacementPlan,
+    ) -> None:
+        try:
+            require_trusted_package_verifier(package, self.package_verifier)
+            require_compose_package_binding(self.compose_file, package, placement)
+        except (OSError, ValueError) as exc:
+            raise RuntimeGateError(f"live preflight failed: {exc}") from exc
 
     def plan_deployment(
         self,
@@ -174,6 +197,44 @@ class DockerComposeAdapter:
         if not consumed:
             raise RuntimeGateError(f"Edge decision already consumed: {decision_id}")
 
+    def _record_failure(
+        self,
+        *,
+        environment_id: str,
+        package_id: str,
+        node_id: str,
+        decision_id: str,
+        stage: str,
+        error: Exception,
+    ) -> None:
+        observed_at = _utcnow()
+        state = {
+            "environment_id": environment_id,
+            "state": "failed",
+            "package_id": package_id,
+            "node_id": node_id,
+            "decision_id": decision_id,
+            "failure_stage": stage,
+            "failure_type": error.__class__.__name__,
+            "failed_at": observed_at.isoformat(),
+        }
+        self.state.write(environment_id, state)
+        event = EnvironmentEvent(
+            event_id=f"{environment_id}-{stage}-failure",
+            environment_id=environment_id,
+            package_id=package_id,
+            node_id=node_id,
+            event_type="failure",
+            observed_at=observed_at,
+            evidence_refs=[],
+            metadata={
+                "decision_id": decision_id,
+                "stage": stage,
+                "error_type": error.__class__.__name__,
+            },
+        )
+        self.state.append_evidence(environment_id, event.model_dump(mode="json"))
+
     def activate_environment(
         self,
         environment_id: str,
@@ -196,13 +257,26 @@ class DockerComposeAdapter:
         self._assert_activation_binding(package, placement, decision)
         self._assert_verified_images(package)
         self.validate_runtime_policy()
+        self.validate_live_preflight(package, placement)
 
         existing = self.state.read(environment_id)
         if existing and existing.get("state") not in {"reset", "terminated", "failed"}:
             raise RuntimeGateError("environment already has non-terminal runtime state")
 
         self._consume_decision(decision.decision_id, "activation", environment_id)
-        self._compose(environment_id, "up", "-d", "--remove-orphans")
+        try:
+            self._compose(environment_id, "up", "-d", "--remove-orphans")
+        except RuntimeGateError as exc:
+            self._record_failure(
+                environment_id=environment_id,
+                package_id=package.package_id,
+                node_id=placement.node_id,
+                decision_id=decision.decision_id,
+                stage="activation",
+                error=exc,
+            )
+            raise
+
         event = EnvironmentEvent(
             event_id=f"{environment_id}-activated",
             environment_id=environment_id,
@@ -252,7 +326,18 @@ class DockerComposeAdapter:
             return {"environment_id": environment_id, "status": "absent"}
 
         if self.live_enabled and current.get("state") == "active":
-            self._compose(environment_id, "down", "--remove-orphans")
+            try:
+                self._compose(environment_id, "down", "--remove-orphans")
+            except RuntimeGateError as exc:
+                self._record_failure(
+                    environment_id=environment_id,
+                    package_id=str(current.get("package_id") or "unknown"),
+                    node_id=str(current.get("node_id") or "unknown"),
+                    decision_id=decision.decision_id,
+                    stage="termination",
+                    error=exc,
+                )
+                raise
 
         current["state"] = "terminated"
         current["terminated_at"] = _utcnow().isoformat()
