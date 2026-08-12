@@ -25,7 +25,9 @@ def validate_compose_policy(path: str | Path) -> list[str]:
 
     Phase-1 AZ-06 attacker-facing Compose assets must be isolated by
     construction. Published host ports are forbidden because exposure/routing
-    belongs to Edge. Runtime sockets and host namespaces are forbidden.
+    belongs to Edge. Runtime sockets, host namespaces, and local image builds
+    are forbidden: live workloads must resolve to package-declared verified OCI
+    images.
     """
 
     document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
@@ -51,6 +53,10 @@ def validate_compose_policy(path: str | Path) -> list[str]:
         if not isinstance(config, dict):
             violations.append(prefix + "config_not_mapping")
             continue
+        if config.get("build") is not None:
+            violations.append(prefix + "local_build_forbidden")
+        if not config.get("image"):
+            violations.append(prefix + "image_missing")
         if config.get("privileged") is True:
             violations.append(prefix + "privileged")
         if config.get("network_mode") == "host":
