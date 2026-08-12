@@ -53,16 +53,16 @@ components:
   - component_id: intranet-web
     required: true
     image:
-      image: ghcr.io/01rabbit/azazel-deception-reference-web@sha256:7278ffb05be16e2f93501c938a26cad371b92a8a8452368dd05c8ea23888433e
-      manifest_digest: sha256:7278ffb05be16e2f93501c938a26cad371b92a8a8452368dd05c8ea23888433e
+      image: ghcr.io/01rabbit/azazel-deception-reference-web@sha256:c187c4ce32a244a45848bceee7ce9aa5c0146bd42e5dc0e03844e56083e2a043
+      manifest_digest: sha256:c187c4ce32a244a45848bceee7ce9aa5c0146bd42e5dc0e03844e56083e2a043
       platforms:
         - architecture: arm64
-          digest: sha256:9da14c58e96c42b9a87b2a8bb05a361d4be882b9863c0e3c1dd155789f0816ca
+          digest: sha256:a91395cf3b1de630917d05387585fe2783609f859961f5813c99e0ff7e89e6da
         - architecture: amd64
-          digest: sha256:c17897ab9f1d2d0b09901283adb738b6c4e39af339600ad73b5466f2f85eecaf
-      provenance_ref: github-attestation:40366214
-      sbom_ref: pending:reference-web-sbom
-      verified: false
+          digest: sha256:c5a93538074b500e3bc4e1b6387655aeb23c31e68e42c4370822cd92fc3160f8
+      provenance_ref: github-attestation:40368115
+      sbom_ref: oci-attached-spdx:ghcr.io/01rabbit/azazel-deception-reference-web@sha256:c187c4ce32a244a45848bceee7ce9aa5c0146bd42e5dc0e03844e56083e2a043
+      verified: true
     privileged: false
     host_network: false
     read_only_rootfs: true
@@ -116,10 +116,10 @@ consistency:
   report_id: municipal-linux-v1-consistency
   fatal_contradictions: []
   warnings:
-    - intranet-web uses real native ARM64/AMD64 OCI digests and GitHub/Sigstore build provenance, but SBOM and package-level signature verification remain pending; live activation must keep verified=false
+    - intranet-web is pinned to an immutable multi-architecture OCI manifest with GitHub/Sigstore provenance and attached SPDX SBOMs; live execution still requires a trusted package-level attestation verifier
     - evidence-sidecar-placeholder remains an unverified optional bootstrap component and is not included in the lite tier
   waivers: []
 
 credentials: []
-signer_ref: bootstrap:unverified
-signature_ref: bootstrap:unsigned
+signer_ref: github:01rabbit/Azazel-Deception/.github/workflows/reference-package.yml
+signature_ref: github-attestation:detached-slsa-provenance
