@@ -16,6 +16,7 @@ def test_published_port_is_rejected(tmp_path):
 services:
   decoy:
     image: example.invalid/decoy:1
+    user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -41,6 +42,7 @@ def test_runtime_socket_and_external_network_are_rejected(tmp_path):
 services:
   decoy:
     image: example.invalid/decoy:1
+    user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -69,6 +71,7 @@ def test_host_namespaces_and_privileged_are_rejected(tmp_path):
 services:
   decoy:
     image: example.invalid/decoy:1
+    user: "1000:1000"
     privileged: true
     network_mode: host
     pid: host
@@ -98,6 +101,7 @@ services:
   decoy:
     image: example.invalid/decoy:1
     build: .
+    user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -113,3 +117,31 @@ networks:
         encoding="utf-8",
     )
     assert "service:decoy:local_build_forbidden" in validate_compose_policy(compose)
+
+
+def test_root_user_and_capability_readdition_are_rejected(tmp_path):
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        """
+services:
+  decoy:
+    image: example.invalid/decoy:1
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    networks: [decoy_internal]
+networks:
+  decoy_internal:
+    internal: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    violations = validate_compose_policy(compose)
+    assert "service:decoy:non_root_user_required" in violations
+    assert "service:decoy:capability_readdition_forbidden" in violations
