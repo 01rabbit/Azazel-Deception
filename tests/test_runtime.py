@@ -7,6 +7,7 @@ from azazel_deception.package import load_package, parse_package
 from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.compose import DockerComposeAdapter, RuntimeGateError
 from azazel_fabric.deception_contracts import PlacementPlan
+from azazel_fabric.deception_integrity import package_content_digest
 
 PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
 COMPOSE = Path("runtime/compose/reference-linux.compose.yaml")
@@ -77,22 +78,20 @@ def _termination(decision_id="edge-terminate-1", *, expired=False):
     }
 
 
-def _verified_reference_package():
-    package = load_package(PACKAGE)
-    for component in package["components"]:
-        component["image"]["verified"] = True
-    package["signer_ref"] = "test:trusted-signer"
-    package["signature_ref"] = "test:trusted-signature"
+def _redigest(package):
+    package["package_digest"] = package_content_digest(package)
     return package
+
+
+def _verified_reference_package():
+    return load_package(PACKAGE)
 
 
 def _verified_lite_only_package():
     package = load_package(PACKAGE)
     for component in package["components"]:
         component["image"]["verified"] = component["component_id"] == "intranet-web"
-    package["signer_ref"] = "test:trusted-signer"
-    package["signature_ref"] = "test:trusted-signature"
-    return package
+    return _redigest(package)
 
 
 def _accept_all_test_verifier(package):
@@ -112,6 +111,8 @@ def test_live_activation_is_disabled_by_default(tmp_path):
 
 def test_unverified_oci_blocks_live_before_docker(tmp_path):
     package = load_package(PACKAGE)
+    package["components"][0]["image"]["verified"] = False
+    _redigest(package)
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
     adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=True)
     with pytest.raises(RuntimeGateError, match="verified OCI provenance"):
