@@ -6,7 +6,6 @@ import pytest
 from azazel_deception.package import load_package
 from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.compose import DockerComposeAdapter, RuntimeGateError
-from azazel_fabric.testing import make_deception_package
 
 PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
 COMPOSE = Path("runtime/compose/reference-linux.compose.yaml")
@@ -77,8 +76,17 @@ def _termination(decision_id="edge-terminate-1", *, expired=False):
     }
 
 
-def _verified_package():
-    return make_deception_package(verified=True).model_dump(mode="json")
+def _verified_reference_package():
+    package = load_package(PACKAGE)
+    for component in package["components"]:
+        component["image"]["verified"] = True
+    package["signer_ref"] = "test:trusted-signer"
+    package["signature_ref"] = "test:trusted-signature"
+    return package
+
+
+def _accept_all_test_verifier(package):
+    return True
 
 
 def test_live_activation_is_disabled_by_default(tmp_path):
@@ -102,18 +110,31 @@ def test_unverified_oci_blocks_live_before_docker(tmp_path):
     assert adapter.state.decision_consumed("edge-decision-1") is False
 
 
-def test_placement_must_bind_same_edge_decision(tmp_path):
-    package = _verified_package()
-    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="different-decision")
+def test_verified_flag_alone_is_not_trusted_package_verification(tmp_path):
+    package = _verified_reference_package()
+    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
     adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=True)
+    with pytest.raises(RuntimeGateError, match="trusted package verifier is not configured"):
+        adapter.activate_environment("env-1", package, plan, _decision(package, plan))
+    assert adapter.state.decision_consumed("edge-decision-1") is False
+
+
+def test_placement_must_bind_same_edge_decision(tmp_path):
+    package = _verified_reference_package()
+    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="different-decision")
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
     with pytest.raises(RuntimeGateError, match="placement is not bound"):
         adapter.activate_environment("env-1", package, plan, _decision(package, plan))
 
 
 def test_edge_budget_cannot_exceed_package_maximum(tmp_path):
-    package = _verified_package()
+    package = _verified_reference_package()
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
-    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=True)
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
     decision = _decision(package, plan, memory_mb=99999)
     with pytest.raises(RuntimeGateError, match="exceeds package maximum"):
         adapter.activate_environment("env-1", package, plan, decision)
@@ -121,28 +142,53 @@ def test_edge_budget_cannot_exceed_package_maximum(tmp_path):
 
 
 def test_edge_budget_must_cover_selected_tier_minimum(tmp_path):
-    package = _verified_package()
+    package = _verified_reference_package()
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
-    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=True)
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
     decision = _decision(package, plan, cpu_cores=1, memory_mb=512)
     with pytest.raises(RuntimeGateError, match="below selected tier minimum"):
         adapter.activate_environment("env-1", package, plan, decision)
 
 
 def test_live_allocation_requires_explicit_bandwidth_budget(tmp_path):
-    package = _verified_package()
+    package = _verified_reference_package()
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
-    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=True)
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
     decision = _decision(package, plan)
     decision["budget"]["bandwidth_kbps"] = None
     with pytest.raises(RuntimeGateError, match="exceeds package maximum"):
         adapter.activate_environment("env-1", package, plan, decision)
 
 
-def test_activation_decision_is_one_shot(tmp_path, monkeypatch):
-    package = _verified_package()
+def test_compose_image_must_match_package_manifest(tmp_path):
+    package = _verified_reference_package()
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
-    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=True)
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        COMPOSE.read_text(encoding="utf-8").replace("nginx:1.27-alpine", "nginx:latest"),
+        encoding="utf-8",
+    )
+    adapter = DockerComposeAdapter(
+        compose,
+        tmp_path / "state",
+        live_enabled=True,
+        package_verifier=_accept_all_test_verifier,
+    )
+    with pytest.raises(RuntimeGateError, match="compose image does not match package manifest"):
+        adapter.activate_environment("env-1", package, plan, _decision(package, plan))
+    assert adapter.state.decision_consumed("edge-decision-1") is False
+
+
+def test_activation_decision_is_one_shot(tmp_path, monkeypatch):
+    package = _verified_reference_package()
+    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
     monkeypatch.setattr(adapter, "_compose", lambda *args, **kwargs: None)
 
     decision = _decision(package, plan)
@@ -157,6 +203,27 @@ def test_activation_decision_is_one_shot(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeGateError, match="already consumed"):
         adapter.activate_environment("env-1", package, plan, decision)
+
+
+def test_activation_failure_consumes_decision_and_records_failure(tmp_path, monkeypatch):
+    package = _verified_reference_package()
+    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
+
+    def fail_compose(*args, **kwargs):
+        raise RuntimeGateError("synthetic compose failure")
+
+    monkeypatch.setattr(adapter, "_compose", fail_compose)
+    with pytest.raises(RuntimeGateError, match="synthetic compose failure"):
+        adapter.activate_environment("env-1", package, plan, _decision(package, plan))
+
+    assert adapter.state.decision_consumed("edge-decision-1") is True
+    state = adapter.collect_status("env-1")
+    assert state["state"] == "failed"
+    assert state["failure_stage"] == "activation"
+    assert adapter.export_evidence("env-1")[-1]["event_type"] == "failure"
 
 
 def test_expired_termination_decision_is_rejected(tmp_path):
