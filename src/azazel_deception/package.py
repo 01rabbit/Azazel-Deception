@@ -41,7 +41,7 @@ def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
     """Convert the repository's pre-Fabric bootstrap shape into v0.1.
 
     Generated digest/provenance values are explicitly unverified placeholders;
-    they exist only to preserve dry-run compatibility.  Live activation must
+    they exist only to preserve dry-run compatibility. Live activation must
     reject packages whose ImageManifest ``verified`` flag is false.
     """
 
@@ -113,13 +113,20 @@ def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
         "max_duration_seconds": int(safety.get("max_duration_seconds", 300)),
     }
 
+    tier_minima = [item["minimum"] for item in tiers] or [minimum]
+    maximum_budget = {
+        "cpu_cores": max(float(item["cpu_cores"]) for item in tier_minima),
+        "memory_mb": max(int(item["memory_mb"]) for item in tier_minima),
+        "storage_mb": max(int(item["storage_mb"]) for item in tier_minima),
+        "max_connections": max(int(item["max_connections"]) for item in tier_minima),
+        "max_duration_seconds": max(int(item["max_duration_seconds"]) for item in tier_minima),
+    }
+
     return {
         "schema_version": CANONICAL_SCHEMA,
         "package_id": data.get("package_id"),
         "package_version": data.get("version"),
-        "package_digest": _sha(
-            f"bootstrap:{data.get('package_id')}:{data.get('version')}"
-        ),
+        "package_digest": _sha(f"bootstrap:{data.get('package_id')}:{data.get('version')}"),
         "narrative": {
             "narrative_id": f"{data.get('package_id')}-narrative",
             "purpose": narrative.get("purpose") or "bootstrap deception environment",
@@ -137,12 +144,10 @@ def _adapt_bootstrap(data: dict[str, Any]) -> dict[str, Any]:
             "minimum": minimum,
             "kvm_required": bool(req.get("kvm_required", False)),
             "gpu_required": bool(req.get("gpu_required", False)),
-            "required_runtime_features": [
-                "isolated_network",
-                "resource_limits",
-            ],
+            "required_runtime_features": ["isolated_network", "resource_limits"],
             "required_profile_classes": ["static_linux"],
         },
+        "maximum_budget": maximum_budget,
         "safety": {
             "outbound_allowed": False,
             "production_access": False,
