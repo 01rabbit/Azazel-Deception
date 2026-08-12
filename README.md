@@ -10,7 +10,7 @@ It materializes bounded, coherent deception environments from versioned packages
 
 ## Status
 
-**Bootstrap / Phase 0-1.** The repository now exists, but live engagement remains disabled by default until the shared Azazel-Fabric deception-environment contracts and Edge integration gates are stable.
+**Bootstrap / Phase 0-1.** The repository exists and the AZ-06 designation is ratified, but live engagement remains disabled by default until the shared Azazel-Fabric deception-environment contracts and Edge integration gates are stable.
 
 Initial portability target:
 
@@ -20,6 +20,8 @@ Initial portability target:
 - static Linux deception package
 - deterministic package validation, lifecycle, evidence, and reset semantics
 - no GPU, KVM, Kubernetes, or online LLM requirement
+
+Current bootstrap already provides host capability discovery, fail-closed package validation, deterministic non-executing placement planning, a synthetic Linux reference package, isolated Compose assets, CI, tests, and safety/integration documentation.
 
 ## Responsibility boundary
 
@@ -109,11 +111,11 @@ Approved packages remain fully executable with **no LLM available at runtime**. 
 - evidence-preserving deterministic teardown and reset
 - Docker socket, Edge control APIs, and host privileged interfaces are never exposed to attacker-facing workloads
 
-See `docs/safety-model.md`.
+See [`docs/safety-model.md`](docs/safety-model.md).
 
 ## Bootstrap CLI
 
-The initial CLI is intentionally non-executing. It can report host capabilities and validate a reference package while the Fabric and Edge activation contracts stabilize.
+The initial CLI is intentionally non-executing. It reports host capabilities, validates the bootstrap reference package, and produces a deterministic placement plan while the Fabric and Edge activation contracts stabilize.
 
 ```bash
 python -m azazel_deception capabilities
@@ -121,7 +123,7 @@ python -m azazel_deception validate examples/packages/municipal-linux-v1/package
 python -m azazel_deception plan examples/packages/municipal-linux-v1/package.yaml
 ```
 
-The `plan` command produces a deterministic placement plan only. It does not start containers.
+The `plan` command produces a descriptive placement plan only. It does not start containers and carries no activation authority.
 
 ## Repository layout
 
@@ -129,11 +131,15 @@ The `plan` command produces a deterministic placement plan only. It does not sta
 src/azazel_deception/       bootstrap control-plane code
 runtime/compose/            reference Docker Compose adapter assets
 examples/packages/          deterministic reference deception packages
-docs/                       architecture, safety, contracts, roadmap
+docs/                       architecture, safety, contracts, integration, roadmap, traceability
 tests/                      deterministic bootstrap tests
 ```
 
-## Cross-repository dependencies
+## Design traceability
+
+The requirements inherited from the Azazel-series issues are mapped in [`docs/source-traceability.md`](docs/source-traceability.md). This records which doctrine, Fabric, Edge, Knowledge, and Gadget issues produced each AZ-06 responsibility and safety invariant.
+
+Primary cross-repository dependencies:
 
 - Doctrine / parent: `01rabbit/Azazel#61`
 - Engage system model: `01rabbit/Azazel#60`
@@ -142,18 +148,31 @@ tests/                      deterministic bootstrap tests
 - Effectiveness analysis: `01rabbit/Azazel-Knowledge#58` and `#52`
 - Gadget fixed-profile compatibility boundary: `01rabbit/Azazel-Gadget#17` and `#16`
 
+## Implementation trackers
+
+| Issue | Purpose |
+|---|---|
+| [#1](https://github.com/01rabbit/Azazel-Deception/issues/1) | Replace bootstrap schemas with canonical Azazel-Fabric deception contracts |
+| [#2](https://github.com/01rabbit/Azazel-Deception/issues/2) | Implement feature-disabled Docker Compose lifecycle adapter |
+| [#3](https://github.com/01rabbit/Azazel-Deception/issues/3) | Prove one signed reference package on ARM64 and AMD64 |
+| [#4](https://github.com/01rabbit/Azazel-Deception/issues/4) | Build isolation, evidence, termination, and deterministic reset test harness |
+| [#5](https://github.com/01rabbit/Azazel-Deception/issues/5) | Implement AZ-01 Edge shadow/replay integration before live activation |
+| [#6](https://github.com/01rabbit/Azazel-Deception/issues/6) | Phase 2 coherent narrative, honey artifacts, credentials, personas, and finite-state transitions |
+
+The intended implementation order is **#1 → #2/#3/#4 → #5 → live Phase 1 gate → #6**. Live exposure must not be enabled merely because a runtime adapter can start containers.
+
 ## Phase order
 
-1. Phase 0 — contracts, threat model, isolation, golden fixtures, dry-run only.
-2. Phase 1 — one static coherent Linux environment on ARM64 and AMD64.
-3. Phase 2 — deterministic personas and Edge-approved finite-state transitions.
+1. Phase 0 — canonical contracts, threat model, isolation, provenance, golden fixtures, dry-run only.
+2. Phase 1 — one static coherent Linux environment on ARM64 and AMD64, behind explicit Edge authorization and feature gates.
+3. Phase 2 — coherent honey artifacts, decoy-only credentials, deterministic personas, and Edge-approved finite-state transitions.
 4. Phase 3 — Knowledge effectiveness loop, advisory-only.
 5. Phase 4 — additional Linux/Windows/OT/IoT environment classes after isolation and reset are proven.
 
 ## Claims
 
-Use `MITRE Engage-aligned` or `Engage-informed`. This project does not claim MITRE certification or guaranteed attacker belief. Measure and report observed interaction, observed reaction, and measured outcomes.
+Use `MITRE Engage-aligned` or `Engage-informed`. This project does not claim MITRE certification or guaranteed attacker belief. Measure and report **observed interaction**, **observed reaction**, and **measured outcomes**.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).
