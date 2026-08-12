@@ -33,6 +33,14 @@ runtime_requirements:
   required_profile_classes:
     - static_linux
 
+maximum_budget:
+  cpu_cores: 4
+  memory_mb: 4096
+  storage_mb: 8192
+  max_connections: 500
+  max_duration_seconds: 600
+  bandwidth_kbps: 10000
+
 safety:
   outbound_allowed: false
   production_access: false
