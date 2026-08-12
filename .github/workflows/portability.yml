@@ -67,5 +67,13 @@ jobs:
           uname -a
           docker --version
           docker compose version
-      - name: Start and inspect isolated reference runtime
+      - name: Start, inspect, and record isolated reference runtime
+        env:
+          AZ06_EVIDENCE_OUT: artifacts/portability/${{ matrix.label }}.json
         run: bash scripts/dev/reference-compose-smoke.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: az06-portability-${{ matrix.label }}
+          path: artifacts/portability/${{ matrix.label }}.json
+          if-no-files-found: error
+          retention-days: 30
