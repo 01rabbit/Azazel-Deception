@@ -88,3 +88,28 @@ networks:
     assert "service:decoy:host_pid_namespace" in violations
     assert "service:decoy:host_ipc_namespace" in violations
     assert "service:decoy:host_user_namespace" in violations
+
+
+def test_local_build_is_rejected_even_when_image_is_present(tmp_path):
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        """
+services:
+  decoy:
+    image: example.invalid/decoy:1
+    build: .
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    networks: [decoy_internal]
+networks:
+  decoy_internal:
+    internal: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    assert "service:decoy:local_build_forbidden" in validate_compose_policy(compose)
