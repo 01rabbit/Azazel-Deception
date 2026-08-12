@@ -69,7 +69,7 @@ components:
     surfaces:
       - surface_id: intranet-web-http
         protocol: tcp
-        port: 80
+        port: 8080
         service: http
 
   - component_id: evidence-sidecar-placeholder
