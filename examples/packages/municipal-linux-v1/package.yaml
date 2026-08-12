@@ -30,7 +30,7 @@ components:
     privileged: false
     host_network: false
     exposed_service: http
-    container_port: 8080
+    container_port: 80
   - id: evidence-sidecar-placeholder
     required: false
     image: alpine:3.20
