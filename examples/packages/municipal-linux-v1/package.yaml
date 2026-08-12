@@ -1,59 +1,116 @@
-schema_version: deception-package/bootstrap-v0.1
+schema_version: deception-package/v0.1
 package_id: municipal-linux-v1
-version: 0.1.0
+package_version: 0.2.0
+package_digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+
 narrative:
-  purpose: "reference static municipal-office Linux decoy"
-  organization_type: municipal-office
-  department: public-health
-  host_role: intranet-web
+  narrative_id: municipal-public-health-v1
+  purpose: reference static municipal-office Linux decoy
+  environment_profile_id: municipal-public-health
+  synthetic_only: true
   locale: ja-JP
   timezone: Asia/Tokyo
-  synthetic_only: true
+  engage_objective: collect
+  engage_approach: channel
+  engage_activities:
+    - expose_allowlisted_decoy
+    - record_interaction
+
 runtime_requirements:
   architectures: [arm64, amd64]
   runtime_adapter: docker_compose
+  minimum:
+    cpu_cores: 2
+    memory_mb: 1024
+    storage_mb: 2048
+    max_connections: 100
+    max_duration_seconds: 300
   kvm_required: false
   gpu_required: false
+  required_runtime_features:
+    - isolated_network
+    - resource_limits
+  required_profile_classes:
+    - static_linux
+
 safety:
   outbound_allowed: false
   production_access: false
-  max_duration_seconds: 300
-  cpu_limit: 1.0
-  memory_mb: 512
-  storage_mb: 1024
-  max_connections: 100
+  privileged_containers: false
+  host_network: false
+  runtime_socket_exposed_to_decoys: false
+  edge_control_access_from_decoys: false
+
 components:
-  - id: intranet-web
+  - component_id: intranet-web
     required: true
-    image: nginx:1.27-alpine
-    image_provenance: bootstrap-unpinned-reference
+    image:
+      image: nginx:1.27-alpine
+      manifest_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      platforms:
+        - architecture: arm64
+          digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        - architecture: amd64
+          digest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      provenance_ref: bootstrap:unverified-nginx
+      sbom_ref: bootstrap:unverified-nginx
+      verified: false
     privileged: false
     host_network: false
-    exposed_service: http
-    container_port: 80
-  - id: evidence-sidecar-placeholder
+    read_only_rootfs: true
+    surfaces:
+      - surface_id: intranet-web-http
+        protocol: tcp
+        port: 80
+        service: http
+
+  - component_id: evidence-sidecar-placeholder
     required: false
-    image: alpine:3.20
-    image_provenance: bootstrap-unpinned-reference
+    image:
+      image: alpine:3.20
+      manifest_digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+      platforms:
+        - architecture: arm64
+          digest: sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+        - architecture: amd64
+          digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      provenance_ref: bootstrap:unverified-alpine
+      sbom_ref: bootstrap:unverified-alpine
+      verified: false
     privileged: false
     host_network: false
+    read_only_rootfs: true
+    surfaces: []
+
 deployment_tiers:
-  lite:
+  - tier_id: lite
     minimum:
       cpu_cores: 2
       memory_mb: 1024
       storage_mb: 2048
-    include: [intranet-web]
-  standard:
+      max_connections: 100
+      max_duration_seconds: 300
+    include_components:
+      - intranet-web
+
+  - tier_id: standard
     minimum:
       cpu_cores: 4
       memory_mb: 4096
       storage_mb: 8192
-    include: [intranet-web, evidence-sidecar-placeholder]
-narrative_consistency:
+      max_connections: 500
+      max_duration_seconds: 300
+    include_components:
+      - intranet-web
+      - evidence-sidecar-placeholder
+
+consistency:
+  report_id: municipal-linux-v1-consistency
   fatal_contradictions: []
   warnings:
-    - "bootstrap package: OCI digests/signatures become mandatory when Fabric#9 contract is released"
-activation:
-  requires_edge_decision: true
-  bootstrap_live_execution: false
+    - reference image digests, provenance, and SBOM references are bootstrap placeholders; live activation must reject this package until they are verified
+  waivers: []
+
+credentials: []
+signer_ref: bootstrap:unverified
+signature_ref: bootstrap:unsigned
