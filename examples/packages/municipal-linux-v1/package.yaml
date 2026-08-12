@@ -1,7 +1,7 @@
 schema_version: deception-package/v0.1
 package_id: municipal-linux-v1
 package_version: 0.2.0
-package_digest: sha256:4e3f5e9d134d16292dbe89dbda78e53228ddfa350da9ff08420d5acbb69afe64
+package_digest: sha256:baca710857669a1901afaf18f32c44f7b0d18a913c11dad6030a40aa8785de53
 
 narrative:
   narrative_id: municipal-public-health-v1
