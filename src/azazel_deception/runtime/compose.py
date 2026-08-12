@@ -148,7 +148,10 @@ class DockerComposeAdapter:
             raise RuntimeGateError("activation decision tier binding mismatch")
         if placement.edge_decision_id != decision.decision_id:
             raise RuntimeGateError("placement is not bound to the activation decision")
-        if not decision.budget.is_within(package.maximum_budget):
+        if not decision.budget.is_within(
+            package.maximum_budget,
+            require_bounded_bandwidth=True,
+        ):
             raise RuntimeGateError("Edge decision budget exceeds package maximum budget")
 
         tiers = {tier.tier_id: tier for tier in package.deployment_tiers}
