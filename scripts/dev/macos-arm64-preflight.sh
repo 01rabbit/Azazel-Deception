@@ -58,7 +58,9 @@ PY
 python -m azazel_deception validate examples/packages/municipal-linux-v1/package.yaml
 python -m azazel_deception plan examples/packages/municipal-linux-v1/package.yaml --tier lite >/dev/null
 
+export AZ06_EVIDENCE_OUT="artifacts/portability/macos-arm64-local.json"
 bash scripts/dev/reference-compose-smoke.sh
 
 echo "[az06] Apple Silicon development preflight passed"
+echo "[az06] evidence: $AZ06_EVIDENCE_OUT"
 echo "[az06] note: this proves local ARM64 development/runtime semantics, not Linux HIL isolation certification"
