@@ -1,12 +1,37 @@
 from pathlib import Path
 
+import yaml
+
+from azazel_deception.package import load_package, parse_package
 from azazel_deception.runtime.policy import validate_compose_policy
 
 REFERENCE = Path("runtime/compose/reference-linux.compose.yaml")
+PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
 
 
 def test_reference_compose_is_fail_closed_safe():
     assert validate_compose_policy(REFERENCE) == []
+
+
+def test_reference_compose_image_is_immutable_digest_pinned():
+    document = yaml.safe_load(REFERENCE.read_text(encoding="utf-8"))
+    for name, service in document["services"].items():
+        image = service.get("image", "")
+        assert "@sha256:" in image, (name, image)
+        assert not image.endswith(":latest"), (name, image)
+        assert service.get("build") is None, name
+
+
+def test_reference_compose_image_exactly_matches_package_manifest():
+    package = parse_package(load_package(PACKAGE))
+    document = yaml.safe_load(REFERENCE.read_text(encoding="utf-8"))
+    package_images = {c.component_id: c.image.image for c in package.components}
+    for name, service in document["services"].items():
+        assert name in package_images, name
+        assert service["image"] == package_images[name], name
+        # The pinned manifest digest must be embedded in the live image reference.
+        component = next(c for c in package.components if c.component_id == name)
+        assert component.image.manifest_digest.split(":", 1)[1] in service["image"], name
 
 
 def test_published_port_is_rejected(tmp_path):

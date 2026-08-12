@@ -121,9 +121,16 @@ The initial CLI is intentionally non-executing. It reports host capabilities, va
 python -m azazel_deception capabilities
 python -m azazel_deception validate examples/packages/municipal-linux-v1/package.yaml
 python -m azazel_deception plan examples/packages/municipal-linux-v1/package.yaml
+
+# Canonical package integrity (representation-invariant, normalize-first):
+python -m azazel_deception digest examples/packages/municipal-linux-v1/package.yaml
+python -m azazel_deception canonical-payload examples/packages/municipal-linux-v1/package.yaml
+python -m azazel_deception seal examples/packages/municipal-linux-v1/package.yaml   # emits sealed package to stdout
 ```
 
 The `plan` command produces a descriptive placement plan only. It does not start containers and carries no activation authority.
+
+`package_digest` is a deterministic semantic content digest computed from the normalized Fabric model (never the raw YAML), so the same meaning hashes identically across raw dict, model, YAML reload, and JSON round-trip. `seal` stamps that digest at authoring time and never rewrites the source in place; `validate` verifies it fail-closed. The detached `signature_ref` locator is excluded from the digest so an attestation reference can be rotated after signing.
 
 ## Repository layout
 

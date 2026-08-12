@@ -8,6 +8,9 @@ On the local Mac with Docker Desktop or a compatible Linux-container runtime:
 
 - native ARM64 Python/package/contract behavior
 - canonical Fabric package validation
+- canonical package content digest, seal, and payload reconstruction
+  (`make digest`, `make seal`, `make canonical-payload`), which are
+  representation-invariant and computed on the Mac without any Linux runtime
 - host capability discovery
 - deterministic `lite` placement against the Docker runtime
 - native ARM64 reference-container startup inside the Linux VM
