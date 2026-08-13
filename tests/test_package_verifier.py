@@ -54,3 +54,76 @@ def test_github_attestation_verifier_returns_false_on_cli_failure(monkeypatch):
         lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="verification failed"),
     )
     assert GitHubAttestationPackageVerifier()(_package()) is False
+
+
+def test_github_attestation_verifier_rejects_non_attestation_signature_ref():
+    package = _package().model_copy(
+        update={"signature_ref": "s3://attacker-bucket/detached.sig"}
+    )
+    assert GitHubAttestationPackageVerifier()(package) is False
+
+
+def test_github_attestation_verifier_returns_false_on_subprocess_exception(monkeypatch):
+    monkeypatch.setattr(verifier_module.shutil, "which", lambda command: "/usr/bin/gh")
+
+    def boom(*args, **kwargs):
+        raise OSError("gh crashed")
+
+    monkeypatch.setattr(verifier_module.subprocess, "run", boom)
+    assert GitHubAttestationPackageVerifier()(_package()) is False
+
+
+def test_github_attestation_verifier_returns_false_on_timeout(monkeypatch):
+    import subprocess as real_subprocess
+
+    monkeypatch.setattr(verifier_module.shutil, "which", lambda command: "/usr/bin/gh")
+
+    def timeout(*args, **kwargs):
+        raise real_subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+    monkeypatch.setattr(verifier_module.subprocess, "run", timeout)
+    assert GitHubAttestationPackageVerifier()(_package()) is False
+
+
+def test_github_attestation_verifier_package_id_cannot_escape_tempdir(monkeypatch, tmp_path):
+    # A malicious, self-sealed package with a traversal package_id must not write
+    # the signing artifact outside the managed temp directory.
+    from azazel_deception.package import calculate_package_digest
+
+    escape_target = tmp_path / "ESCAPED.signing.json"
+    raw = load_package(PACKAGE)
+    raw["package_id"] = f"../../../../../../../../../..{escape_target.with_suffix('')}"
+    raw["package_digest"] = calculate_package_digest(raw)  # re-seal over the tampered id
+    package = parse_package(raw)
+
+    monkeypatch.setattr(verifier_module.shutil, "which", lambda command: "/usr/bin/gh")
+    written = {}
+
+    def fake_run(command, **kwargs):
+        artifact = Path(command[3])
+        written["path"] = artifact
+        written["exists_during"] = artifact.exists()
+        return SimpleNamespace(returncode=1, stdout="verification failed")
+
+    monkeypatch.setattr(verifier_module.subprocess, "run", fake_run)
+    assert GitHubAttestationPackageVerifier()(package) is False
+    # The artifact stayed inside a temp dir with a fixed basename, and nothing
+    # leaked to the attacker-chosen absolute/relative destination.
+    assert written["path"].name == "package.signing.json"
+    assert not escape_target.exists()
+
+
+def test_github_attestation_verifier_rejects_content_digest_mismatch(monkeypatch):
+    # A package whose declared digest does not match its content must be rejected
+    # before any external attestation call is made.
+    monkeypatch.setattr(verifier_module.shutil, "which", lambda command: "/usr/bin/gh")
+    called = {"run": False}
+
+    def spy(*args, **kwargs):
+        called["run"] = True
+        return SimpleNamespace(returncode=0, stdout="verified")
+
+    monkeypatch.setattr(verifier_module.subprocess, "run", spy)
+    tampered = _package().model_copy(update={"package_digest": "sha256:" + "0" * 64})
+    assert GitHubAttestationPackageVerifier()(tampered) is False
+    assert called["run"] is False

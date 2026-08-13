@@ -1,0 +1,86 @@
+name: Reference Package Attestation
+
+# Signs the canonical *semantic* payload of the reference deception package, not
+# the YAML bytes. The payload is reconstructed deterministically from the
+# normalized Fabric model (`azazel-deception canonical-payload`), so whitespace,
+# key order, and quoting never enter the signed semantics. The detached
+# attestation locator (`signature_ref`) is excluded from the payload by design.
+#
+# GitHubAttestationPackageVerifier pins this workflow file as the signer
+# identity: 01rabbit/Azazel-Deception/.github/workflows/reference-package.yml
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - examples/packages/municipal-linux-v1/package.yaml
+      - src/azazel_deception/package.py
+      - src/azazel_deception/cli.py
+      - .github/workflows/reference-package.yml
+  workflow_dispatch:
+
+# Least privilege: read the repo, mint an OIDC token, write the attestation.
+# No package/registry write, no secret signing key is ever stored in the repo.
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+env:
+  PACKAGE: examples/packages/municipal-linux-v1/package.yaml
+
+jobs:
+  attest-reference-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e '.[dev]'
+
+      - name: Fail-closed package validation
+        run: python -m azazel_deception validate "$PACKAGE"
+
+      - name: Reconstruct canonical signing payload
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/package
+          python -m azazel_deception canonical-payload "$PACKAGE" \
+            --output artifacts/package/reference-package.canonical.json
+
+      - name: Verify canonical SHA-256 equals declared package_digest
+        run: |
+          set -euo pipefail
+          declared="$(python -m azazel_deception digest "$PACKAGE")"
+          payload_sha="sha256:$(sha256sum artifacts/package/reference-package.canonical.json | awk '{print $1}')"
+          echo "declared package_digest : $declared"
+          echo "canonical payload sha256: $payload_sha"
+          if [ "$declared" != "$payload_sha" ]; then
+            echo "::error::package_digest does not match canonical payload SHA-256" >&2
+            exit 1
+          fi
+
+      - name: Generate GitHub artifact attestation for the canonical payload
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/package/reference-package.canonical.json
+
+      - name: Verify the attestation fails closed with pinned signer identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify artifacts/package/reference-package.canonical.json \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/reference-package.yml" \
+            --deny-self-hosted-runners
+
+      - name: Publish canonical payload as evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-package-canonical-payload
+          path: artifacts/package/reference-package.canonical.json
+          if-no-files-found: error
+          retention-days: 90

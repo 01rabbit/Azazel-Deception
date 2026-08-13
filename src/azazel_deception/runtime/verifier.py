@@ -58,7 +58,10 @@ class GitHubAttestationPackageVerifier:
         payload = canonical_package_signing_bytes(package)
         try:
             with tempfile.TemporaryDirectory(prefix="az06-package-verify-") as temp_dir:
-                artifact = Path(temp_dir) / f"{package.package_id}.signing.json"
+                # Fixed basename: package_id is attacker-influenced (self-sealed)
+                # and unconstrained, so it must never form the write path or it
+                # becomes a pre-verification arbitrary-file-write primitive.
+                artifact = Path(temp_dir) / "package.signing.json"
                 artifact.write_bytes(payload)
                 command = [
                     executable,

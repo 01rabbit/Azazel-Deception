@@ -3,11 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from azazel_deception.package import load_package, parse_package
+from azazel_deception.package import (
+    calculate_package_digest,
+    load_package,
+    parse_package,
+)
 from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.compose import DockerComposeAdapter, RuntimeGateError
 from azazel_fabric.deception_contracts import PlacementPlan
-from azazel_fabric.deception_integrity import package_content_digest
 
 PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
 COMPOSE = Path("runtime/compose/reference-linux.compose.yaml")
@@ -79,7 +82,9 @@ def _termination(decision_id="edge-terminate-1", *, expired=False):
 
 
 def _redigest(package):
-    package["package_digest"] = package_content_digest(package)
+    # Re-seal through the canonical normalize-then-hash pipeline. Hashing the raw
+    # mapping directly would drift from the digest validation recomputes.
+    package["package_digest"] = calculate_package_digest(package)
     return package
 
 

@@ -22,9 +22,12 @@ below is satisfied for the target release/profile.
 - [x] Local Compose `build:` is forbidden for attacker-facing workloads.
 - [x] Reference web image has real immutable multi-architecture OCI and per-platform digests.
 - [x] Reference web image has GitHub/Sigstore build-provenance attestation.
+- [x] `package_digest` is a normalize-first, representation-invariant canonical content digest; declared digest is sealed by tooling and re-derived in tests, not hand-copied.
+- [x] Package attestation signs the reconstructed canonical payload bytes (not YAML); `GitHubAttestationPackageVerifier` pins repo + signer-workflow identity, denies self-hosted runners, and fails closed on missing `gh`, CLI failure, subprocess error/timeout, bad `signature_ref` scheme, or content-digest mismatch.
 - [ ] Reference web image has reviewed SBOM attachment/reference.
-- [ ] Production package signing/verifier implementation is implemented and tested.
-- [ ] Package-level digest/signature fields are canonicalized and no longer bootstrap placeholders.
+- [ ] Reference-package attestation workflow has an executed green run on GitHub-hosted runners (implemented; not yet run).
+- [ ] Production package signing/verifier is proven end-to-end against a real GitHub attestation (unit-tested against a mocked `gh` today).
+- [ ] Attestation signer identity is pinned to a git ref/tag as well as the workflow path (`gh attestation verify --signer-workflow` matches any ref of that workflow; consider `--source-ref`/`--cert-identity` before live).
 
 ## Isolation
 

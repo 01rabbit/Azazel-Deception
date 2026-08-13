@@ -28,6 +28,49 @@ Implemented canonical boundaries include:
 The former `bootstrap-v0.1` package shape is compatibility input only and is
 normalized immediately into the canonical model.
 
+### Canonical package content digest
+
+`package_digest` is a deterministic *semantic* content digest with exactly one
+definition:
+
+```text
+raw mapping / bootstrap shape
+    -> Fabric DeceptionPackage normalization (types, defaults, ordering)
+    -> canonical semantic payload (package_digest + signature_ref removed)
+    -> deterministic JSON serialization
+    -> SHA-256
+```
+
+Because the digest is always computed from the *normalized model*, the same
+semantic content yields an identical digest whether it arrives as a raw dict, a
+Pydantic model dump, a YAML reload, or a JSON round-trip. Hashing an
+un-normalized raw mapping is deliberately never done: integer/float coercion
+(`2` vs `2.0`), omitted-vs-default fields (`bandwidth_kbps`), and key ordering
+would otherwise cause digest drift. This closed the earlier integrity failure
+where the declared digest was derived from the raw YAML while validation
+recomputed it from the normalized model.
+
+Sealing and validation are separated:
+
+- `seal_package_digest` (authoring time) computes and stamps the digest and
+  never mutates its input.
+- `parse_package` / `validate_package` (runtime) only verify that a declared
+  digest matches the recomputed canonical digest, fail-closed, and never
+  silently repair a bad digest.
+
+`package_digest` binds every semantic field — narrative, runtime requirements,
+maximum budget, safety invariants, image manifest/platform digests,
+provenance/SBOM references, deployment tiers, credentials, and `signer_ref` —
+except the digest field itself and the detached `signature_ref` locator. The
+detached locator can be rotated after signing without changing the content
+digest. Dangerous mutations that Fabric encodes as closed literals
+(`synthetic_only`, `outbound_allowed`, `production_access`, tier identity) fail
+closed at the schema layer before the digest check.
+
+CLI/Make surface: `azazel-deception digest`, `azazel-deception canonical-payload`,
+and `azazel-deception seal` (seal emits to stdout/`--output`; it never rewrites
+the source package in place).
+
 ### Portable placement and development hosts
 
 - `arm64` and `amd64` are canonical Phase-1 architectures.
@@ -50,19 +93,26 @@ source on native GitHub-hosted Linux runners for both architectures.
 
 Current Phase-1 immutable image metadata:
 
-- multi-architecture manifest: `sha256:7278ffb05be16e2f93501c938a26cad371b92a8a8452368dd05c8ea23888433e`
-- AMD64 manifest: `sha256:c17897ab9f1d2d0b09901283adb738b6c4e39af339600ad73b5466f2f85eecaf`
-- ARM64 manifest: `sha256:9da14c58e96c42b9a87b2a8bb05a361d4be882b9863c0e3c1dd155789f0816ca`
-- GitHub build-provenance attestation: repository attestation `40366214`
-- source workflow run: `31640821303`
+This metadata must match the digests pinned in
+`examples/packages/municipal-linux-v1/package.yaml` and
+`runtime/compose/reference-linux.compose.yaml`:
+
+- multi-architecture manifest: `sha256:c187c4ce32a244a45848bceee7ce9aa5c0146bd42e5dc0e03844e56083e2a043`
+- AMD64 manifest: `sha256:c5a93538074b500e3bc4e1b6387655aeb23c31e68e42c4370822cd92fc3160f8`
+- ARM64 manifest: `sha256:a91395cf3b1de630917d05387585fe2783609f859961f5813c99e0ff7e89e6da`
+- GitHub build-provenance attestation: `github-attestation:40368115`
+- SBOM: OCI-attached SPDX per platform (`oci-attached-spdx:…@sha256:c187c4ce…`)
 
 The provenance attestation is signed through the public Sigstore service and
 recorded by GitHub. The package and Compose reference the immutable
 multi-architecture digest rather than a mutable tag.
 
-**SBOM and package-level signing are still pending**, therefore the canonical
-`ImageManifest.verified` state deliberately remains `false` and live activation
-remains blocked.
+The reference web component is marked `ImageManifest.verified: true`, justified
+by the attached per-platform SPDX SBOM and GitHub/Sigstore build provenance.
+This alone does **not** authorize live activation: an injected trusted
+`PackageVerifier` (the GitHub attestation verifier) must still accept the
+package, and package-level SBOM-policy verification remains pending. The
+optional `evidence-sidecar-placeholder` (alpine) stays `verified: false`.
 
 ### Runtime lifecycle
 
@@ -84,9 +134,11 @@ Live activation has multiple independent gates:
 10. The selected Package component set must exactly match the Compose service set, and every Compose `image:` must match the package manifest.
 11. The Edge decision ID is consumed atomically and cannot be reused.
 
-Current `main` does **not** provide an activatable reference decoy because the
-reference package still lacks SBOM-backed image verification and a production
-package-signature verifier.
+Current `main` does **not** provide an activatable reference decoy: although the
+reference image now carries attached SPDX SBOMs and build provenance and a
+canonical package-attestation verifier exists, an executed end-to-end attestation
+run and reviewed SBOM-policy verification are still pending, and live activation
+stays default-off behind the trusted `PackageVerifier` gate.
 
 ### Static runtime isolation policy
 
@@ -116,6 +168,18 @@ attacker-flow channeling/routing.
 
 - `ImageManifest.verified` is treated as evidence state, not cryptographic proof.
 - Live runtime requires an injected trusted `PackageVerifier`.
+- `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
+  payload bytes (not YAML) against a GitHub artifact attestation. It pins the
+  repository and signer-workflow identity, passes `--deny-self-hosted-runners`,
+  fails closed when `gh` is absent, on any CLI non-zero exit, on subprocess
+  exception/timeout, on a non-`github-attestation:` `signature_ref`, and on a
+  content-digest mismatch before any external call. A `verified: true` field in
+  attestation output alone never grants trust.
+- The `Reference Package Attestation` workflow
+  (`.github/workflows/reference-package.yml`) reconstructs the canonical
+  payload, asserts its SHA-256 equals `package_digest`, produces a GitHub
+  artifact attestation over those exact bytes, and re-verifies with the pinned
+  signer identity. No secret signing key is stored in the repository.
 - Local Compose services cannot add an unmanifested workload or omit a selected workload.
 - Local Compose image substitution fails closed.
 - Local image builds are forbidden in attacker-facing Compose assets.
@@ -146,8 +210,7 @@ The following are still open gates:
 
 - no stable Azazel-Fabric `v0.5.x` release exists yet; stable remains `v0.4.0`
 - SBOM generation/attachment and reviewed SBOM verification for the reference image
-- production package signing and trusted package-signature verifier
-- canonical calculation/replacement of the current package-level bootstrap digest/signature fields
+- an executed end-to-end run of the reference-package attestation workflow on GitHub (the verifier and workflow are implemented and unit-tested; a green attestation run on GitHub-hosted runners is still pending)
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
 - resource-exhaustion and runtime-daemon/host failure injection in an appropriate Linux lab
@@ -170,9 +233,9 @@ at the required assurance level.
 
 ## Current issue map
 
-- `Azazel-Deception#1` — canonical Fabric contract migration: code integrated; stable tag/migration exit still open
+- `Azazel-Deception#1` — canonical Fabric contract migration: code integrated; canonical package content digest now normalize-first and representation-invariant; stable tag/migration exit still open
 - `Azazel-Deception#2` — lifecycle adapter: code integrated and heavily gated; live lab/signing validation still open
-- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; SBOM/package signing verification still open
+- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; canonical package attestation verifier + workflow integrated and unit-tested; SBOM verification and an executed attestation run still open
 - `Azazel-Deception#4` — native Compose isolation evidence + static reset/anti-replay tests integrated; HIL/failure injection still open
 - `Azazel-Deception#5` — Edge shadow evaluator integrated; authenticated E2E shadow transport still open
 - `Azazel-Deception#6` — intentionally not started
