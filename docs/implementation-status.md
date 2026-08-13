@@ -129,10 +129,11 @@ Live activation has multiple independent gates:
 5. The Edge allocation must fit inside the package maximum resource budget.
 6. Live allocation must contain an explicit finite bandwidth budget.
 7. Every **placement-selected** component OCI manifest must be `verified=true`; unselected optional components do not incorrectly block a smaller tier.
-8. The Compose asset must pass the static isolation policy.
-9. A trusted package-verification hook must be configured and accept the package; `verified=true` metadata alone is insufficient.
-10. The selected Package component set must exactly match the Compose service set, and every Compose `image:` must match the package manifest.
-11. The Edge decision ID is consumed atomically and cannot be reused.
+8. Every verified selected component must carry a real (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`.
+9. The Compose asset must pass the static isolation policy.
+10. A trusted package-verification hook must be configured and accept the package; `verified=true` metadata alone is insufficient.
+11. The selected Package component set must exactly match the Compose service set, and every Compose `image:` must match the package manifest.
+12. The Edge decision ID is consumed atomically and cannot be reused.
 
 Current `main` does **not** provide an activatable reference decoy: although the
 reference image now carries attached SPDX SBOMs and build provenance and a
@@ -167,6 +168,11 @@ attacker-flow channeling/routing.
 ### Supply-chain/runtime binding
 
 - `ImageManifest.verified` is treated as evidence state, not cryptographic proof.
+- A component selected to run and marked `verified=true` must carry a real
+  (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`; the live
+  activation gate fails closed otherwise, before Docker is touched. This binds
+  the `verified` flag to actual supply-chain references but is not itself
+  cryptographic SBOM verification.
 - Live runtime requires an injected trusted `PackageVerifier`.
 - `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
   payload bytes (not YAML) against a GitHub artifact attestation. It pins the

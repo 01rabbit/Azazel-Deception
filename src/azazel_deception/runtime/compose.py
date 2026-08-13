@@ -31,6 +31,7 @@ from azazel_deception.runtime.policy import require_safe_compose
 from azazel_deception.runtime.preflight import (
     PackageVerifier,
     require_compose_package_binding,
+    require_supply_chain_backed_images,
     require_trusted_package_verifier,
 )
 from azazel_deception.runtime.state import RuntimeStateStore
@@ -79,6 +80,16 @@ class DockerComposeAdapter:
             require_safe_compose(self.compose_file)
         except (OSError, ValueError) as exc:
             raise RuntimeGateError(f"runtime isolation policy failed: {exc}") from exc
+
+    def validate_supply_chain(
+        self,
+        package: DeceptionPackage,
+        placement: PlacementPlan,
+    ) -> None:
+        try:
+            require_supply_chain_backed_images(package, placement)
+        except (OSError, ValueError) as exc:
+            raise RuntimeGateError(f"supply-chain policy failed: {exc}") from exc
 
     def validate_live_preflight(
         self,
@@ -273,6 +284,7 @@ class DockerComposeAdapter:
 
         self._assert_activation_binding(package, placement, decision)
         self._assert_verified_images(package, placement)
+        self.validate_supply_chain(package, placement)
         self.validate_runtime_policy()
         self.validate_live_preflight(package, placement)
 

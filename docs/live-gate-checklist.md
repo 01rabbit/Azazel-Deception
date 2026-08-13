@@ -26,7 +26,8 @@ below is satisfied for the target release/profile.
 - [x] Package attestation signs the reconstructed canonical payload bytes (not YAML); `GitHubAttestationPackageVerifier` pins repo + signer-workflow identity, denies self-hosted runners, and fails closed on missing `gh`, CLI failure, subprocess error/timeout, bad `signature_ref` scheme, or content-digest mismatch.
 - [x] The `Reference Package Attestation` workflow has an executed green run on GitHub-hosted runners: it reconstructs the canonical payload, asserts its SHA-256 equals `package_digest`, generates a keyless Sigstore attestation, and re-verifies it with `gh attestation verify --deny-self-hosted-runners` against the pinned signer workflow (run `31660034975`).
 - [x] The package attestation verifier is proven end-to-end against a real GitHub attestation (the in-workflow `gh attestation verify` step, not a mock, passes).
-- [ ] Reference web image has reviewed SBOM attachment/reference (SBOM is attached and referenced; policy-level SBOM verification in the trusted verifier is still pending).
+- [x] A verified selected component must carry a real (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`; the live gate fails closed otherwise.
+- [ ] Cryptographic SBOM verification (validating the OCI-attached SPDX SBOM signature/contents, not just the reference) is performed by the trusted verifier.
 - [ ] Attestation signer identity is pinned to a git ref/tag as well as the workflow path (`gh attestation verify --signer-workflow` matches any ref of that workflow; consider `--source-ref`/`--cert-identity` before live).
 
 ## Isolation
