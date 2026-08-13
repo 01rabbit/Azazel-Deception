@@ -179,7 +179,11 @@ attacker-flow channeling/routing.
   (`.github/workflows/reference-package.yml`) reconstructs the canonical
   payload, asserts its SHA-256 equals `package_digest`, produces a GitHub
   artifact attestation over those exact bytes, and re-verifies with the pinned
-  signer identity. No secret signing key is stored in the repository.
+  signer identity. No secret signing key is stored in the repository. This
+  workflow has an executed green run on `main` (run `31660034975`): the
+  in-workflow `gh attestation verify` against the real Sigstore attestation
+  passed, so the package-attestation path is proven end-to-end, not only in
+  mocked unit tests.
 - Local Compose services cannot add an unmanifested workload or omit a selected workload.
 - Local Compose image substitution fails closed.
 - Local image builds are forbidden in attacker-facing Compose assets.
@@ -209,8 +213,7 @@ or other execution logic.
 The following are still open gates:
 
 - no stable Azazel-Fabric `v0.5.x` release exists yet; stable remains `v0.4.0`
-- SBOM generation/attachment and reviewed SBOM verification for the reference image
-- an executed end-to-end run of the reference-package attestation workflow on GitHub (the verifier and workflow are implemented and unit-tested; a green attestation run on GitHub-hosted runners is still pending)
+- reviewed SBOM-policy verification in the trusted verifier (SBOM is attached to the image and referenced by the package; the verifier does not yet enforce an SBOM policy)
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
 - resource-exhaustion and runtime-daemon/host failure injection in an appropriate Linux lab
@@ -235,7 +238,7 @@ at the required assurance level.
 
 - `Azazel-Deception#1` — canonical Fabric contract migration: code integrated; canonical package content digest now normalize-first and representation-invariant; stable tag/migration exit still open
 - `Azazel-Deception#2` — lifecycle adapter: code integrated and heavily gated; live lab/signing validation still open
-- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; canonical package attestation verifier + workflow integrated and unit-tested; SBOM verification and an executed attestation run still open
+- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; canonical package attestation verifier + workflow integrated, unit-tested, and proven by an executed green attestation run on `main`; reviewed SBOM-policy verification still open
 - `Azazel-Deception#4` — native Compose isolation evidence + static reset/anti-replay tests integrated; HIL/failure injection still open
 - `Azazel-Deception#5` — Edge shadow evaluator integrated; authenticated E2E shadow transport still open
 - `Azazel-Deception#6` — intentionally not started
