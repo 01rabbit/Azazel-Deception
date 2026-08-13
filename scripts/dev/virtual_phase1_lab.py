@@ -54,6 +54,10 @@ from azazel_deception.runtime.compose import (  # noqa: E402
     DockerComposeAdapter,
     RuntimeGateError,
 )
+from azazel_deception.runtime.transport import (  # noqa: E402
+    HmacDecisionAuthenticator,
+    sign_decision,
+)
 from azazel_deception.runtime.verifier import (  # noqa: E402
     GitHubAttestationPackageVerifier,
     OciAttachedSbomVerifier,
@@ -140,12 +144,17 @@ def run_virtual_lab(
     *,
     run_id: str = "fixed",
     tier: str = "lite",
+    decision_key: str | None = None,
 ) -> dict[str, Any]:
     """Drive the full software lifecycle and return a structured evidence report.
 
     ``run_id`` makes each run independent: it suffixes the environment and Edge
     decision IDs, so the one-shot decision ledger stays honest per run while the
     lab remains re-runnable against a persistent state root.
+
+    When ``decision_key`` is set, the synthetic Edge decisions are HMAC-signed so
+    the adapter's decision authenticator (which must share the key) exercises the
+    authenticated-transport gate.
 
     Raises ``RuntimeGateError`` (fail-closed) if any authority/isolation/supply
     -chain gate rejects the run.
@@ -155,6 +164,9 @@ def run_virtual_lab(
     activation_id = f"{ACTIVATION_DECISION_ID}-{run_id}"
     termination_id = f"{TERMINATION_DECISION_ID}-{run_id}"
 
+    def _maybe_sign(decision: dict[str, Any]) -> dict[str, Any]:
+        return sign_decision(decision, decision_key) if decision_key else decision
+
     package = parse_package(raw_package)
     placement = build_placement_plan(
         raw_package,
@@ -163,7 +175,9 @@ def run_virtual_lab(
         edge_decision_id=activation_id,
     )
 
-    activation = build_activation_decision(raw_package, placement, decision_id=activation_id)
+    activation = _maybe_sign(
+        build_activation_decision(raw_package, placement, decision_id=activation_id)
+    )
     activate_result = adapter.activate_environment(
         environment_id, raw_package, placement, activation
     )
@@ -174,7 +188,9 @@ def run_virtual_lab(
 
     status = adapter.collect_status(environment_id)
 
-    termination = build_termination_decision(environment_id, decision_id=termination_id)
+    termination = _maybe_sign(
+        build_termination_decision(environment_id, decision_id=termination_id)
+    )
     terminate_result = adapter.terminate_environment(environment_id, termination)
     reset_result = adapter.reset_environment(environment_id)
     evidence = adapter.export_evidence(environment_id)
@@ -241,6 +257,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also verify the OCI-attached SPDX SBOM of every verified image",
     )
+    parser.add_argument(
+        "--authenticate",
+        action="store_true",
+        help=(
+            "exercise the authenticated Edge-transport gate: HMAC-sign the "
+            "synthetic decisions with a per-run key the adapter shares"
+        ),
+    )
     args = parser.parse_args(argv)
 
     raw_package = load_package(args.package)
@@ -255,12 +279,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         verifier = GitHubAttestationPackageVerifier()
 
+    decision_key = uuid.uuid4().hex if args.authenticate else None
     adapter = DockerComposeAdapter(
         args.compose,
         args.state_root,
         live_enabled=True,  # explicit, lab-scoped; no default is changed
         package_verifier=verifier,
         sbom_verifier=OciAttachedSbomVerifier() if args.sbom_verify else None,
+        decision_authenticator=(
+            HmacDecisionAuthenticator(decision_key) if decision_key else None
+        ),
     )
 
     environment_id = f"az06-lab-env-{args.run_id}"
@@ -271,18 +299,19 @@ def main(argv: list[str] | None = None) -> int:
             host,
             run_id=args.run_id,
             tier=args.tier,
+            decision_key=decision_key,
         )
     except RuntimeGateError as exc:
         # Fail-closed: a rejected gate is the correct, expected outcome to report.
         sys.stderr.write(f"[az06] virtual lab fail-closed: {exc}\n")
         # Best-effort cleanup so a rejected run leaves no lingering container.
         try:
-            adapter.terminate_environment(
-                environment_id,
-                build_termination_decision(
-                    environment_id, decision_id=f"{TERMINATION_DECISION_ID}-cleanup-{args.run_id}"
-                ),
+            cleanup = build_termination_decision(
+                environment_id, decision_id=f"{TERMINATION_DECISION_ID}-cleanup-{args.run_id}"
             )
+            if decision_key:
+                cleanup = sign_decision(cleanup, decision_key)
+            adapter.terminate_environment(environment_id, cleanup)
             adapter.reset_environment(environment_id)
         except Exception:
             pass

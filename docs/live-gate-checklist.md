@@ -69,7 +69,8 @@ not the native software portability gate.
 ## Operational integration
 
 - [x] Edge shadow/replay evaluator exists and cannot enforce.
-- [ ] Authenticated Edge-to-AZ-06 transport exists.
+- [x] AZ-06 verifies Edge-decision authenticity before acting: `HmacDecisionAuthenticator` checks an HMAC-SHA256 signature over the canonical decision bytes, fail-closed, wired as an optional injected gate on both activation and termination (the key is operator-supplied, never stored in the repo). Together with the one-shot decision ledger and decision expiry this gives authenticity + anti-replay + freshness.
+- [ ] A full networked, mutually-authenticated Edge-to-AZ-06 transport with heartbeat/state reconciliation exists (the verification side is implemented; the transport, key distribution, and the authenticator being mandatory for every live decision remain open).
 - [ ] End-to-end Edge decision -> AZ-06 activation -> evidence -> termination -> reset is demonstrated in a lab.
 - [x] An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an environment without an Edge decision, is fail-safe (records intent as evidence, surfaces a stop failure as `kill_switch_failed`), and a descriptive status/health surface (`health()` / `azazel-deception runtime-status`) reports adapter config and runtime state without authorizing anything. End-to-end operator control against a live/attacker-modified container is still an HIL item.
 

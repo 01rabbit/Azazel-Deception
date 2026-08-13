@@ -37,6 +37,12 @@ from azazel_deception.runtime.preflight import (
     require_trusted_package_verifier,
 )
 from azazel_deception.runtime.state import RuntimeStateStore
+from azazel_deception.runtime.transport import (
+    DEFAULT_SIGNATURE_FIELD,
+    DecisionAuthenticationError,
+    DecisionAuthenticator,
+    require_authenticated_decision,
+)
 
 
 class RuntimeGateError(RuntimeError):
@@ -57,14 +63,29 @@ class DockerComposeAdapter:
         live_enabled: bool | None = None,
         package_verifier: PackageVerifier | None = None,
         sbom_verifier: SbomVerifier | None = None,
+        decision_authenticator: DecisionAuthenticator | None = None,
     ) -> None:
         self.compose_file = Path(compose_file)
         self.state = RuntimeStateStore(state_root)
         self.package_verifier = package_verifier
         self.sbom_verifier = sbom_verifier
+        self.decision_authenticator = decision_authenticator
         if live_enabled is None:
             live_enabled = os.environ.get("AZAZEL_DECEPTION_LIVE", "0") == "1"
         self.live_enabled = bool(live_enabled)
+
+    def _authenticate_decision(self, decision_data: dict[str, Any]) -> None:
+        try:
+            require_authenticated_decision(decision_data, self.decision_authenticator)
+        except DecisionAuthenticationError as exc:
+            raise RuntimeGateError(str(exc)) from exc
+
+    @staticmethod
+    def _decision_contract(decision_data: dict[str, Any]) -> dict[str, Any]:
+        # The transport signature is an envelope field, not part of the Fabric
+        # decision contract (which forbids extra fields); strip it before
+        # validating the canonical decision model.
+        return {k: v for k, v in decision_data.items() if k != DEFAULT_SIGNATURE_FIELD}
 
     @property
     def adapter_id(self) -> str:
@@ -277,7 +298,9 @@ class DockerComposeAdapter:
     ) -> dict[str, Any]:
         package = self.validate_package(raw_package)
         placement = PlacementPlan.model_validate(placement_data)
-        decision = EnvironmentActivationDecision.model_validate(decision_data)
+        decision = EnvironmentActivationDecision.model_validate(
+            self._decision_contract(decision_data)
+        )
 
         if not self.live_enabled:
             return {
@@ -287,6 +310,7 @@ class DockerComposeAdapter:
                 "reason": "AZAZEL_DECEPTION_LIVE is not enabled",
             }
 
+        self._authenticate_decision(decision_data)
         self._assert_activation_binding(package, placement, decision)
         self._assert_verified_images(package, placement)
         self.validate_supply_chain(package, placement)
@@ -348,7 +372,10 @@ class DockerComposeAdapter:
         environment_id: str,
         decision_data: dict[str, Any],
     ) -> dict[str, Any]:
-        decision = EnvironmentTerminationDecision.model_validate(decision_data)
+        decision = EnvironmentTerminationDecision.model_validate(
+            self._decision_contract(decision_data)
+        )
+        self._authenticate_decision(decision_data)
         if decision.environment_id != environment_id:
             raise RuntimeGateError("termination decision environment binding mismatch")
         if decision.expires_at <= _utcnow():

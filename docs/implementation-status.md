@@ -157,6 +157,21 @@ canonical package-attestation verifier exists, an executed end-to-end attestatio
 run and reviewed SBOM-policy verification are still pending, and live activation
 stays default-off behind the trusted `PackageVerifier` gate.
 
+### Authenticated Edge-decision transport
+
+AZ-06 does not own Edge decision authority or the wire contract, but it does
+verify, before acting, that an incoming Edge decision is authentic and
+untampered. `HmacDecisionAuthenticator` checks an HMAC-SHA256 signature over the
+canonical decision bytes (the decision minus its signature field), fail-closed,
+using an operator-supplied key that is never stored in the repository. It is
+wired as an optional injected gate on both activation and termination, runs
+before the decision is consumed, and combines with the one-shot decision ledger
+(anti-replay) and decision expiry (freshness) to protect the decision transport.
+`sign_decision` is the symmetric Edge-side helper used by tests and the lab.
+A full networked, mutually-authenticated transport with heartbeat/state
+reconciliation — and making the authenticator mandatory for every live decision
+— remain open live-gate items.
+
 ### Static runtime isolation policy
 
 Compose validation rejects at least:
