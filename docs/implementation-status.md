@@ -190,6 +190,13 @@ attacker-flow channeling/routing.
   the `verified` flag to actual supply-chain references but is not itself
   cryptographic SBOM verification.
 - Live runtime requires an injected trusted `PackageVerifier`.
+- `OciAttachedSbomVerifier` retrieves the OCI-attached SPDX SBOM for every
+  verified image at its immutable `@sha256:` digest and requires a well-formed
+  per-platform SPDX document, fail-closed. It is wired as an optional injected
+  live gate (`sbom_verifier`) and proven end-to-end against the real reference
+  image (`make virtual-lab --sbom-verify`). `GitHubSbomVerifier` provides the
+  stronger Sigstore-attestation variant for when the image publishes a GitHub
+  SPDX attestation. Making the SBOM gate mandatory is a remaining live-gate step.
 - `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
   payload bytes (not YAML) against a GitHub artifact attestation. It pins the
   repository and signer-workflow identity, passes `--deny-self-hosted-runners`,

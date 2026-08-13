@@ -52,6 +52,11 @@ are generated locally and carry no real Edge authority. A dev-only
 `--simulated-verification` flag exists for offline runs; it lives only in the
 script, prints a loud warning, and is never importable by the shippable package.
 
+`--sbom-verify` additionally injects `OciAttachedSbomVerifier`, which retrieves
+and validates the OCI-attached SPDX SBOM of every verified image at its immutable
+digest. Each run uses a unique `--run-id` so the one-shot decision ledger stays
+honest while the lab remains re-runnable.
+
 The lab writes an evidence report to `artifacts/lab/virtual-phase1-lab.json` and
 asserts the `activated`/`terminated`/`reset_completed` lifecycle events and
 one-shot decision consumption. It proves the **software** lifecycle on an

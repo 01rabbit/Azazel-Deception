@@ -30,7 +30,9 @@ from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.policy import require_safe_compose
 from azazel_deception.runtime.preflight import (
     PackageVerifier,
+    SbomVerifier,
     require_compose_package_binding,
+    require_sbom_attestation,
     require_supply_chain_backed_images,
     require_trusted_package_verifier,
 )
@@ -54,10 +56,12 @@ class DockerComposeAdapter:
         state_root: str | Path,
         live_enabled: bool | None = None,
         package_verifier: PackageVerifier | None = None,
+        sbom_verifier: SbomVerifier | None = None,
     ) -> None:
         self.compose_file = Path(compose_file)
         self.state = RuntimeStateStore(state_root)
         self.package_verifier = package_verifier
+        self.sbom_verifier = sbom_verifier
         if live_enabled is None:
             live_enabled = os.environ.get("AZAZEL_DECEPTION_LIVE", "0") == "1"
         self.live_enabled = bool(live_enabled)
@@ -88,6 +92,7 @@ class DockerComposeAdapter:
     ) -> None:
         try:
             require_supply_chain_backed_images(package, placement)
+            require_sbom_attestation(package, self.sbom_verifier)
         except (OSError, ValueError) as exc:
             raise RuntimeGateError(f"supply-chain policy failed: {exc}") from exc
 

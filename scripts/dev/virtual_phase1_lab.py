@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ from azazel_deception.runtime.compose import (  # noqa: E402
 )
 from azazel_deception.runtime.verifier import (  # noqa: E402
     GitHubAttestationPackageVerifier,
+    OciAttachedSbomVerifier,
 )
 
 DEFAULT_PACKAGE = ROOT / "examples/packages/municipal-linux-v1/package.yaml"
@@ -136,24 +138,32 @@ def run_virtual_lab(
     raw_package: dict[str, Any],
     host_capabilities: dict[str, Any],
     *,
-    environment_id: str = "az06-lab-env",
+    run_id: str = "fixed",
     tier: str = "lite",
 ) -> dict[str, Any]:
     """Drive the full software lifecycle and return a structured evidence report.
 
+    ``run_id`` makes each run independent: it suffixes the environment and Edge
+    decision IDs, so the one-shot decision ledger stays honest per run while the
+    lab remains re-runnable against a persistent state root.
+
     Raises ``RuntimeGateError`` (fail-closed) if any authority/isolation/supply
     -chain gate rejects the run.
     """
+
+    environment_id = f"az06-lab-env-{run_id}"
+    activation_id = f"{ACTIVATION_DECISION_ID}-{run_id}"
+    termination_id = f"{TERMINATION_DECISION_ID}-{run_id}"
 
     package = parse_package(raw_package)
     placement = build_placement_plan(
         raw_package,
         host_capabilities,
         requested_tier=tier,
-        edge_decision_id=ACTIVATION_DECISION_ID,
+        edge_decision_id=activation_id,
     )
 
-    activation = build_activation_decision(raw_package, placement)
+    activation = build_activation_decision(raw_package, placement, decision_id=activation_id)
     activate_result = adapter.activate_environment(
         environment_id, raw_package, placement, activation
     )
@@ -164,7 +174,7 @@ def run_virtual_lab(
 
     status = adapter.collect_status(environment_id)
 
-    termination = build_termination_decision(environment_id)
+    termination = build_termination_decision(environment_id, decision_id=termination_id)
     terminate_result = adapter.terminate_environment(environment_id, termination)
     reset_result = adapter.reset_environment(environment_id)
     evidence = adapter.export_evidence(environment_id)
@@ -193,12 +203,8 @@ def run_virtual_lab(
         },
         "evidence_event_types": event_types,
         "decision_consumed": {
-            ACTIVATION_DECISION_ID: adapter.state.decision_consumed(
-                ACTIVATION_DECISION_ID
-            ),
-            TERMINATION_DECISION_ID: adapter.state.decision_consumed(
-                TERMINATION_DECISION_ID
-            ),
+            activation_id: adapter.state.decision_consumed(activation_id),
+            termination_id: adapter.state.decision_consumed(termination_id),
         },
         "isolation_note": (
             "software lifecycle on internal-only network with no published host "
@@ -215,7 +221,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--package", default=str(DEFAULT_PACKAGE))
     parser.add_argument("--compose", default=str(DEFAULT_COMPOSE))
     parser.add_argument("--state-root", default=str(ROOT / "runtime/state/lab"))
-    parser.add_argument("--environment-id", default="az06-lab-env")
+    parser.add_argument(
+        "--run-id",
+        default=uuid.uuid4().hex[:12],
+        help="unique run token; keeps the one-shot decision ledger honest per run",
+    )
     parser.add_argument("--tier", default="lite")
     parser.add_argument("--output", help="write the evidence report JSON here")
     parser.add_argument(
@@ -225,6 +235,11 @@ def main(argv: list[str] | None = None) -> int:
             "DEV ONLY: skip real GitHub attestation verification with an in-lab "
             "accept function. Never use outside offline development."
         ),
+    )
+    parser.add_argument(
+        "--sbom-verify",
+        action="store_true",
+        help="also verify the OCI-attached SPDX SBOM of every verified image",
     )
     args = parser.parse_args(argv)
 
@@ -245,14 +260,16 @@ def main(argv: list[str] | None = None) -> int:
         args.state_root,
         live_enabled=True,  # explicit, lab-scoped; no default is changed
         package_verifier=verifier,
+        sbom_verifier=OciAttachedSbomVerifier() if args.sbom_verify else None,
     )
 
+    environment_id = f"az06-lab-env-{args.run_id}"
     try:
         report = run_virtual_lab(
             adapter,
             raw_package,
             host,
-            environment_id=args.environment_id,
+            run_id=args.run_id,
             tier=args.tier,
         )
     except RuntimeGateError as exc:
@@ -261,9 +278,12 @@ def main(argv: list[str] | None = None) -> int:
         # Best-effort cleanup so a rejected run leaves no lingering container.
         try:
             adapter.terminate_environment(
-                args.environment_id, build_termination_decision(args.environment_id)
+                environment_id,
+                build_termination_decision(
+                    environment_id, decision_id=f"{TERMINATION_DECISION_ID}-cleanup-{args.run_id}"
+                ),
             )
-            adapter.reset_environment(args.environment_id)
+            adapter.reset_environment(environment_id)
         except Exception:
             pass
         return 2
