@@ -180,6 +180,18 @@ A full networked, mutually-authenticated transport with heartbeat/state
 reconciliation — and making the authenticator mandatory for every live decision
 — remain open live-gate items.
 
+### Edge heartbeat freshness and state reconciliation
+
+`heartbeat_is_fresh` fails closed on a stale, absent, or implausibly-future Edge
+heartbeat, so a live control plane can refuse to act on outdated authority.
+`DockerComposeAdapter.reconcile_with_edge` (and the read-only `runtime-reconcile`
+CLI) reports divergence between local runtime state and Edge's authoritative
+active set — `local_only_active` (running locally but unauthorized; kill-switch
+candidates) and `edge_only_active` (Edge expects active but missing locally). It
+is descriptive-only: acting on a divergence still requires an Edge decision or
+the operator kill switch. A full authenticated networked heartbeat and automatic
+reconciliation loop remain open live-gate items.
+
 ### Static runtime isolation policy
 
 Compose validation rejects at least:
@@ -249,6 +261,15 @@ attacker-flow channeling/routing.
 - Termination decisions expire.
 - Reset refuses an active environment.
 - Runtime state is deleted on reset while required evidence is retained.
+- Evidence is a tamper-evident hash chain: each record embeds its sequence
+  number, the previous record's hash, and its own hash, so any in-place edit,
+  reordering, duplication, or middle deletion/truncation of a record breaks
+  `verify_evidence_chain` (`DockerComposeAdapter.verify_evidence`). The virtual
+  lab asserts the chain is intact end-to-end. Two cases are out of local scope:
+  a full-file rewrite (unkeyed chain) and tail truncation (dropping only the
+  last records leaves a valid prefix). Both are covered by exporting
+  `evidence_head_hash` to an external append-only anchor, whose value changes
+  under either.
 
 ### Edge shadow/replay
 

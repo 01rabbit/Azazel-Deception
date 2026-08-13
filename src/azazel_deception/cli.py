@@ -76,6 +76,21 @@ def _parser() -> argparse.ArgumentParser:
         "--compose",
         default="runtime/compose/reference-linux.compose.yaml",
     )
+
+    reconcile = sub.add_parser(
+        "runtime-reconcile",
+        help="report divergence between local state and Edge's active set (read-only)",
+    )
+    reconcile.add_argument("--state-root", required=True)
+    reconcile.add_argument(
+        "--edge-active",
+        default="",
+        help="comma-separated environment IDs Edge considers active",
+    )
+    reconcile.add_argument(
+        "--compose",
+        default="runtime/compose/reference-linux.compose.yaml",
+    )
     return parser
 
 
@@ -91,6 +106,14 @@ def main(argv: list[str] | None = None) -> int:
 
         adapter = DockerComposeAdapter(args.compose, args.state_root, live_enabled=False)
         print(json.dumps(adapter.health(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "runtime-reconcile":
+        from .runtime.compose import DockerComposeAdapter
+
+        adapter = DockerComposeAdapter(args.compose, args.state_root, live_enabled=False)
+        edge_active = [item for item in args.edge_active.split(",") if item.strip()]
+        print(json.dumps(adapter.reconcile_with_edge(edge_active), indent=2, sort_keys=True))
         return 0
 
     package = load_package(args.package)
