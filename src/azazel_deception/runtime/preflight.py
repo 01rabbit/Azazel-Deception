@@ -15,6 +15,29 @@ class RuntimePreflightError(ValueError):
 
 
 PackageVerifier = Callable[[DeceptionPackage], bool]
+SbomVerifier = Callable[[DeceptionPackage], bool]
+
+
+def require_sbom_attestation(
+    package: DeceptionPackage,
+    verifier: SbomVerifier | None,
+) -> None:
+    """Optionally require a cryptographic SBOM-attestation verifier to accept.
+
+    When no verifier is injected this gate is skipped (making it mandatory for
+    every live activation is a remaining live-gate step). When a verifier is
+    injected it is enforced fail-closed: any exception or non-``True`` result
+    rejects the package.
+    """
+
+    if verifier is None:
+        return
+    try:
+        verified = verifier(package)
+    except Exception as exc:
+        raise RuntimePreflightError(f"SBOM verifier failed: {exc}") from exc
+    if verified is not True:
+        raise RuntimePreflightError("SBOM verifier rejected package")
 
 # Reference prefixes that denote unverified/placeholder supply-chain metadata.
 # A component claiming ``verified: true`` must not carry any of these.

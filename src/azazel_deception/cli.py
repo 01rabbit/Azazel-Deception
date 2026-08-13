@@ -66,6 +66,16 @@ def _parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan", help="create a deterministic dry-run placement plan")
     plan.add_argument("package")
     plan.add_argument("--tier", choices=["lite", "standard", "heavy", "cluster"])
+
+    status = sub.add_parser(
+        "runtime-status",
+        help="print the descriptive operator status/health surface (read-only)",
+    )
+    status.add_argument("--state-root", required=True)
+    status.add_argument(
+        "--compose",
+        default="runtime/compose/reference-linux.compose.yaml",
+    )
     return parser
 
 
@@ -73,6 +83,14 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "capabilities":
         print(json.dumps(detect_host_capabilities(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "runtime-status":
+        # Imported lazily so package-only CLI use does not require the runtime.
+        from .runtime.compose import DockerComposeAdapter
+
+        adapter = DockerComposeAdapter(args.compose, args.state_root, live_enabled=False)
+        print(json.dumps(adapter.health(), indent=2, sort_keys=True))
         return 0
 
     package = load_package(args.package)

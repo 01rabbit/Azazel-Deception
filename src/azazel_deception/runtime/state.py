@@ -89,3 +89,12 @@ class RuntimeStateStore:
         path = self._state_path(environment_id)
         if path.exists():
             path.unlink()
+
+    def list_environments(self) -> list[str]:
+        """Return known environment IDs in deterministic order."""
+
+        directory = self.root / "environments"
+        return sorted(path.stem for path in directory.glob("*.json"))
+
+    def consumed_decision_count(self) -> int:
+        return sum(1 for _ in (self.root / "decisions").glob("*.json"))

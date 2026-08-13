@@ -120,6 +120,14 @@ The Docker Compose adapter now has bounded lifecycle methods for capability
 inspection, validation, planning, activation, status, termination, reset, and
 evidence export.
 
+An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an
+environment on operator authority alone — no Edge decision required or consumed.
+It is fail-safe: it always records the operator intent as evidence, best-effort
+stops the container, and surfaces a stop failure as a `kill_switch_failed` state
+rather than silently swallowing it. A descriptive status/health surface
+(`DockerComposeAdapter.health` and `azazel-deception runtime-status`) reports
+adapter configuration and local runtime state; it authorizes nothing.
+
 A Virtual Phase-1 Lab (`make virtual-lab`, `scripts/dev/virtual_phase1_lab.py`)
 drives the complete software lifecycle — package, placement, preflight,
 controlled activation, evidence, termination, reset — against a real container
@@ -148,6 +156,21 @@ reference image now carries attached SPDX SBOMs and build provenance and a
 canonical package-attestation verifier exists, an executed end-to-end attestation
 run and reviewed SBOM-policy verification are still pending, and live activation
 stays default-off behind the trusted `PackageVerifier` gate.
+
+### Authenticated Edge-decision transport
+
+AZ-06 does not own Edge decision authority or the wire contract, but it does
+verify, before acting, that an incoming Edge decision is authentic and
+untampered. `HmacDecisionAuthenticator` checks an HMAC-SHA256 signature over the
+canonical decision bytes (the decision minus its signature field), fail-closed,
+using an operator-supplied key that is never stored in the repository. It is
+wired as an optional injected gate on both activation and termination, runs
+before the decision is consumed, and combines with the one-shot decision ledger
+(anti-replay) and decision expiry (freshness) to protect the decision transport.
+`sign_decision` is the symmetric Edge-side helper used by tests and the lab.
+A full networked, mutually-authenticated transport with heartbeat/state
+reconciliation — and making the authenticator mandatory for every live decision
+— remain open live-gate items.
 
 ### Static runtime isolation policy
 
@@ -182,6 +205,13 @@ attacker-flow channeling/routing.
   the `verified` flag to actual supply-chain references but is not itself
   cryptographic SBOM verification.
 - Live runtime requires an injected trusted `PackageVerifier`.
+- `OciAttachedSbomVerifier` retrieves the OCI-attached SPDX SBOM for every
+  verified image at its immutable `@sha256:` digest and requires a well-formed
+  per-platform SPDX document, fail-closed. It is wired as an optional injected
+  live gate (`sbom_verifier`) and proven end-to-end against the real reference
+  image (`make virtual-lab --sbom-verify`). `GitHubSbomVerifier` provides the
+  stronger Sigstore-attestation variant for when the image publishes a GitHub
+  SPDX attestation. Making the SBOM gate mandatory is a remaining live-gate step.
 - `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
   payload bytes (not YAML) against a GitHub artifact attestation. It pins the
   repository and signer-workflow identity, passes `--deny-self-hosted-runners`,

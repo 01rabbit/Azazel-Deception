@@ -30,15 +30,30 @@ from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.policy import require_safe_compose
 from azazel_deception.runtime.preflight import (
     PackageVerifier,
+    SbomVerifier,
     require_compose_package_binding,
+    require_sbom_attestation,
     require_supply_chain_backed_images,
     require_trusted_package_verifier,
 )
 from azazel_deception.runtime.state import RuntimeStateStore
+from azazel_deception.runtime.transport import (
+    DEFAULT_SIGNATURE_FIELD,
+    DecisionAuthenticationError,
+    DecisionAuthenticator,
+    require_authenticated_decision,
+)
 
 
 class RuntimeGateError(RuntimeError):
     pass
+
+
+# States in which a container may still be running, so the operator kill switch
+# must (re)attempt the stop rather than trust the recorded state. Notably this
+# includes the failure states a prior failed stop/termination leaves behind, so
+# retrying the kill switch never reports "terminated" while a decoy is still up.
+_MAYBE_RUNNING_STATES = frozenset({"active", "kill_switch_failed", "failed"})
 
 
 def _utcnow() -> datetime:
@@ -54,13 +69,30 @@ class DockerComposeAdapter:
         state_root: str | Path,
         live_enabled: bool | None = None,
         package_verifier: PackageVerifier | None = None,
+        sbom_verifier: SbomVerifier | None = None,
+        decision_authenticator: DecisionAuthenticator | None = None,
     ) -> None:
         self.compose_file = Path(compose_file)
         self.state = RuntimeStateStore(state_root)
         self.package_verifier = package_verifier
+        self.sbom_verifier = sbom_verifier
+        self.decision_authenticator = decision_authenticator
         if live_enabled is None:
             live_enabled = os.environ.get("AZAZEL_DECEPTION_LIVE", "0") == "1"
         self.live_enabled = bool(live_enabled)
+
+    def _authenticate_decision(self, decision_data: dict[str, Any]) -> None:
+        try:
+            require_authenticated_decision(decision_data, self.decision_authenticator)
+        except DecisionAuthenticationError as exc:
+            raise RuntimeGateError(str(exc)) from exc
+
+    @staticmethod
+    def _decision_contract(decision_data: dict[str, Any]) -> dict[str, Any]:
+        # The transport signature is an envelope field, not part of the Fabric
+        # decision contract (which forbids extra fields); strip it before
+        # validating the canonical decision model.
+        return {k: v for k, v in decision_data.items() if k != DEFAULT_SIGNATURE_FIELD}
 
     @property
     def adapter_id(self) -> str:
@@ -88,6 +120,7 @@ class DockerComposeAdapter:
     ) -> None:
         try:
             require_supply_chain_backed_images(package, placement)
+            require_sbom_attestation(package, self.sbom_verifier)
         except (OSError, ValueError) as exc:
             raise RuntimeGateError(f"supply-chain policy failed: {exc}") from exc
 
@@ -272,7 +305,9 @@ class DockerComposeAdapter:
     ) -> dict[str, Any]:
         package = self.validate_package(raw_package)
         placement = PlacementPlan.model_validate(placement_data)
-        decision = EnvironmentActivationDecision.model_validate(decision_data)
+        decision = EnvironmentActivationDecision.model_validate(
+            self._decision_contract(decision_data)
+        )
 
         if not self.live_enabled:
             return {
@@ -282,6 +317,7 @@ class DockerComposeAdapter:
                 "reason": "AZAZEL_DECEPTION_LIVE is not enabled",
             }
 
+        self._authenticate_decision(decision_data)
         self._assert_activation_binding(package, placement, decision)
         self._assert_verified_images(package, placement)
         self.validate_supply_chain(package, placement)
@@ -343,7 +379,10 @@ class DockerComposeAdapter:
         environment_id: str,
         decision_data: dict[str, Any],
     ) -> dict[str, Any]:
-        decision = EnvironmentTerminationDecision.model_validate(decision_data)
+        decision = EnvironmentTerminationDecision.model_validate(
+            self._decision_contract(decision_data)
+        )
+        self._authenticate_decision(decision_data)
         if decision.environment_id != environment_id:
             raise RuntimeGateError("termination decision environment binding mismatch")
         if decision.expires_at <= _utcnow():
@@ -385,6 +424,122 @@ class DockerComposeAdapter:
         )
         self.state.append_evidence(environment_id, event.model_dump(mode="json"))
         return {"environment_id": environment_id, "status": "terminated"}
+
+    def emergency_stop(
+        self,
+        environment_id: str,
+        *,
+        operator: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Operator kill switch: halt an environment without an Edge decision.
+
+        This is a deliberate operator override, not an Edge-authorized path, so
+        it requires no activation/termination decision and consumes none. It is
+        fail-safe: the intent is always recorded as evidence, the container is
+        best-effort stopped, and a failure to stop is surfaced (state
+        ``kill_switch_failed``) rather than silently swallowed so the operator
+        knows the workload may still be running.
+        """
+
+        if not operator or not reason:
+            raise RuntimeGateError("operator kill switch requires operator and reason")
+
+        observed_at = _utcnow()
+        current = self.state.read(environment_id) or {}
+        package_id = str(current.get("package_id") or "unknown")
+        node_id = str(current.get("node_id") or "unknown")
+
+        def _emit(event_kind: str, event_type: str, **extra: Any) -> None:
+            # Kill-switch semantics live in metadata; the wire-contract
+            # event_type vocabulary (owned by Fabric) is not extended.
+            self.state.append_evidence(
+                environment_id,
+                EnvironmentEvent(
+                    event_id=f"{environment_id}-{event_kind}",
+                    environment_id=environment_id,
+                    package_id=package_id,
+                    node_id=node_id,
+                    event_type=event_type,
+                    observed_at=observed_at,
+                    evidence_refs=[],
+                    metadata={
+                        "kind": "operator_kill_switch",
+                        "operator": operator,
+                        "reason": reason,
+                        **extra,
+                    },
+                ).model_dump(mode="json"),
+            )
+
+        if self.live_enabled and current.get("state") in _MAYBE_RUNNING_STATES:
+            try:
+                self._compose(environment_id, "down", "--remove-orphans")
+            except RuntimeGateError as exc:
+                _emit("kill-switch-failed", "failure", error_type=exc.__class__.__name__)
+                failed = {
+                    **current,
+                    "state": "kill_switch_failed",
+                    "kill_switch_operator": operator,
+                    "kill_switch_reason": reason,
+                    "kill_switch_error": exc.__class__.__name__,
+                    "kill_switch_at": observed_at.isoformat(),
+                }
+                self.state.write(environment_id, failed)
+                raise
+
+        _emit("operator-kill-switch", "terminated")
+        stopped = {
+            **current,
+            "environment_id": environment_id,
+            "state": "terminated",
+            "termination_kind": "operator_kill_switch",
+            "kill_switch_operator": operator,
+            "kill_switch_reason": reason,
+            "terminated_at": observed_at.isoformat(),
+        }
+        self.state.write(environment_id, stopped)
+        return {
+            "environment_id": environment_id,
+            "status": "terminated",
+            "termination_kind": "operator_kill_switch",
+        }
+
+    def health(self) -> dict[str, Any]:
+        """Operator-facing status/health surface. Descriptive-only.
+
+        Reports adapter configuration and local runtime state. It authorizes
+        nothing and never starts or stops a workload.
+        """
+
+        try:
+            capabilities = detect_host_capabilities()
+            architecture = capabilities.get("architecture")
+            docker_available = bool(
+                capabilities.get("runtime_adapters", {}).get("docker_compose")
+            )
+        except Exception:
+            architecture = None
+            docker_available = False
+
+        environments = [
+            {"environment_id": env_id, "state": (self.state.read(env_id) or {}).get("state")}
+            for env_id in self.state.list_environments()
+        ]
+        return {
+            "authority": "descriptive_only",
+            "adapter_id": self.adapter_id,
+            "live_enabled": self.live_enabled,
+            "compose_file": str(self.compose_file),
+            "compose_present": self.compose_file.exists(),
+            "architecture": architecture,
+            "docker_available": docker_available,
+            "environments": environments,
+            "active_environments": [
+                item["environment_id"] for item in environments if item["state"] == "active"
+            ],
+            "consumed_decisions": self.state.consumed_decision_count(),
+        }
 
     def reset_environment(self, environment_id: str) -> dict[str, Any]:
         current = self.state.read(environment_id)

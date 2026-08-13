@@ -52,7 +52,7 @@ def test_virtual_lab_completes_full_lifecycle(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(adapter, "_compose", lambda *a, **k: calls.append(a))
 
-    report = lab.run_virtual_lab(adapter, load_package(PACKAGE), _host())
+    report = lab.run_virtual_lab(adapter, load_package(PACKAGE), _host(), run_id="test")
 
     assert report["component_ids"] == ["intranet-web"]
     assert report["evidence_event_types"] == ["activated", "terminated", "reset_completed"]
@@ -60,14 +60,14 @@ def test_virtual_lab_completes_full_lifecycle(tmp_path, monkeypatch):
     assert report["lifecycle"]["terminate"]["status"] == "terminated"
     assert report["lifecycle"]["reset"]["status"] == "reset"
     assert report["lifecycle"]["reset"]["evidence_preserved"] is True
-    # Both synthetic decisions were consumed one-shot.
-    assert report["decision_consumed"][lab.ACTIVATION_DECISION_ID] is True
-    assert report["decision_consumed"][lab.TERMINATION_DECISION_ID] is True
+    # Both synthetic decisions were consumed one-shot (run-scoped IDs).
+    assert report["decision_consumed"][f"{lab.ACTIVATION_DECISION_ID}-test"] is True
+    assert report["decision_consumed"][f"{lab.TERMINATION_DECISION_ID}-test"] is True
     # Docker up + down were invoked.
     assert any("up" in a for a in calls)
     assert any("down" in a for a in calls)
     # Runtime state cleared after reset.
-    assert adapter.state.read("az06-lab-env") is None
+    assert adapter.state.read("az06-lab-env-test") is None
 
 
 def test_virtual_lab_fails_closed_without_verifier(tmp_path):

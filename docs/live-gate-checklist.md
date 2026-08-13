@@ -27,7 +27,9 @@ below is satisfied for the target release/profile.
 - [x] The `Reference Package Attestation` workflow has an executed green run on GitHub-hosted runners: it reconstructs the canonical payload, asserts its SHA-256 equals `package_digest`, generates a keyless Sigstore attestation, and re-verifies it with `gh attestation verify --deny-self-hosted-runners` against the pinned signer workflow (run `31660034975`).
 - [x] The package attestation verifier is proven end-to-end against a real GitHub attestation (the in-workflow `gh attestation verify` step, not a mock, passes).
 - [x] A verified selected component must carry a real (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`; the live gate fails closed otherwise.
-- [ ] Cryptographic SBOM verification (validating the OCI-attached SPDX SBOM signature/contents, not just the reference) is performed by the trusted verifier.
+- [x] `OciAttachedSbomVerifier` retrieves and validates the OCI-attached SPDX SBOM for every verified image at its immutable `@sha256:` digest (fail-closed); it is available as an optional injected live gate and is exercised by `make virtual-lab --sbom-verify`.
+- [ ] The SBOM is additionally verified via a Sigstore-signed GitHub attestation (`GitHubSbomVerifier` is implemented and unit-tested, but the reference image publishes its SBOM as an OCI referrer, not yet as a GitHub SPDX attestation, so that verifier fails closed against it today).
+- [ ] The optional SBOM gate is made mandatory for every live activation.
 - [ ] Attestation signer identity is pinned to a git ref/tag as well as the workflow path (`gh attestation verify --signer-workflow` matches any ref of that workflow; consider `--source-ref`/`--cert-identity` before live).
 
 ## Isolation
@@ -67,9 +69,10 @@ not the native software portability gate.
 ## Operational integration
 
 - [x] Edge shadow/replay evaluator exists and cannot enforce.
-- [ ] Authenticated Edge-to-AZ-06 transport exists.
+- [x] AZ-06 verifies Edge-decision authenticity before acting: `HmacDecisionAuthenticator` checks an HMAC-SHA256 signature over the canonical decision bytes, fail-closed, wired as an optional injected gate on both activation and termination (the key is operator-supplied, never stored in the repo). Together with the one-shot decision ledger and decision expiry this gives authenticity + anti-replay + freshness.
+- [ ] A full networked, mutually-authenticated Edge-to-AZ-06 transport with heartbeat/state reconciliation exists (the verification side is implemented; the transport, key distribution, and the authenticator being mandatory for every live decision remain open).
 - [ ] End-to-end Edge decision -> AZ-06 activation -> evidence -> termination -> reset is demonstrated in a lab.
-- [ ] Operator kill switch and status/health surface are validated.
+- [x] An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an environment without an Edge decision, is fail-safe (records intent as evidence, surfaces a stop failure as `kill_switch_failed`), and a descriptive status/health surface (`health()` / `azazel-deception runtime-status`) reports adapter config and runtime state without authorizing anything. End-to-end operator control against a live/attacker-modified container is still an HIL item.
 
 ## Phase-2 gate
 
