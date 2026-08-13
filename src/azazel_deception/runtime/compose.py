@@ -71,17 +71,29 @@ class DockerComposeAdapter:
         package_verifier: PackageVerifier | None = None,
         sbom_verifier: SbomVerifier | None = None,
         decision_authenticator: DecisionAuthenticator | None = None,
+        require_sbom_verification: bool = False,
+        require_authenticated_decisions: bool = False,
     ) -> None:
         self.compose_file = Path(compose_file)
         self.state = RuntimeStateStore(state_root)
         self.package_verifier = package_verifier
         self.sbom_verifier = sbom_verifier
         self.decision_authenticator = decision_authenticator
+        # Strict live posture: when set, the corresponding gate must be
+        # configured, not merely honored if present. A trusted package verifier
+        # is always mandatory regardless of these flags. Defaults preserve the
+        # existing optional-gate behavior.
+        self.require_sbom_verification = bool(require_sbom_verification)
+        self.require_authenticated_decisions = bool(require_authenticated_decisions)
         if live_enabled is None:
             live_enabled = os.environ.get("AZAZEL_DECEPTION_LIVE", "0") == "1"
         self.live_enabled = bool(live_enabled)
 
     def _authenticate_decision(self, decision_data: dict[str, Any]) -> None:
+        if self.require_authenticated_decisions and self.decision_authenticator is None:
+            raise RuntimeGateError(
+                "authenticated Edge decision required but no authenticator is configured"
+            )
         try:
             require_authenticated_decision(decision_data, self.decision_authenticator)
         except DecisionAuthenticationError as exc:
@@ -118,6 +130,10 @@ class DockerComposeAdapter:
         package: DeceptionPackage,
         placement: PlacementPlan,
     ) -> None:
+        if self.require_sbom_verification and self.sbom_verifier is None:
+            raise RuntimeGateError(
+                "SBOM verification required but no SBOM verifier is configured"
+            )
         try:
             require_supply_chain_backed_images(package, placement)
             require_sbom_attestation(package, self.sbom_verifier)
@@ -530,6 +546,11 @@ class DockerComposeAdapter:
             "authority": "descriptive_only",
             "adapter_id": self.adapter_id,
             "live_enabled": self.live_enabled,
+            "package_verifier_configured": self.package_verifier is not None,
+            "sbom_verifier_configured": self.sbom_verifier is not None,
+            "decision_authenticator_configured": self.decision_authenticator is not None,
+            "require_sbom_verification": self.require_sbom_verification,
+            "require_authenticated_decisions": self.require_authenticated_decisions,
             "compose_file": str(self.compose_file),
             "compose_present": self.compose_file.exists(),
             "architecture": architecture,
