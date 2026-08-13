@@ -16,6 +16,55 @@ class RuntimePreflightError(ValueError):
 
 PackageVerifier = Callable[[DeceptionPackage], bool]
 
+# Reference prefixes that denote unverified/placeholder supply-chain metadata.
+# A component claiming ``verified: true`` must not carry any of these.
+_UNVERIFIED_REF_PREFIXES = ("bootstrap:", "unverified", "placeholder", "none")
+
+
+def _is_real_supply_chain_ref(value: str | None) -> bool:
+    if not value:
+        return False
+    text = value.strip().lower()
+    if not text:
+        return False
+    return not text.startswith(_UNVERIFIED_REF_PREFIXES)
+
+
+def require_supply_chain_backed_images(
+    package: DeceptionPackage,
+    placement: PlacementPlan,
+) -> None:
+    """Bind ``ImageManifest.verified`` to real provenance and SBOM references.
+
+    A component selected to run and marked ``verified=true`` must carry a
+    non-placeholder ``provenance_ref`` and ``sbom_ref``. This prevents a package
+    from asserting verified state over an image whose supply-chain metadata is
+    still a bootstrap/unverified placeholder. It does not itself perform
+    cryptographic SBOM verification; the injected trusted ``PackageVerifier``
+    remains the authenticity authority.
+    """
+
+    selected = set(placement.component_ids)
+    manifests = {component.component_id: component for component in package.components}
+    offenders: list[str] = []
+    for component_id in sorted(selected):
+        component = manifests.get(component_id)
+        if component is None:
+            # Component/placement consistency is enforced elsewhere; skip here.
+            continue
+        image = component.image
+        if not image.verified:
+            continue
+        if not _is_real_supply_chain_ref(image.provenance_ref):
+            offenders.append(f"{component_id}:provenance_ref={image.provenance_ref!r}")
+        if not _is_real_supply_chain_ref(image.sbom_ref):
+            offenders.append(f"{component_id}:sbom_ref={image.sbom_ref!r}")
+    if offenders:
+        raise RuntimePreflightError(
+            "verified images must carry real provenance and SBOM references: "
+            + ", ".join(offenders)
+        )
+
 
 def require_trusted_package_verifier(
     package: DeceptionPackage,

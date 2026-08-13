@@ -129,10 +129,11 @@ Live activation has multiple independent gates:
 5. The Edge allocation must fit inside the package maximum resource budget.
 6. Live allocation must contain an explicit finite bandwidth budget.
 7. Every **placement-selected** component OCI manifest must be `verified=true`; unselected optional components do not incorrectly block a smaller tier.
-8. The Compose asset must pass the static isolation policy.
-9. A trusted package-verification hook must be configured and accept the package; `verified=true` metadata alone is insufficient.
-10. The selected Package component set must exactly match the Compose service set, and every Compose `image:` must match the package manifest.
-11. The Edge decision ID is consumed atomically and cannot be reused.
+8. Every verified selected component must carry a real (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`.
+9. The Compose asset must pass the static isolation policy.
+10. A trusted package-verification hook must be configured and accept the package; `verified=true` metadata alone is insufficient.
+11. The selected Package component set must exactly match the Compose service set, and every Compose `image:` must match the package manifest.
+12. The Edge decision ID is consumed atomically and cannot be reused.
 
 Current `main` does **not** provide an activatable reference decoy: although the
 reference image now carries attached SPDX SBOMs and build provenance and a
@@ -167,6 +168,11 @@ attacker-flow channeling/routing.
 ### Supply-chain/runtime binding
 
 - `ImageManifest.verified` is treated as evidence state, not cryptographic proof.
+- A component selected to run and marked `verified=true` must carry a real
+  (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`; the live
+  activation gate fails closed otherwise, before Docker is touched. This binds
+  the `verified` flag to actual supply-chain references but is not itself
+  cryptographic SBOM verification.
 - Live runtime requires an injected trusted `PackageVerifier`.
 - `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
   payload bytes (not YAML) against a GitHub artifact attestation. It pins the
@@ -179,7 +185,11 @@ attacker-flow channeling/routing.
   (`.github/workflows/reference-package.yml`) reconstructs the canonical
   payload, asserts its SHA-256 equals `package_digest`, produces a GitHub
   artifact attestation over those exact bytes, and re-verifies with the pinned
-  signer identity. No secret signing key is stored in the repository.
+  signer identity. No secret signing key is stored in the repository. This
+  workflow has an executed green run on `main` (run `31660034975`): the
+  in-workflow `gh attestation verify` against the real Sigstore attestation
+  passed, so the package-attestation path is proven end-to-end, not only in
+  mocked unit tests.
 - Local Compose services cannot add an unmanifested workload or omit a selected workload.
 - Local Compose image substitution fails closed.
 - Local image builds are forbidden in attacker-facing Compose assets.
@@ -209,8 +219,7 @@ or other execution logic.
 The following are still open gates:
 
 - no stable Azazel-Fabric `v0.5.x` release exists yet; stable remains `v0.4.0`
-- SBOM generation/attachment and reviewed SBOM verification for the reference image
-- an executed end-to-end run of the reference-package attestation workflow on GitHub (the verifier and workflow are implemented and unit-tested; a green attestation run on GitHub-hosted runners is still pending)
+- reviewed SBOM-policy verification in the trusted verifier (SBOM is attached to the image and referenced by the package; the verifier does not yet enforce an SBOM policy)
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
 - resource-exhaustion and runtime-daemon/host failure injection in an appropriate Linux lab
@@ -235,7 +244,7 @@ at the required assurance level.
 
 - `Azazel-Deception#1` — canonical Fabric contract migration: code integrated; canonical package content digest now normalize-first and representation-invariant; stable tag/migration exit still open
 - `Azazel-Deception#2` — lifecycle adapter: code integrated and heavily gated; live lab/signing validation still open
-- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; canonical package attestation verifier + workflow integrated and unit-tested; SBOM verification and an executed attestation run still open
+- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; canonical package attestation verifier + workflow integrated, unit-tested, and proven by an executed green attestation run on `main`; reviewed SBOM-policy verification still open
 - `Azazel-Deception#4` — native Compose isolation evidence + static reset/anti-replay tests integrated; HIL/failure injection still open
 - `Azazel-Deception#5` — Edge shadow evaluator integrated; authenticated E2E shadow transport still open
 - `Azazel-Deception#6` — intentionally not started
