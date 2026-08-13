@@ -144,7 +144,13 @@ def _coerce_datetime(value: datetime | str) -> datetime:
     if isinstance(value, datetime):
         dt = value
     else:
-        dt = datetime.fromisoformat(str(value))
+        text = str(value)
+        # Python 3.10's fromisoformat cannot parse a trailing 'Z' (UTC), a very
+        # common heartbeat serialization; normalize it so valid heartbeats are
+        # not all treated as stale.
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt

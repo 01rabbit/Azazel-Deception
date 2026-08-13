@@ -262,12 +262,14 @@ attacker-flow channeling/routing.
 - Reset refuses an active environment.
 - Runtime state is deleted on reset while required evidence is retained.
 - Evidence is a tamper-evident hash chain: each record embeds its sequence
-  number, the previous record's hash, and its own hash, so any edit, deletion,
-  or reordering of a prior record breaks `verify_evidence_chain`
-  (`DockerComposeAdapter.verify_evidence`). The virtual lab asserts the chain is
-  intact end-to-end. It is an unkeyed chain, so a full-file rewrite by someone
-  with write access is not locally detectable; `evidence_head_hash` is exported
-  as the anchor primitive for an external append-only store to cover that case.
+  number, the previous record's hash, and its own hash, so any in-place edit,
+  reordering, duplication, or middle deletion/truncation of a record breaks
+  `verify_evidence_chain` (`DockerComposeAdapter.verify_evidence`). The virtual
+  lab asserts the chain is intact end-to-end. Two cases are out of local scope:
+  a full-file rewrite (unkeyed chain) and tail truncation (dropping only the
+  last records leaves a valid prefix). Both are covered by exporting
+  `evidence_head_hash` to an external append-only anchor, whose value changes
+  under either.
 
 ### Edge shadow/replay
 

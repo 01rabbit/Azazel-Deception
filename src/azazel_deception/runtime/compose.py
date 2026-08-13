@@ -540,7 +540,7 @@ class DockerComposeAdapter:
             docker_available = False
 
         environments = [
-            {"environment_id": env_id, "state": (self.state.read(env_id) or {}).get("state")}
+            {"environment_id": env_id, "state": self._environment_state(env_id)}
             for env_id in self.state.list_environments()
         ]
         return {
@@ -594,6 +594,19 @@ class DockerComposeAdapter:
 
         return self.state.verify_evidence_chain(environment_id)
 
+    def _environment_state(self, environment_id: str) -> str | None:
+        """Read an environment's state, tolerating a corrupt state file.
+
+        A single malformed/partially-written state file must not abort the
+        descriptive status/reconciliation surfaces operators rely on during an
+        incident; it is reported as ``"unreadable"`` instead of crashing.
+        """
+
+        try:
+            return (self.state.read(environment_id) or {}).get("state")
+        except (OSError, ValueError, json.JSONDecodeError):
+            return "unreadable"
+
     def reconcile_with_edge(
         self,
         edge_active_environment_ids: Iterable[str],
@@ -613,7 +626,7 @@ class DockerComposeAdapter:
 
         edge_active = {str(env_id) for env_id in edge_active_environment_ids}
         local_states = {
-            env_id: (self.state.read(env_id) or {}).get("state")
+            env_id: self._environment_state(env_id)
             for env_id in self.state.list_environments()
         }
         local_active = {env for env, state in local_states.items() if state == "active"}

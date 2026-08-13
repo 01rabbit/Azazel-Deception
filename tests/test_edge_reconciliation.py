@@ -46,6 +46,12 @@ def test_naive_timestamp_treated_as_utc():
     assert heartbeat_is_fresh("2026-08-14T11:59:50", 30, now=now) is True
 
 
+def test_z_suffixed_utc_timestamp_accepted():
+    # Common heartbeat serialization; must not be treated as stale on 3.10.
+    now = datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc)
+    assert heartbeat_is_fresh("2026-08-14T11:59:50Z", 30, now=now) is True
+
+
 # --------------------------------------------------------------------------- #
 # State reconciliation
 # --------------------------------------------------------------------------- #
@@ -94,3 +100,21 @@ def test_reconcile_flags_edge_only_active():
         assert report["consistent"] is False
         assert report["edge_only_active"] == ["env-missing"]
         assert report["local_only_active"] == []
+
+
+def test_reconcile_and_health_tolerate_corrupt_state_file():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        adapter = _adapter(d)
+        _write_state(adapter, "env-1", "active")
+        # A partially-written / corrupt state file must not abort the surfaces.
+        (adapter.state.root / "environments" / "bad.json").write_text("{not json", encoding="utf-8")
+        report = adapter.reconcile_with_edge(["env-1"])
+        assert report["consistent"] is True
+        assert "env-1" in report["local_active"]
+        health = adapter.health()
+        assert any(
+            e["environment_id"] == "bad" and e["state"] == "unreadable"
+            for e in health["environments"]
+        )
