@@ -120,6 +120,14 @@ The Docker Compose adapter now has bounded lifecycle methods for capability
 inspection, validation, planning, activation, status, termination, reset, and
 evidence export.
 
+An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an
+environment on operator authority alone — no Edge decision required or consumed.
+It is fail-safe: it always records the operator intent as evidence, best-effort
+stops the container, and surfaces a stop failure as a `kill_switch_failed` state
+rather than silently swallowing it. A descriptive status/health surface
+(`DockerComposeAdapter.health` and `azazel-deception runtime-status`) reports
+adapter configuration and local runtime state; it authorizes nothing.
+
 A Virtual Phase-1 Lab (`make virtual-lab`, `scripts/dev/virtual_phase1_lab.py`)
 drives the complete software lifecycle — package, placement, preflight,
 controlled activation, evidence, termination, reset — against a real container

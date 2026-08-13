@@ -69,7 +69,7 @@ not the native software portability gate.
 - [x] Edge shadow/replay evaluator exists and cannot enforce.
 - [ ] Authenticated Edge-to-AZ-06 transport exists.
 - [ ] End-to-end Edge decision -> AZ-06 activation -> evidence -> termination -> reset is demonstrated in a lab.
-- [ ] Operator kill switch and status/health surface are validated.
+- [x] An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an environment without an Edge decision, is fail-safe (records intent as evidence, surfaces a stop failure as `kill_switch_failed`), and a descriptive status/health surface (`health()` / `azazel-deception runtime-status`) reports adapter config and runtime state without authorizing anything. End-to-end operator control against a live/attacker-modified container is still an HIL item.
 
 ## Phase-2 gate
 

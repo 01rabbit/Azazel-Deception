@@ -386,6 +386,122 @@ class DockerComposeAdapter:
         self.state.append_evidence(environment_id, event.model_dump(mode="json"))
         return {"environment_id": environment_id, "status": "terminated"}
 
+    def emergency_stop(
+        self,
+        environment_id: str,
+        *,
+        operator: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Operator kill switch: halt an environment without an Edge decision.
+
+        This is a deliberate operator override, not an Edge-authorized path, so
+        it requires no activation/termination decision and consumes none. It is
+        fail-safe: the intent is always recorded as evidence, the container is
+        best-effort stopped, and a failure to stop is surfaced (state
+        ``kill_switch_failed``) rather than silently swallowed so the operator
+        knows the workload may still be running.
+        """
+
+        if not operator or not reason:
+            raise RuntimeGateError("operator kill switch requires operator and reason")
+
+        observed_at = _utcnow()
+        current = self.state.read(environment_id) or {}
+        package_id = str(current.get("package_id") or "unknown")
+        node_id = str(current.get("node_id") or "unknown")
+
+        def _emit(event_kind: str, event_type: str, **extra: Any) -> None:
+            # Kill-switch semantics live in metadata; the wire-contract
+            # event_type vocabulary (owned by Fabric) is not extended.
+            self.state.append_evidence(
+                environment_id,
+                EnvironmentEvent(
+                    event_id=f"{environment_id}-{event_kind}",
+                    environment_id=environment_id,
+                    package_id=package_id,
+                    node_id=node_id,
+                    event_type=event_type,
+                    observed_at=observed_at,
+                    evidence_refs=[],
+                    metadata={
+                        "kind": "operator_kill_switch",
+                        "operator": operator,
+                        "reason": reason,
+                        **extra,
+                    },
+                ).model_dump(mode="json"),
+            )
+
+        if self.live_enabled and current.get("state") == "active":
+            try:
+                self._compose(environment_id, "down", "--remove-orphans")
+            except RuntimeGateError as exc:
+                _emit("kill-switch-failed", "failure", error_type=exc.__class__.__name__)
+                failed = {
+                    **current,
+                    "state": "kill_switch_failed",
+                    "kill_switch_operator": operator,
+                    "kill_switch_reason": reason,
+                    "kill_switch_error": exc.__class__.__name__,
+                    "kill_switch_at": observed_at.isoformat(),
+                }
+                self.state.write(environment_id, failed)
+                raise
+
+        _emit("operator-kill-switch", "terminated")
+        stopped = {
+            **current,
+            "environment_id": environment_id,
+            "state": "terminated",
+            "termination_kind": "operator_kill_switch",
+            "kill_switch_operator": operator,
+            "kill_switch_reason": reason,
+            "terminated_at": observed_at.isoformat(),
+        }
+        self.state.write(environment_id, stopped)
+        return {
+            "environment_id": environment_id,
+            "status": "terminated",
+            "termination_kind": "operator_kill_switch",
+        }
+
+    def health(self) -> dict[str, Any]:
+        """Operator-facing status/health surface. Descriptive-only.
+
+        Reports adapter configuration and local runtime state. It authorizes
+        nothing and never starts or stops a workload.
+        """
+
+        try:
+            capabilities = detect_host_capabilities()
+            architecture = capabilities.get("architecture")
+            docker_available = bool(
+                capabilities.get("runtime_adapters", {}).get("docker_compose")
+            )
+        except Exception:
+            architecture = None
+            docker_available = False
+
+        environments = [
+            {"environment_id": env_id, "state": (self.state.read(env_id) or {}).get("state")}
+            for env_id in self.state.list_environments()
+        ]
+        return {
+            "authority": "descriptive_only",
+            "adapter_id": self.adapter_id,
+            "live_enabled": self.live_enabled,
+            "compose_file": str(self.compose_file),
+            "compose_present": self.compose_file.exists(),
+            "architecture": architecture,
+            "docker_available": docker_available,
+            "environments": environments,
+            "active_environments": [
+                item["environment_id"] for item in environments if item["state"] == "active"
+            ],
+            "consumed_decisions": self.state.consumed_decision_count(),
+        }
+
     def reset_environment(self, environment_id: str) -> dict[str, Any]:
         current = self.state.read(environment_id)
         if current and current.get("state") == "active":
