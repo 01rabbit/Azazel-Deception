@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -592,6 +593,41 @@ class DockerComposeAdapter:
         """Return True iff the environment's evidence hash chain is intact."""
 
         return self.state.verify_evidence_chain(environment_id)
+
+    def reconcile_with_edge(
+        self,
+        edge_active_environment_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        """Report divergence between local runtime state and Edge's authority.
+
+        Descriptive-only: Edge owns the authoritative set of environments that
+        should be running. This compares it to local state and reports
+        divergence — it authorizes nothing and terminates nothing. Acting on a
+        divergence still requires an Edge decision or the operator kill switch.
+
+        * ``local_only_active`` — running locally but not in Edge's active set
+          (unauthorized/revoked; candidates for the kill switch).
+        * ``edge_only_active`` — Edge expects active but not active locally
+          (missing/failed materialization).
+        """
+
+        edge_active = {str(env_id) for env_id in edge_active_environment_ids}
+        local_states = {
+            env_id: (self.state.read(env_id) or {}).get("state")
+            for env_id in self.state.list_environments()
+        }
+        local_active = {env for env, state in local_states.items() if state == "active"}
+
+        local_only_active = sorted(local_active - edge_active)
+        edge_only_active = sorted(edge_active - local_active)
+        return {
+            "authority": "descriptive_only",
+            "consistent": not local_only_active and not edge_only_active,
+            "local_active": sorted(local_active),
+            "edge_active": sorted(edge_active),
+            "local_only_active": local_only_active,
+            "edge_only_active": edge_only_active,
+        }
 
     def export_evidence(self, environment_id: str) -> list[dict[str, Any]]:
         path = self.state.evidence_path(environment_id)

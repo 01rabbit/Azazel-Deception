@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 DEFAULT_SIGNATURE_FIELD = "decision_signature"
@@ -137,3 +138,41 @@ def require_authenticated_decision(
         ) from exc
     if authentic is not True:
         raise DecisionAuthenticationError("Edge decision failed authentication")
+
+
+def _coerce_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def heartbeat_is_fresh(
+    issued_at: datetime | str,
+    max_age_seconds: float,
+    *,
+    now: datetime | None = None,
+    future_skew_seconds: float = 5.0,
+) -> bool:
+    """Return True iff an Edge heartbeat is recent and not implausibly future.
+
+    Fail-closed: an unparsable timestamp, a heartbeat older than
+    ``max_age_seconds``, or one more than ``future_skew_seconds`` in the future
+    returns False. A live control plane can gate on this so a stale/absent Edge
+    heartbeat does not leave AZ-06 acting on outdated authority.
+    """
+
+    try:
+        issued = _coerce_datetime(issued_at)
+    except (TypeError, ValueError):
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age = (current - issued).total_seconds()
+    if age < -abs(future_skew_seconds):
+        return False
+    return age <= max_age_seconds

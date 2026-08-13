@@ -52,7 +52,8 @@ below is satisfied for the target release/profile.
 - [x] A real container completes the full activation/evidence/termination/reset software lifecycle via the Virtual Phase-1 Lab (`make virtual-lab`) with the real attestation verifier, on an internal-only network with no published ports.
 - [ ] Real container termination/reset after **attacker modification** is demonstrated (the lab runs a clean lifecycle, not an adversary-modified container).
 - [ ] Runtime daemon restart / host restart / resource exhaustion / route drift failure injection passes in an appropriate Linux lab.
-- [ ] Edge heartbeat and authenticated state reconciliation are implemented.
+- [x] Heartbeat freshness (`heartbeat_is_fresh`) and descriptive state reconciliation (`reconcile_with_edge` / `runtime-reconcile`) building blocks exist: a stale/absent heartbeat is fail-closed, and local-vs-Edge active-set divergence is reported (descriptive-only; acting on it still needs an Edge decision or the kill switch).
+- [ ] A full authenticated networked heartbeat + automatic state reconciliation loop with Edge is wired end-to-end (the freshness and reconciliation primitives are implemented; the transport and the automatic response are open).
 
 ## Portability
 

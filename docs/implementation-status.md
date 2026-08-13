@@ -180,6 +180,18 @@ A full networked, mutually-authenticated transport with heartbeat/state
 reconciliation — and making the authenticator mandatory for every live decision
 — remain open live-gate items.
 
+### Edge heartbeat freshness and state reconciliation
+
+`heartbeat_is_fresh` fails closed on a stale, absent, or implausibly-future Edge
+heartbeat, so a live control plane can refuse to act on outdated authority.
+`DockerComposeAdapter.reconcile_with_edge` (and the read-only `runtime-reconcile`
+CLI) reports divergence between local runtime state and Edge's authoritative
+active set — `local_only_active` (running locally but unauthorized; kill-switch
+candidates) and `edge_only_active` (Edge expects active but missing locally). It
+is descriptive-only: acting on a divergence still requires an Edge decision or
+the operator kill switch. A full authenticated networked heartbeat and automatic
+reconciliation loop remain open live-gate items.
+
 ### Static runtime isolation policy
 
 Compose validation rejects at least:
