@@ -34,6 +34,31 @@ Run:
 make mac-preflight
 ```
 
+## Virtual Phase-1 Lab
+
+`make virtual-lab` (`scripts/dev/virtual_phase1_lab.py`) drives the full AZ-06
+software lifecycle against a real container:
+
+```text
+package -> placement -> runtime preflight -> controlled activation
+        -> status/evidence -> termination -> reset
+```
+
+It passes `live_enabled=True` explicitly (it changes no default) and uses the
+real `GitHubAttestationPackageVerifier` by default, so package authenticity is
+genuinely verified against the GitHub artifact attestation; it fails closed if
+`gh`, the network, or the attestation is unavailable. Synthetic Edge decisions
+are generated locally and carry no real Edge authority. A dev-only
+`--simulated-verification` flag exists for offline runs; it lives only in the
+script, prints a loud warning, and is never importable by the shippable package.
+
+The lab writes an evidence report to `artifacts/lab/virtual-phase1-lab.json` and
+asserts the `activated`/`terminated`/`reset_completed` lifecycle events and
+one-shot decision consumption. It proves the **software** lifecycle on an
+internal-only network with no published host ports. It does **not** prove
+physical NIC/VLAN isolation, protected-network route denial, or any real-
+hardware property — those remain HIL gates.
+
 Evidence is written to:
 
 ```text
