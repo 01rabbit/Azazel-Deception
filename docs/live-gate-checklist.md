@@ -46,7 +46,8 @@ below is satisfied for the target release/profile.
 - [x] Activation/termination anti-replay ledger exists.
 - [x] Runtime failure after decision consumption records explicit failure state/evidence and does not restore decision authority.
 - [x] Reset preserves evidence while removing local runtime state.
-- [ ] Real container termination/reset after attacker modification is demonstrated.
+- [x] A real container completes the full activation/evidence/termination/reset software lifecycle via the Virtual Phase-1 Lab (`make virtual-lab`) with the real attestation verifier, on an internal-only network with no published ports.
+- [ ] Real container termination/reset after **attacker modification** is demonstrated (the lab runs a clean lifecycle, not an adversary-modified container).
 - [ ] Runtime daemon restart / host restart / resource exhaustion / route drift failure injection passes in an appropriate Linux lab.
 - [ ] Edge heartbeat and authenticated state reconciliation are implemented.
 

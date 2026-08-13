@@ -120,6 +120,14 @@ The Docker Compose adapter now has bounded lifecycle methods for capability
 inspection, validation, planning, activation, status, termination, reset, and
 evidence export.
 
+A Virtual Phase-1 Lab (`make virtual-lab`, `scripts/dev/virtual_phase1_lab.py`)
+drives the complete software lifecycle — package, placement, preflight,
+controlled activation, evidence, termination, reset — against a real container
+with the real GitHub attestation verifier. It proves the deterministic software
+lifecycle, gate ordering, evidence emission, one-shot decision consumption, and
+deterministic reset on an internal-only network with no published host ports. It
+explicitly is **not** a physical/HIL isolation proof.
+
 Live activation has multiple independent gates:
 
 1. `AZAZEL_DECEPTION_LIVE=1` must be explicitly configured.
