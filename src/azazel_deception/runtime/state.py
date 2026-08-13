@@ -114,8 +114,32 @@ class RuntimeStateStore:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
         return path
 
+    def evidence_head_hash(self, environment_id: str) -> str | None:
+        """Return the hash of the last evidence record, or None if empty.
+
+        Exporting this head hash to an external append-only/remote anchor lets an
+        operator detect a *full-file* rewrite, which an unkeyed local chain alone
+        cannot (an attacker with write access and the algorithm could recompute a
+        consistent chain). The chain still makes any in-place edit, deletion, or
+        reordering locally evident.
+        """
+
+        path = self.evidence_path(environment_id)
+        if not path.exists():
+            return None
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if not lines:
+            return None
+        return str(json.loads(lines[-1]).get(_EVIDENCE_HASH)) or None
+
     def verify_evidence_chain(self, environment_id: str) -> bool:
-        """Return True iff the evidence hash chain is intact and unbroken."""
+        """Return True iff the evidence hash chain is intact and unbroken.
+
+        Detects in-place edits, deletions, truncation-in-the-middle, and
+        reordering of records. It is an unkeyed chain, so a full-file rewrite by
+        someone with write access is not detectable here; anchor
+        :meth:`evidence_head_hash` externally to cover that.
+        """
 
         path = self.evidence_path(environment_id)
         if not path.exists():

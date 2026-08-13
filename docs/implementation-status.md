@@ -265,7 +265,9 @@ attacker-flow channeling/routing.
   number, the previous record's hash, and its own hash, so any edit, deletion,
   or reordering of a prior record breaks `verify_evidence_chain`
   (`DockerComposeAdapter.verify_evidence`). The virtual lab asserts the chain is
-  intact end-to-end.
+  intact end-to-end. It is an unkeyed chain, so a full-file rewrite by someone
+  with write access is not locally detectable; `evidence_head_hash` is exported
+  as the anchor primitive for an external append-only store to cover that case.
 
 ### Edge shadow/replay
 
