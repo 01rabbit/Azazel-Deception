@@ -588,6 +588,11 @@ class DockerComposeAdapter:
             "evidence_path": evidence,
         }
 
+    def verify_evidence(self, environment_id: str) -> bool:
+        """Return True iff the environment's evidence hash chain is intact."""
+
+        return self.state.verify_evidence_chain(environment_id)
+
     def export_evidence(self, environment_id: str) -> list[dict[str, Any]]:
         path = self.state.evidence_path(environment_id)
         if not path.exists():

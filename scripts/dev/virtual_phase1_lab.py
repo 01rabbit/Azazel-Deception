@@ -203,6 +203,9 @@ def run_virtual_lab(
                 f"(got {event_types})"
             )
 
+    if not adapter.verify_evidence(environment_id):
+        raise RuntimeGateError("evidence hash chain is broken")
+
     return {
         "environment_id": environment_id,
         "package_id": package.package_id,
@@ -218,6 +221,7 @@ def run_virtual_lab(
             "reset": reset_result,
         },
         "evidence_event_types": event_types,
+        "evidence_chain_intact": True,
         "decision_consumed": {
             activation_id: adapter.state.decision_consumed(activation_id),
             termination_id: adapter.state.decision_consumed(termination_id),

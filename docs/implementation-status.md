@@ -249,6 +249,11 @@ attacker-flow channeling/routing.
 - Termination decisions expire.
 - Reset refuses an active environment.
 - Runtime state is deleted on reset while required evidence is retained.
+- Evidence is a tamper-evident hash chain: each record embeds its sequence
+  number, the previous record's hash, and its own hash, so any edit, deletion,
+  or reordering of a prior record breaks `verify_evidence_chain`
+  (`DockerComposeAdapter.verify_evidence`). The virtual lab asserts the chain is
+  intact end-to-end.
 
 ### Edge shadow/replay
 

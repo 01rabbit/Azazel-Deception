@@ -56,6 +56,8 @@ def test_virtual_lab_completes_full_lifecycle(tmp_path, monkeypatch):
 
     assert report["component_ids"] == ["intranet-web"]
     assert report["evidence_event_types"] == ["activated", "terminated", "reset_completed"]
+    assert report["evidence_chain_intact"] is True
+    assert adapter.verify_evidence("az06-lab-env-test") is True
     assert report["lifecycle"]["activate"]["status"] == "active"
     assert report["lifecycle"]["terminate"]["status"] == "terminated"
     assert report["lifecycle"]["reset"]["status"] == "reset"
