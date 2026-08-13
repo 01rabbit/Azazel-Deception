@@ -265,6 +265,15 @@ def main(argv: list[str] | None = None) -> int:
             "synthetic decisions with a per-run key the adapter shares"
         ),
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "strict live posture: require the SBOM verifier and decision "
+            "authenticator to be configured (combine with --sbom-verify and "
+            "--authenticate, or the run fails closed)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     raw_package = load_package(args.package)
@@ -289,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         decision_authenticator=(
             HmacDecisionAuthenticator(decision_key) if decision_key else None
         ),
+        require_sbom_verification=args.strict,
+        require_authenticated_decisions=args.strict,
     )
 
     environment_id = f"az06-lab-env-{args.run_id}"

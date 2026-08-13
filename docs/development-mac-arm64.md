@@ -55,7 +55,10 @@ script, prints a loud warning, and is never importable by the shippable package.
 `--sbom-verify` additionally injects `OciAttachedSbomVerifier`, which retrieves
 and validates the OCI-attached SPDX SBOM of every verified image at its immutable
 digest. `--authenticate` exercises the authenticated Edge-transport gate by
-HMAC-signing the synthetic decisions with a per-run key the adapter shares. Each
+HMAC-signing the synthetic decisions with a per-run key the adapter shares.
+`--strict` requires the SBOM verifier and decision authenticator to be
+configured (combine with `--sbom-verify` and `--authenticate`, or the run fails
+closed — demonstrating the strict live posture). Each
 run uses a unique `--run-id` so the one-shot decision ledger stays honest while
 the lab remains re-runnable.
 

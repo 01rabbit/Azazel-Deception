@@ -120,6 +120,14 @@ The Docker Compose adapter now has bounded lifecycle methods for capability
 inspection, validation, planning, activation, status, termination, reset, and
 evidence export.
 
+A strict live posture makes the injected security gates mandatory:
+`require_sbom_verification` and `require_authenticated_decisions` reject a live
+activation when the corresponding SBOM verifier or decision authenticator is not
+configured (a trusted package verifier is always mandatory). Both default off,
+preserving the optional-gate behavior; `health()` reports the posture and which
+gates are configured. Making the strict posture the enforced default for the
+reference live deployment remains a live-gate step.
+
 An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an
 environment on operator authority alone — no Edge decision required or consumed.
 It is fail-safe: it always records the operator intent as evidence, best-effort
