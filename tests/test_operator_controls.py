@@ -115,6 +115,28 @@ def test_kill_switch_surfaces_stop_failure(tmp_path, monkeypatch):
     assert any(e["event_type"] == "failure" for e in evidence)
 
 
+def test_kill_switch_retry_after_failure_reattempts_stop(tmp_path, monkeypatch):
+    # Regression: a retry after a failed kill must not report "terminated" while
+    # the container may still be running — it must re-attempt the stop.
+    adapter = _active_adapter(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeGateError("docker down failed")
+
+    monkeypatch.setattr(adapter, "_compose", boom)
+    with pytest.raises(RuntimeGateError):
+        adapter.emergency_stop("env-1", operator="alice", reason="incident")
+    assert adapter.state.read("env-1")["state"] == "kill_switch_failed"
+
+    # Retry: the stop must be attempted again (state is not "active" now).
+    attempts = []
+    monkeypatch.setattr(adapter, "_compose", lambda *a, **k: attempts.append(a))
+    result = adapter.emergency_stop("env-1", operator="alice", reason="incident-retry")
+    assert attempts, "retry did not re-attempt the container stop"
+    assert result["status"] == "terminated"
+    assert adapter.state.read("env-1")["state"] == "terminated"
+
+
 def test_health_surface_is_descriptive_only(tmp_path, monkeypatch):
     adapter = _active_adapter(tmp_path, monkeypatch)
     health = adapter.health()

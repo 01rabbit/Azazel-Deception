@@ -49,6 +49,13 @@ class RuntimeGateError(RuntimeError):
     pass
 
 
+# States in which a container may still be running, so the operator kill switch
+# must (re)attempt the stop rather than trust the recorded state. Notably this
+# includes the failure states a prior failed stop/termination leaves behind, so
+# retrying the kill switch never reports "terminated" while a decoy is still up.
+_MAYBE_RUNNING_STATES = frozenset({"active", "kill_switch_failed", "failed"})
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -465,7 +472,7 @@ class DockerComposeAdapter:
                 ).model_dump(mode="json"),
             )
 
-        if self.live_enabled and current.get("state") == "active":
+        if self.live_enabled and current.get("state") in _MAYBE_RUNNING_STATES:
             try:
                 self._compose(environment_id, "down", "--remove-orphans")
             except RuntimeGateError as exc:
