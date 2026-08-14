@@ -75,6 +75,7 @@ jobs:
           gh attestation verify artifacts/package/reference-package.canonical.json \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/reference-package.yml" \
+            --source-ref "${{ github.ref }}" \
             --deny-self-hosted-runners
 
       - name: Publish canonical payload as evidence
