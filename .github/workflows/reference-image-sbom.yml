@@ -9,6 +9,15 @@ on:
       - runtime/compose/html/**
       - .github/workflows/reference-image-sbom.yml
   workflow_dispatch:
+    inputs:
+      attest_digest:
+        description: >-
+          Existing immutable multi-arch manifest digest (sha256:...) whose
+          attached SPDX SBOMs should be re-published as GitHub SPDX
+          attestations, without rebuilding the image. Leave empty to run the
+          normal build-sbom-rc job.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -21,6 +30,7 @@ env:
 
 jobs:
   build-sbom-rc:
+    if: github.event_name == 'push' || inputs.attest_digest == ''
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -84,5 +94,64 @@ jobs:
         with:
           name: reference-image-sbom-rc
           path: artifacts/
+          if-no-files-found: error
+          retention-days: 90
+
+  # Publish the already-attached SPDX SBOMs of an existing immutable digest as
+  # GitHub SPDX attestations, so `GitHubSbomVerifier` (`gh attestation verify
+  # --predicate-type https://spdx.dev/Document`) passes against the pinned
+  # reference image without a rebuild (digest, and therefore the sealed
+  # package_digest, stay unchanged).
+  attest-existing-sbom:
+    if: github.event_name == 'workflow_dispatch' && inputs.attest_digest != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Extract attached SPDX SBOMs from the pinned digest
+        env:
+          DIGEST: ${{ inputs.attest_digest }}
+        run: |
+          set -euo pipefail
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::attest_digest must be an immutable sha256: digest"; exit 1 ;;
+          esac
+          ref="$IMAGE@$DIGEST"
+          mkdir -p artifacts/sbom
+          docker buildx imagetools inspect "$ref" --format '{{json (index .SBOM "linux/amd64").SPDX}}' > artifacts/sbom/linux-amd64.spdx.json
+          docker buildx imagetools inspect "$ref" --format '{{json (index .SBOM "linux/arm64").SPDX}}' > artifacts/sbom/linux-arm64.spdx.json
+          jq -e '.SPDXID == "SPDXRef-DOCUMENT"' artifacts/sbom/linux-amd64.spdx.json >/dev/null
+          jq -e '.SPDXID == "SPDXRef-DOCUMENT"' artifacts/sbom/linux-arm64.spdx.json >/dev/null
+      - name: Attest SPDX SBOM (linux/amd64) for the manifest digest
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/01rabbit/azazel-deception-reference-web
+          subject-digest: ${{ inputs.attest_digest }}
+          predicate-type: https://spdx.dev/Document
+          predicate-path: artifacts/sbom/linux-amd64.spdx.json
+          push-to-registry: true
+      - name: Attest SPDX SBOM (linux/arm64) for the manifest digest
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/01rabbit/azazel-deception-reference-web
+          subject-digest: ${{ inputs.attest_digest }}
+          predicate-type: https://spdx.dev/Document
+          predicate-path: artifacts/sbom/linux-arm64.spdx.json
+          push-to-registry: true
+      - name: Verify GH-store SPDX attestation exactly as GitHubSbomVerifier does
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ inputs.attest_digest }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type https://spdx.dev/Document \
+            --deny-self-hosted-runners
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference-image-sbom-attestation
+          path: artifacts/sbom/
           if-no-files-found: error
           retention-days: 90

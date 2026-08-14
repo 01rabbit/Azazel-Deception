@@ -1,12 +1,14 @@
-# Azazel-Fabric Development Pin
+# Azazel-Fabric Pin
 
-AZ-06 currently consumes the reviewed development commit:
+AZ-06 pins the stable Azazel-Fabric release tag:
 
-`b6a6d56149ca7f43cb3e81fa9d25f0cd1dbf8a0e`
+`v0.5.0`
 
-This commit contains the unreleased `0.5.0.dev0` AZ-06 deception contract
-baseline and has passed Azazel-Fabric CI.
+This release contains the canonical AZ-06 deception contract baseline
+(`azazel_fabric.deception_contracts`, `azazel_fabric.deception_integrity`,
+and the shared `azazel_fabric.testing.deception` golden factories) and
+supersedes the earlier reviewed development-commit pin.
 
-This is a temporary development pin, **not a stable release dependency**.
-Field/release packaging must move to an exact compatible `v0.5.x` tag after
-Azazel-Fabric#9 reaches its release gate.
+Pin policy: consumers pin an exact `vX.Y.Z` tag, never `main` and never a
+development commit. Moving to a newer Fabric release is an explicit,
+reviewed pin bump.

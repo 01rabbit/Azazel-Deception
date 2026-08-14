@@ -55,8 +55,47 @@ are not proven (see `docs/live-gate-checklist.md`).
   `runtime-reconcile`; **Make targets** — `digest`, `seal`, `canonical-payload`,
   `virtual-lab`.
 
+### Added
+
+- **Authenticated Edge shadow/replay service** —
+  `azazel_deception.runtime.shadow_server` provides the strictly non-executing
+  network boundary for Edge integration (issue #5): HMAC-SHA256-signed
+  request/response envelopes, Edge-identity allowlisting, AZ-06 node binding,
+  `issued_at` freshness, one-shot request anti-replay, and deterministic
+  rejection reason codes. Actions cover capability discovery, package
+  identity, decision-bound deterministic placement plans, and
+  activation/termination rehearsal via new `DockerComposeAdapter`
+  `shadow_activation`/`shadow_termination` methods that run the canonical
+  validation and binding gates without consuming the one-shot decision
+  ledger, writing runtime state, or starting a container. Every request is
+  appended to the tamper-evident evidence log for Edge audit. The matching
+  Edge client and a real networked E2E (full bootstrap session over HTTP with
+  zero container start) live in Azazel-Edge.
+- **GH-store SPDX attestation for the pinned reference image** — the SBOM
+  workflow gains an `attest-existing-sbom` dispatch path that republishes the
+  SPDX documents already attached to an immutable manifest digest as GitHub
+  SPDX attestations and self-verifies with the exact `gh attestation verify`
+  invocation `GitHubSbomVerifier` uses. No rebuild: the pinned digest and the
+  sealed `package_digest` stay unchanged. Executed green for
+  `sha256:c187c4ce…` (run `31798338588`), so the GitHub-attestation SBOM
+  verifier now passes against the reference image.
+- **Real-Docker lifecycle integration tests** —
+  `tests/test_docker_integration.py` (opt-in, `AZAZEL_DECEPTION_DOCKER_TESTS=1`)
+  drives the actual adapter against a real daemon and the pinned reference
+  image: gated activation with runtime isolation assertions (read-only rootfs,
+  `cap_drop ALL`, no-new-privileges, non-root, internal-only network, no
+  published ports, CPU/memory/PID limits), attacker-modification destruction
+  across termination/re-activation, container-crash recovery via the operator
+  kill switch, an injected teardown fault failing closed with kill-switch
+  recovery, Edge reconciliation divergence reporting, deterministic reset with
+  evidence preservation, and evidence-chain tamper detection.
+
 ### Changed
 
+- Azazel-Fabric dependency pin moved from the reviewed development commit to
+  the stable release tag `v0.5.0` (`pyproject.toml`, `docs/fabric-pin.md`);
+  field/release packaging now consumes a tagged Fabric release as required by
+  the live-gate checklist.
 - Reference package `examples/packages/municipal-linux-v1/package.yaml` re-sealed
   via tooling (canonical digest), not a hand-copied CI value.
 - Bootstrap compatibility adapter preserves the caller's declared digest so

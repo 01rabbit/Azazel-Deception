@@ -11,7 +11,7 @@ below is satisfied for the target release/profile.
 - [x] Edge decision IDs are one-shot at AZ-06.
 - [x] Package maximum resource budgets exist and Edge allocations cannot exceed them.
 - [x] Live Edge allocations require an explicit finite bandwidth budget.
-- [ ] Stable compatible Azazel-Fabric `v0.5.x` release exists and consumers pin the tag.
+- [ ] Stable compatible Azazel-Fabric `v0.5.x` release exists and consumers pin the tag. (Release prepared and pin moved to `v0.5.0` — Azazel-Fabric#10; flips once the owner pushes the `v0.5.0` tag and Fabric CI publishes the release.)
 
 ## Supply chain
 
@@ -28,7 +28,7 @@ below is satisfied for the target release/profile.
 - [x] The package attestation verifier is proven end-to-end against a real GitHub attestation (the in-workflow `gh attestation verify` step, not a mock, passes).
 - [x] A verified selected component must carry a real (non-placeholder, non-`bootstrap:`) `provenance_ref` and `sbom_ref`; the live gate fails closed otherwise.
 - [x] `OciAttachedSbomVerifier` retrieves and validates the OCI-attached SPDX SBOM for every verified image at its immutable `@sha256:` digest (fail-closed); it is available as an optional injected live gate and is exercised by `make virtual-lab --sbom-verify`.
-- [ ] The SBOM is additionally verified via a Sigstore-signed GitHub attestation (`GitHubSbomVerifier` is implemented and unit-tested, but the reference image publishes its SBOM as an OCI referrer, not yet as a GitHub SPDX attestation, so that verifier fails closed against it today).
+- [x] The SBOM is additionally verified via a Sigstore-signed GitHub attestation: the `attest-existing-sbom` dispatch path of the SBOM workflow republishes the digest's attached SPDX documents as GitHub SPDX attestations (no rebuild, digest unchanged) and self-verifies with the exact `gh attestation verify --predicate-type https://spdx.dev/Document --deny-self-hosted-runners` invocation `GitHubSbomVerifier` uses (green run `31798338588` for the pinned `sha256:c187c4ce…` manifest).
 - [x] The SBOM gate can be made mandatory via the strict live posture (`require_sbom_verification=True` rejects live activation when no SBOM verifier is configured).
 - [ ] The strict posture is the enforced default for the reference live deployment (today it is opt-in and default-off).
 - [x] Attestation signer identity is pinned to a git ref as well as the workflow path: the verifier passes `--source-ref` (default `refs/heads/main`, configurable) so an attestation built from any other branch/tag is rejected. Proven end-to-end — the real verifier accepts the live `refs/heads/main` attestation and rejects a wrong ref. The in-workflow self-verify pins `--source-ref ${{ github.ref }}`.
@@ -50,10 +50,10 @@ below is satisfied for the target release/profile.
 - [x] Runtime failure after decision consumption records explicit failure state/evidence and does not restore decision authority.
 - [x] Reset preserves evidence while removing local runtime state.
 - [x] A real container completes the full activation/evidence/termination/reset software lifecycle via the Virtual Phase-1 Lab (`make virtual-lab`) with the real attestation verifier, on an internal-only network with no published ports.
-- [ ] Real container termination/reset after **attacker modification** is demonstrated (the lab runs a clean lifecycle, not an adversary-modified container).
-- [ ] Runtime daemon restart / host restart / resource exhaustion / route drift failure injection passes in an appropriate Linux lab.
+- [x] Real container termination/reset after **attacker modification** is demonstrated: `tests/test_docker_integration.py` (opt-in via `AZAZEL_DECEPTION_DOCKER_TESTS=1`) writes attacker state into the running decoy, confirms the read-only rootfs refuses persistence, terminates, and proves a fresh activation carries no attacker-modified state; it also demonstrates container-crash recovery and an injected teardown fault failing closed with kill-switch recovery, with the evidence chain finalized and verified.
+- [ ] Runtime daemon restart / host restart / resource exhaustion / route drift failure injection passes in an appropriate Linux lab. (Container crash and injected teardown-fault cases are now covered by `tests/test_docker_integration.py`; daemon/host restart, resource exhaustion, and route drift remain.)
 - [x] Heartbeat freshness (`heartbeat_is_fresh`) and descriptive state reconciliation (`reconcile_with_edge` / `runtime-reconcile`) building blocks exist: a stale/absent heartbeat is fail-closed, and local-vs-Edge active-set divergence is reported (descriptive-only; acting on it still needs an Edge decision or the kill switch).
-- [ ] A full authenticated networked heartbeat + automatic state reconciliation loop with Edge is wired end-to-end (the freshness and reconciliation primitives are implemented; the transport and the automatic response are open).
+- [ ] A full authenticated networked heartbeat + automatic state reconciliation loop with Edge is wired end-to-end. (The authenticated networked transport now exists: the shadow/replay service applies envelope HMAC authentication, Edge/node identity allowlisting, `issued_at` freshness, and one-shot request anti-replay to every request; a continuous heartbeat loop and the automatic response remain open.)
 
 ## Portability
 
@@ -73,8 +73,8 @@ not the native software portability gate.
 - [x] Edge shadow/replay evaluator exists and cannot enforce.
 - [x] AZ-06 verifies Edge-decision authenticity before acting: `HmacDecisionAuthenticator` checks an HMAC-SHA256 signature over the canonical decision bytes, fail-closed, wired as an optional injected gate on both activation and termination (the key is operator-supplied, never stored in the repo). Together with the one-shot decision ledger and decision expiry this gives authenticity + anti-replay + freshness.
 - [x] The decision authenticator can be made mandatory via the strict live posture (`require_authenticated_decisions=True` rejects live activation/termination when no authenticator is configured).
-- [ ] A full networked, mutually-authenticated Edge-to-AZ-06 transport with heartbeat/state reconciliation, key distribution, and the strict posture enforced by default remains open (the verification side is implemented and can be required today).
-- [ ] End-to-end Edge decision -> AZ-06 activation -> evidence -> termination -> reset is demonstrated in a lab.
+- [ ] A full networked, mutually-authenticated Edge-to-AZ-06 transport with heartbeat/state reconciliation, key distribution, and the strict posture enforced by default remains open. (The shadow/replay transport is now implemented and mutually authenticated — HMAC-signed envelopes in both directions, Edge allowlist and node binding, freshness, anti-replay — and is exercised by a real networked Edge-client E2E in Azazel-Edge; key distribution and the strict-default posture remain.)
+- [ ] End-to-end Edge decision -> AZ-06 activation -> evidence -> termination -> reset is demonstrated in a lab. (Two halves are each demonstrated: the networked Edge shadow session — capabilities, package, decision-bound plan, activation/termination rehearsal, audited with an intact evidence chain and zero container start — and, separately, the local live decision -> activation -> evidence -> termination -> reset lifecycle on real containers in `tests/test_docker_integration.py`. The combined networked live flow remains an HIL item.)
 - [x] An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an environment without an Edge decision, is fail-safe (records intent as evidence, surfaces a stop failure as `kill_switch_failed`), and a descriptive status/health surface (`health()` / `azazel-deception runtime-status`) reports adapter config and runtime state without authorizing anything. End-to-end operator control against a live/attacker-modified container is still an HIL item.
 
 ## Phase-2 gate

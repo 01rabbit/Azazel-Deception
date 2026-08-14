@@ -6,6 +6,15 @@ require an explicit Azazel-Edge decision.
 """
 
 from azazel_deception.runtime.compose import DockerComposeAdapter
+from azazel_deception.runtime.shadow_server import (
+    ShadowReplayHTTPServer,
+    ShadowReplayService,
+)
 from azazel_deception.runtime.state import RuntimeStateStore
 
-__all__ = ["DockerComposeAdapter", "RuntimeStateStore"]
+__all__ = [
+    "DockerComposeAdapter",
+    "RuntimeStateStore",
+    "ShadowReplayHTTPServer",
+    "ShadowReplayService",
+]

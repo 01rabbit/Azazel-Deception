@@ -10,9 +10,8 @@ safe live deception deployment.
 
 ### Canonical contracts
 
-AZ-06 consumes the unreleased Azazel-Fabric `0.5.0.dev0`
-`azazel_fabric.deception_contracts` family through an exact reviewed commit
-pin.
+AZ-06 consumes the Azazel-Fabric `azazel_fabric.deception_contracts`
+family through the exact stable release tag pin `v0.5.0`.
 
 Implemented canonical boundaries include:
 
