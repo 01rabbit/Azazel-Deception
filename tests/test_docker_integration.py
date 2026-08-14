@@ -164,7 +164,14 @@ def _docker_daemon_up() -> bool:
     return probe.returncode == 0
 
 
-def _dockerd_pid() -> int:
+def _host_dockerd_pid() -> int | None:
+    """Return the host dockerd PID, or None if there is no host dockerd process.
+
+    On VM-backed macOS runtimes (OrbStack, Docker Desktop for Mac) the Linux
+    daemon runs inside a VM, so there is no host ``dockerd`` process to signal;
+    the daemon-restart drill is a Linux-host property and does not apply there.
+    """
+
     result = subprocess.run(
         ["pgrep", "-x", "dockerd"],
         stdout=subprocess.PIPE,
@@ -173,9 +180,14 @@ def _dockerd_pid() -> int:
         check=False,
     )
     pids = [int(pid) for pid in result.stdout.split() if pid.strip()]
-    if not pids:
+    return pids[0] if pids else None
+
+
+def _dockerd_pid() -> int:
+    pid = _host_dockerd_pid()
+    if pid is None:
         raise RuntimeError("no running dockerd process found to restart-drill against")
-    return pids[0]
+    return pid
 
 
 def _wait_until(predicate, *, timeout: float, description: str, interval: float = 1.0) -> None:
@@ -481,6 +493,16 @@ def test_daemon_restart_preserves_state_and_recovers(tmp_path, cleanup_environme
     here) so this asserts on the adapter's fail-closed bookkeeping, not on
     container survival.
     """
+
+    # The drill signals the host dockerd process directly; on VM-backed macOS
+    # runtimes (OrbStack, Docker Desktop for Mac) no such host process exists, so
+    # skip before starting any container. This Linux-host property is exercised
+    # on Linux CI runners, where dockerd is a real host process.
+    if _host_dockerd_pid() is None:
+        pytest.skip(
+            "no host dockerd process (VM-backed runtime such as OrbStack or "
+            "Docker Desktop for Mac); daemon-restart drill runs on Linux"
+        )
 
     adapter = _adapter(tmp_path)
     environment_id = _environment_id()
