@@ -71,9 +71,6 @@ are not proven (see `docs/live-gate-checklist.md`).
 - **CLI commands** — `digest`, `canonical-payload`, `seal`, `runtime-status`,
   `runtime-reconcile`; **Make targets** — `digest`, `seal`, `canonical-payload`,
   `virtual-lab`.
-
-### Added
-
 - **Authenticated Edge shadow/replay service** —
   `azazel_deception.runtime.shadow_server` provides the strictly non-executing
   network boundary for Edge integration (issue #5): HMAC-SHA256-signed
@@ -131,6 +128,12 @@ are not proven (see `docs/live-gate-checklist.md`).
   while the container could still be running.
 - `heartbeat_is_fresh` rejecting `Z`-suffixed UTC timestamps on Python 3.10.
 - `health()` / `reconcile_with_edge()` crashing on a single corrupt state file.
+- The opt-in daemon-restart integration test hard-failing (and leaking a
+  container) on VM-backed Docker runtimes (OrbStack, Docker Desktop for Mac),
+  where the Linux daemon runs in a VM and no host `dockerd` process exists; it
+  now skips cleanly before starting a container. The drill still runs on Linux
+  CI/hosts, and the shadow/posture tests were made host-independent for
+  no-Docker CI runners.
 
 ### Security
 
