@@ -286,7 +286,6 @@ or other execution logic.
 
 The following are still open gates:
 
-- a formally published stable Azazel-Fabric release: the pin has moved to the `v0.5.0` tag and resolves (Azazel-Fabric#10); a published stable release from the Fabric owner is the remaining step
 - reviewed SBOM-*content* policy (e.g. license/component allow-lists) in the trusted verifier; SBOM *attestation* verification itself is implemented (`OciAttachedSbomVerifier` / `GitHubSbomVerifier`) and required by the reference deployment's default strict posture
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
