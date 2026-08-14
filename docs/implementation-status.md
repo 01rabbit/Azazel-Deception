@@ -286,13 +286,13 @@ or other execution logic.
 
 The following are still open gates:
 
-- no stable Azazel-Fabric `v0.5.x` release exists yet; stable remains `v0.4.0`
-- reviewed SBOM-policy verification in the trusted verifier (SBOM is attached to the image and referenced by the package; the verifier does not yet enforce an SBOM policy)
+- a formally published stable Azazel-Fabric release: the pin has moved to the `v0.5.0` tag and resolves (Azazel-Fabric#10); a published stable release from the Fabric owner is the remaining step
+- reviewed SBOM-*content* policy (e.g. license/component allow-lists) in the trusted verifier; SBOM *attestation* verification itself is implemented (`OciAttachedSbomVerifier` / `GitHubSbomVerifier`) and required by the reference deployment's default strict posture
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
-- resource-exhaustion and runtime-daemon/host failure injection in an appropriate Linux lab
-- Edge-to-AZ-06 authenticated transport / heartbeat / state reconciliation
-- real evidence finalization and reset after an attacker-modified live container
+- host-restart and route-drift failure injection in an appropriate Linux lab (runtime-daemon restart and resource exhaustion are now covered by the opt-in Docker integration tests)
+- the combined networked Edge→AZ-06 live flow and HMAC key distribution/rotation (the authenticated bi-directional transport, heartbeat loop, and state reconciliation are implemented and covered by a networked E2E)
+- the same attacker-modified termination/reset and evidence finalization on production hardware (it is demonstrated at the container level in the opt-in Docker integration tests)
 - live routing/channeling integration from Edge
 - Knowledge outcome ingest/effectiveness loop
 - dynamic narrative, honey artifacts, credential lures, personas, or finite-state transitions
