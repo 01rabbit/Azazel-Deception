@@ -56,11 +56,17 @@ script, prints a loud warning, and is never importable by the shippable package.
 and validates the OCI-attached SPDX SBOM of every verified image at its immutable
 digest. `--authenticate` exercises the authenticated Edge-transport gate by
 HMAC-signing the synthetic decisions with a per-run key the adapter shares.
-`--strict` requires the SBOM verifier and decision authenticator to be
-configured (combine with `--sbom-verify` and `--authenticate`, or the run fails
-closed — demonstrating the strict live posture). Each
-run uses a unique `--run-id` so the one-shot decision ledger stays honest while
-the lab remains re-runnable.
+
+The lab builds its adapter through `build_reference_adapter`
+(`azazel_deception.runtime.posture`), so it runs with the same strict posture
+as every reference-deployment entry point: the SBOM verifier and decision
+authenticator are both *required* to be configured, not merely honored when
+present. Run with plain `--sbom-verify --authenticate` (as `make virtual-lab`
+does) to satisfy strict posture, or the run fails closed. `--dev-relaxed-posture`
+(or `AZAZEL_DECEPTION_RELAXED_POSTURE=1`) is the one explicit, dev-only escape
+hatch back to the old permissive, optional-gate posture — never use it against
+a real deployment. Each run uses a unique `--run-id` so the one-shot decision
+ledger stays honest while the lab remains re-runnable.
 
 The lab writes an evidence report to `artifacts/lab/virtual-phase1-lab.json` and
 asserts the `activated`/`terminated`/`reset_completed` lifecycle events and
