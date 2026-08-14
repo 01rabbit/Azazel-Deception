@@ -138,9 +138,12 @@ The `plan` command produces a descriptive placement plan only. It does not start
 src/azazel_deception/       bootstrap control-plane code
 runtime/compose/            reference Docker Compose adapter assets
 examples/packages/          deterministic reference deception packages
+scripts/dev/                developer/verification tooling (preflight, compose smoke, virtual lab)
 docs/                       architecture, safety, contracts, integration, roadmap, traceability
 tests/                      deterministic bootstrap tests
 ```
+
+Notable changes are recorded in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Design traceability
 
