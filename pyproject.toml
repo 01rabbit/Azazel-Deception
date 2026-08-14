@@ -29,3 +29,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so cross-test-module imports (e.g.
+# `from tests.test_runtime import ...`) resolve under a bare `pytest`
+# invocation in CI, not only under `python -m pytest` (which adds cwd).
+pythonpath = ["."]
