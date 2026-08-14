@@ -11,7 +11,7 @@ below is satisfied for the target release/profile.
 - [x] Edge decision IDs are one-shot at AZ-06.
 - [x] Package maximum resource budgets exist and Edge allocations cannot exceed them.
 - [x] Live Edge allocations require an explicit finite bandwidth budget.
-- [ ] Stable compatible Azazel-Fabric `v0.5.x` release exists and consumers pin the tag.
+- [ ] Stable compatible Azazel-Fabric `v0.5.x` release exists and consumers pin the tag. (Release prepared and pin moved to `v0.5.0` — Azazel-Fabric#10; flips once the owner pushes the `v0.5.0` tag and Fabric CI publishes the release.)
 
 ## Supply chain
 
