@@ -23,8 +23,9 @@ from azazel_deception.runtime.transport import (
     HmacDecisionAuthenticator,
     compute_decision_signature,
 )
+from azazel_fabric.deception_contracts import HostCapabilities
 
-from tests.test_runtime import _decision, _termination
+from tests.test_runtime import _decision, _host, _termination
 
 PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
 COMPOSE = Path("runtime/compose/reference-linux.compose.yaml")
@@ -44,6 +45,15 @@ def lite_package_path(tmp_path):
     return path
 
 
+def _synthetic_capabilities():
+    # The canonical HostCapabilities shape the real detector returns (includes
+    # authority="descriptive_only"), built from a deterministic docker-capable
+    # host so the plan/activate flow is host-independent (CI runners without
+    # Docker, e.g. macOS, would otherwise report the adapter unavailable) and
+    # the "identical plan" assertion is stable (real free storage drifts).
+    return HostCapabilities.model_validate(_host()).model_dump(mode="json")
+
+
 @pytest.fixture
 def service(tmp_path, lite_package_path):
     return ShadowReplayService(
@@ -53,6 +63,7 @@ def service(tmp_path, lite_package_path):
         package_path=lite_package_path,
         state_root=tmp_path / "state",
         compose_file=COMPOSE,
+        capability_provider=_synthetic_capabilities,
     )
 
 
@@ -169,7 +180,7 @@ def test_shadow_activation_and_termination_rehearsal(service, lite_package_path)
     package = json.loads(lite_package_path.read_text(encoding="utf-8"))
     plan = build_placement_plan(
         package,
-        detect_host_capabilities(),
+        _host(),
         requested_tier="lite",
         edge_decision_id="edge-d-2",
     )
@@ -208,7 +219,7 @@ def test_shadow_activation_binding_mismatch_is_deterministic(service, lite_packa
     package = json.loads(lite_package_path.read_text(encoding="utf-8"))
     plan = build_placement_plan(
         package,
-        detect_host_capabilities(),
+        _host(),
         requested_tier="lite",
         edge_decision_id="edge-d-3",
     )
@@ -232,7 +243,7 @@ def test_expired_shadow_decision_is_rejected(service, lite_package_path):
     package = json.loads(lite_package_path.read_text(encoding="utf-8"))
     plan = build_placement_plan(
         package,
-        detect_host_capabilities(),
+        _host(),
         requested_tier="lite",
         edge_decision_id="edge-d-4",
     )

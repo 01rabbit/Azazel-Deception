@@ -89,10 +89,16 @@ class ShadowReplayService:
         compose_file: str | Path,
         max_request_age_seconds: float = 30.0,
         decision_authenticator=None,
+        capability_provider=None,
     ) -> None:
         if not node_id:
             raise ValueError("shadow service requires a node_id")
         self.node_id = node_id
+        # How this node reports its own capabilities. Defaults to real host
+        # detection; injectable so tests (and hosts without the runtime adapter
+        # installed) can supply a deterministic snapshot instead of depending
+        # on ambient Docker availability.
+        self._capability_provider = capability_provider or detect_host_capabilities
         self._envelope_authenticator = HmacDecisionAuthenticator(
             transport_key, signature_field=ENVELOPE_SIGNATURE_FIELD
         )
@@ -228,7 +234,7 @@ class ShadowReplayService:
     def _action_capabilities(
         self, payload: dict[str, Any], envelope: dict[str, Any]
     ) -> dict[str, Any]:
-        capabilities = detect_host_capabilities()
+        capabilities = self._capability_provider()
         return {"capabilities": capabilities}
 
     def _action_package(
@@ -252,7 +258,7 @@ class ShadowReplayService:
         raw = load_package(self.package_path)
         plan = build_placement_plan(
             raw,
-            detect_host_capabilities(),
+            self._capability_provider(),
             requested_tier=payload.get("requested_tier"),
             edge_decision_id=str(edge_decision_id),
         )

@@ -36,7 +36,29 @@ LAB_PATH = Path("scripts/dev/virtual_phase1_lab.py")
 KEY = "reference-posture-test-key"
 
 
-def _load_lab():
+# A deterministic docker-capable host so the lab's placement planning runs on
+# CI hosts without Docker (e.g. macOS runners), where real capability detection
+# reports the runtime adapter as unavailable. The lab binds
+# ``detect_host_capabilities`` by ``from``-import at load time, so this must be
+# patched at the source before ``_load_lab()`` re-imports the module.
+_DOCKER_HOST = {
+    "node_id": "az06-posture-test",
+    "architecture": "amd64",
+    "cpu_cores": 4,
+    "memory_mb": 8192,
+    "storage_free_mb": 65536,
+    "runtime_adapters": {"docker_compose": True},
+    "kvm_available": False,
+    "gpu_available": False,
+}
+
+
+def _load_lab(monkeypatch=None):
+    if monkeypatch is not None:
+        monkeypatch.setattr(
+            "azazel_deception.capabilities.detect_host_capabilities",
+            lambda *args, **kwargs: dict(_DOCKER_HOST),
+        )
     spec = importlib.util.spec_from_file_location("virtual_phase1_lab_posture", LAB_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -290,7 +312,7 @@ def test_cli_runtime_reconcile_strict_by_default_still_runs(tmp_path, capsys, mo
 
 def test_lab_main_fails_closed_by_default_without_gates(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv(DEV_RELAXED_POSTURE_ENV_VAR, raising=False)
-    lab = _load_lab()
+    lab = _load_lab(monkeypatch)
     rc = lab.main(
         [
             "--simulated-verification",
@@ -308,7 +330,7 @@ def test_lab_main_fails_closed_by_default_without_gates(tmp_path, capsys, monkey
 
 def test_lab_main_relaxed_posture_flag_completes_offline(tmp_path, capsys, monkeypatch):
     _fake_compose_run(monkeypatch)
-    lab = _load_lab()
+    lab = _load_lab(monkeypatch)
     rc = lab.main(
         [
             "--simulated-verification",
@@ -328,7 +350,7 @@ def test_lab_main_relaxed_posture_flag_completes_offline(tmp_path, capsys, monke
 def test_lab_main_env_var_relaxes_posture_offline(tmp_path, capsys, monkeypatch):
     _fake_compose_run(monkeypatch)
     monkeypatch.setenv(DEV_RELAXED_POSTURE_ENV_VAR, "1")
-    lab = _load_lab()
+    lab = _load_lab(monkeypatch)
     rc = lab.main(
         [
             "--simulated-verification",
@@ -346,7 +368,7 @@ def test_lab_main_env_var_relaxes_posture_offline(tmp_path, capsys, monkeypatch)
 def test_lab_main_strict_with_authenticate_still_requires_sbom(tmp_path, capsys, monkeypatch):
     # Strict posture requires BOTH gates; configuring only one still fails closed.
     monkeypatch.delenv(DEV_RELAXED_POSTURE_ENV_VAR, raising=False)
-    lab = _load_lab()
+    lab = _load_lab(monkeypatch)
     rc = lab.main(
         [
             "--simulated-verification",
