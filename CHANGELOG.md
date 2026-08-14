@@ -55,6 +55,27 @@ are not proven (see `docs/live-gate-checklist.md`).
   `runtime-reconcile`; **Make targets** — `digest`, `seal`, `canonical-payload`,
   `virtual-lab`.
 
+### Added
+
+- **GH-store SPDX attestation for the pinned reference image** — the SBOM
+  workflow gains an `attest-existing-sbom` dispatch path that republishes the
+  SPDX documents already attached to an immutable manifest digest as GitHub
+  SPDX attestations and self-verifies with the exact `gh attestation verify`
+  invocation `GitHubSbomVerifier` uses. No rebuild: the pinned digest and the
+  sealed `package_digest` stay unchanged. Executed green for
+  `sha256:c187c4ce…` (run `31798338588`), so the GitHub-attestation SBOM
+  verifier now passes against the reference image.
+- **Real-Docker lifecycle integration tests** —
+  `tests/test_docker_integration.py` (opt-in, `AZAZEL_DECEPTION_DOCKER_TESTS=1`)
+  drives the actual adapter against a real daemon and the pinned reference
+  image: gated activation with runtime isolation assertions (read-only rootfs,
+  `cap_drop ALL`, no-new-privileges, non-root, internal-only network, no
+  published ports, CPU/memory/PID limits), attacker-modification destruction
+  across termination/re-activation, container-crash recovery via the operator
+  kill switch, an injected teardown fault failing closed with kill-switch
+  recovery, Edge reconciliation divergence reporting, deterministic reset with
+  evidence preservation, and evidence-chain tamper detection.
+
 ### Changed
 
 - Azazel-Fabric dependency pin moved from the reviewed development commit to
