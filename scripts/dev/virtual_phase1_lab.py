@@ -15,6 +15,14 @@ attacker-facing deployment. It deliberately does the following:
 * uses the real :class:`GitHubAttestationPackageVerifier` by default, so package
   authenticity is genuinely verified. It fails closed if ``gh``/network/the
   attestation is unavailable rather than pretending success.
+* builds its adapter through :func:`azazel_deception.runtime.posture.
+  build_reference_adapter`, so it runs with the same strict-by-default posture
+  (SBOM verification and authenticated decisions both required) as every other
+  reference-deployment entry point. ``--sbom-verify`` and ``--authenticate``
+  configure the corresponding verifier/authenticator; a strict run with either
+  one unconfigured fails closed. ``--dev-relaxed-posture`` (or
+  ``AZAZEL_DECEPTION_RELAXED_POSTURE=1``) is the one explicit, dev-only escape
+  hatch back to the permissive, optional-gate posture.
 * synthesizes Edge activation/termination decisions locally. These are clearly
   synthetic and carry no real Edge authority.
 * the ``--simulated-verification`` escape hatch (an in-lab accept function) lives
@@ -54,6 +62,7 @@ from azazel_deception.runtime.compose import (  # noqa: E402
     DockerComposeAdapter,
     RuntimeGateError,
 )
+from azazel_deception.runtime.posture import build_reference_adapter  # noqa: E402
 from azazel_deception.runtime.transport import (  # noqa: E402
     HmacDecisionAuthenticator,
     sign_decision,
@@ -270,12 +279,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--strict",
+        "--dev-relaxed-posture",
         action="store_true",
         help=(
-            "strict live posture: require the SBOM verifier and decision "
-            "authenticator to be configured (combine with --sbom-verify and "
-            "--authenticate, or the run fails closed)"
+            "DEV ONLY: fall back to the permissive, optional-gate posture "
+            "instead of the strict reference-deployment default (strict "
+            "requires --sbom-verify and --authenticate, or the run fails "
+            "closed). AZAZEL_DECEPTION_RELAXED_POSTURE=1 does the same thing. "
+            "Never use this against a real deployment."
         ),
     )
     args = parser.parse_args(argv)
@@ -293,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         verifier = GitHubAttestationPackageVerifier()
 
     decision_key = uuid.uuid4().hex if args.authenticate else None
-    adapter = DockerComposeAdapter(
+    adapter = build_reference_adapter(
         args.compose,
         args.state_root,
         live_enabled=True,  # explicit, lab-scoped; no default is changed
@@ -302,8 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         decision_authenticator=(
             HmacDecisionAuthenticator(decision_key) if decision_key else None
         ),
-        require_sbom_verification=args.strict,
-        require_authenticated_decisions=args.strict,
+        dev_relaxed_posture=(True if args.dev_relaxed_posture else None),
     )
 
     environment_id = f"az06-lab-env-{args.run_id}"

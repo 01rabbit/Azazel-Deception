@@ -37,8 +37,19 @@ are not proven (see `docs/live-gate-checklist.md`).
   `sign_decision` verify an HMAC-SHA256 over the canonical decision bytes before
   AZ-06 acts, fail-closed and before the one-shot decision is consumed;
   `heartbeat_is_fresh` fails closed on stale/absent/future heartbeats.
-- **Strict live posture** — `require_sbom_verification` / `require_authenticated_decisions`
-  make the injected gates mandatory for live activation (default off).
+- **Strict live posture, default-on for the reference deployment** —
+  `require_sbom_verification` / `require_authenticated_decisions` make the injected
+  gates mandatory for live activation. `build_reference_adapter()` is the single
+  place the reference deployment's posture is decided and turns both ON by default;
+  every reference entry point routes through it. The only relaxation is an explicit
+  dev opt-out (`--dev-relaxed-posture` / `AZAZEL_DECEPTION_RELAXED_POSTURE=1`). The
+  library `DockerComposeAdapter` keeps permissive explicit defaults for unit callers.
+- **Networked heartbeat + automatic state reconciliation** — the shadow/replay
+  service gains authenticated `heartbeat` and `reconcile` actions (descriptive-only,
+  every envelope gate applied); the Edge-side `HeartbeatLoop` polls on an interval,
+  tracks consecutive failures, drives a reconcile against the Edge active set after
+  each beat, and fires an `on_divergence` reporting hook — fail-closed and never
+  escaping its thread. Wired end-to-end and proven by a networked E2E.
 - **Operator kill switch and status surface** — `emergency_stop` halts an environment
   on operator authority alone (no Edge decision), fail-safe; read-only `health()`
   and `reconcile_with_edge()` operator surfaces.
@@ -49,8 +60,14 @@ are not proven (see `docs/live-gate-checklist.md`).
   Compose image to the package manifest by immutable digest.
 - **Virtual Phase-1 Lab** — `make virtual-lab` (`scripts/dev/virtual_phase1_lab.py`)
   drives package → placement → preflight → activation → evidence → termination →
-  reset against a real container, with `--sbom-verify`, `--authenticate`, `--strict`.
+  reset against a real container, with `--sbom-verify`, `--authenticate`, and the
+  strict posture on by default (dev opt-out `--dev-relaxed-posture`).
   Software-lifecycle proof only, not physical isolation.
+- **Failure-injection integration tests** — the opt-in real-Docker suite adds
+  runtime daemon restart (dockerd SIGTERM leaves fail-closed state and intact
+  evidence; kill-switch recovers) and resource exhaustion (`pids_limit` caps a
+  fork storm; a write hits ENOSPC on the 16m tmpfs; a runaway allocation is
+  OOM-killed by `mem_limit` while the main process survives).
 - **CLI commands** — `digest`, `canonical-payload`, `seal`, `runtime-status`,
   `runtime-reconcile`; **Make targets** — `digest`, `seal`, `canonical-payload`,
   `virtual-lab`.

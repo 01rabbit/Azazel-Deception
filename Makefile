@@ -29,8 +29,10 @@ compose-smoke:
 
 # Controlled software lifecycle simulation on a real container. Uses the real
 # GitHub attestation verifier by default; requires Docker + an authenticated gh.
+# The lab runs with the strict reference-deployment posture by default, so
+# --sbom-verify and --authenticate configure the gates it now requires.
 virtual-lab:
-	python scripts/dev/virtual_phase1_lab.py --output artifacts/lab/virtual-phase1-lab.json
+	python scripts/dev/virtual_phase1_lab.py --sbom-verify --authenticate --output artifacts/lab/virtual-phase1-lab.json
 
 mac-preflight:
 	bash scripts/dev/macos-arm64-preflight.sh

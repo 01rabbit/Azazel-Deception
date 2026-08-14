@@ -20,6 +20,12 @@ Transport security model:
   is appended to the tamper-evident evidence log for Edge audit and Knowledge
   ingest.
 
+The `heartbeat` and `reconcile` actions extend the same boundary to a live
+liveness/state-reconciliation loop: Edge can poll this node for a small health
+summary and ask what diverges between its own authoritative active set and
+local runtime state. Both are reports, not instructions — AZ-06 never acts on
+a reported divergence, and Edge remains the only party that can decide to.
+
 Authority model: everything returned is `descriptive_only` and records
 `enforcement_applied=False`. Edge remains the sole activation authority; this
 service cannot start anything (the adapter's live gates are unaffected).
@@ -52,7 +58,17 @@ RESPONSE_SCHEMA = "az06-shadow-response/v0.1"
 ENVELOPE_SIGNATURE_FIELD = "signature"
 AUDIT_ENVIRONMENT_ID = "shadow-audit"
 
-_ACTIONS = frozenset({"capabilities", "package", "plan", "activate", "terminate"})
+_ACTIONS = frozenset(
+    {
+        "capabilities",
+        "package",
+        "plan",
+        "activate",
+        "terminate",
+        "heartbeat",
+        "reconcile",
+    }
+)
 
 
 def _utcnow() -> datetime:
@@ -73,10 +89,16 @@ class ShadowReplayService:
         compose_file: str | Path,
         max_request_age_seconds: float = 30.0,
         decision_authenticator=None,
+        capability_provider=None,
     ) -> None:
         if not node_id:
             raise ValueError("shadow service requires a node_id")
         self.node_id = node_id
+        # How this node reports its own capabilities. Defaults to real host
+        # detection; injectable so tests (and hosts without the runtime adapter
+        # installed) can supply a deterministic snapshot instead of depending
+        # on ambient Docker availability.
+        self._capability_provider = capability_provider or detect_host_capabilities
         self._envelope_authenticator = HmacDecisionAuthenticator(
             transport_key, signature_field=ENVELOPE_SIGNATURE_FIELD
         )
@@ -87,6 +109,12 @@ class ShadowReplayService:
         self.package_path = Path(package_path)
         self.max_request_age_seconds = float(max_request_age_seconds)
         self.state = RuntimeStateStore(state_root)
+        # Server-side heartbeat counter. It is a liveness/ordering aid for the
+        # Edge loop (it can see this node restart or miss beats), not an
+        # authority token and not an anti-replay control — the one-shot
+        # request_id ledger owns anti-replay.
+        self._heartbeat_lock = threading.Lock()
+        self._heartbeat_sequence = 0
         # Shadow rehearsal never enables live execution, whatever the
         # environment says: the adapter is pinned to live_enabled=False.
         self.adapter = DockerComposeAdapter(
@@ -187,7 +215,7 @@ class ShadowReplayService:
             return self._response(request_id, "rejected", ["malformed_payload"])
         handler = getattr(self, f"_action_{action}")
         try:
-            result = handler(payload)
+            result = handler(payload, envelope)
         except (RuntimeGateError, PackageValidationError, ValueError) as exc:
             return self._response(
                 request_id,
@@ -198,12 +226,20 @@ class ShadowReplayService:
         return self._response(request_id, "ok", ["shadow_only_no_enforcement"], result)
 
     # -- actions -------------------------------------------------------------
+    #
+    # Every handler receives the validated payload plus the (already gated)
+    # request envelope, so an action can echo request-bound facts such as
+    # `issued_at` without re-deriving or re-trusting them.
 
-    def _action_capabilities(self, payload: dict[str, Any]) -> dict[str, Any]:
-        capabilities = detect_host_capabilities()
+    def _action_capabilities(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
+        capabilities = self._capability_provider()
         return {"capabilities": capabilities}
 
-    def _action_package(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _action_package(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
         raw = load_package(self.package_path)
         package = parse_package(raw)
         return {
@@ -213,20 +249,24 @@ class ShadowReplayService:
             "package_digest": package.package_digest,
         }
 
-    def _action_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _action_plan(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
         edge_decision_id = payload.get("edge_decision_id")
         if not edge_decision_id:
             raise ValueError("plan request requires edge_decision_id")
         raw = load_package(self.package_path)
         plan = build_placement_plan(
             raw,
-            detect_host_capabilities(),
+            self._capability_provider(),
             requested_tier=payload.get("requested_tier"),
             edge_decision_id=str(edge_decision_id),
         )
         return {"placement_plan": plan}
 
-    def _action_activate(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _action_activate(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
         for field in ("environment_id", "package", "placement", "decision"):
             if field not in payload:
                 raise ValueError(f"activate request requires {field}")
@@ -237,7 +277,9 @@ class ShadowReplayService:
             payload["decision"],
         )
 
-    def _action_terminate(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _action_terminate(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
         for field in ("environment_id", "decision"):
             if field not in payload:
                 raise ValueError(f"terminate request requires {field}")
@@ -245,6 +287,112 @@ class ShadowReplayService:
             str(payload["environment_id"]),
             payload["decision"],
         )
+
+    @staticmethod
+    def _environment_id_list(value: Any, field: str) -> list[str]:
+        """Coerce an Edge-supplied environment-id list, failing closed.
+
+        Edge owns this set; AZ-06 only reports on it. A malformed set is
+        rejected deterministically rather than silently reinterpreted, so a
+        divergence report can never be manufactured by a sloppy payload.
+        """
+
+        if not isinstance(value, list):
+            raise ValueError(f"{field} must be a list of environment ids")
+        if not all(isinstance(item, str) and item for item in value):
+            raise ValueError(f"{field} must contain only non-empty environment id strings")
+        return list(value)
+
+    def _health_summary(self) -> dict[str, Any]:
+        """Small descriptive slice of the adapter health surface.
+
+        A heartbeat is polled continuously, so it deliberately carries only
+        what the Edge loop needs to reason about liveness and drift, not the
+        full operator health payload.
+        """
+
+        health = self.adapter.health()
+        return {
+            "authority": "descriptive_only",
+            "adapter_id": health["adapter_id"],
+            "live_enabled": health["live_enabled"],
+            "active_environments": health["active_environments"],
+            "environment_count": len(health["environments"]),
+            # Counts every one-shot ledger entry, including the shadow
+            # request_id anti-replay records this endpoint writes per request.
+            "consumed_decisions": health["consumed_decisions"],
+        }
+
+    def _action_heartbeat(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Answer an authenticated Edge liveness poll. Descriptive-only.
+
+        Echoes Edge's own sequence/active set back so the Edge loop can detect
+        a stale or crossed conversation, and reports this node's identity, a
+        small health summary, and a server-side heartbeat sequence. Nothing
+        here starts, stops, or authorizes anything.
+        """
+
+        edge_sequence = payload.get("edge_sequence")
+        if edge_sequence is not None:
+            if isinstance(edge_sequence, bool) or not isinstance(edge_sequence, int):
+                raise ValueError("heartbeat edge_sequence must be an integer")
+        edge_active = payload.get("edge_active_environment_ids")
+        if edge_active is not None:
+            edge_active = sorted(
+                set(self._environment_id_list(edge_active, "edge_active_environment_ids"))
+            )
+
+        with self._heartbeat_lock:
+            self._heartbeat_sequence += 1
+            sequence = self._heartbeat_sequence
+
+        return {
+            "authority": "descriptive_only",
+            "enforcement_applied": False,
+            "node_id": self.node_id,
+            "heartbeat_sequence": sequence,
+            "edge_sequence": edge_sequence,
+            "edge_active_environment_ids": edge_active,
+            "health": self._health_summary(),
+            "issued_at": envelope.get("issued_at"),
+            "responded_at": _utcnow().isoformat(),
+        }
+
+    def _action_reconcile(
+        self, payload: dict[str, Any], envelope: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Report divergence against Edge's authoritative active set.
+
+        Returns the adapter's divergence report verbatim plus the local state
+        of every divergent environment, so Edge can decide what (if anything)
+        to do. AZ-06 reconciles nothing on its own: acting on a divergence
+        still requires a fresh Edge decision or the operator kill switch.
+        """
+
+        edge_active = self._environment_id_list(
+            payload.get("edge_active_environment_ids"),
+            "edge_active_environment_ids",
+        )
+        divergence = self.adapter.reconcile_with_edge(edge_active)
+        divergent = sorted(
+            set(divergence.get("local_only_active", []))
+            | set(divergence.get("edge_only_active", []))
+        )
+        return {
+            "authority": "descriptive_only",
+            "enforcement_applied": False,
+            "node_id": self.node_id,
+            "divergence": divergence,
+            "divergent_environment_ids": divergent,
+            "divergent_environment_states": {
+                environment_id: self.adapter.collect_status(environment_id)
+                for environment_id in divergent
+            },
+            "issued_at": envelope.get("issued_at"),
+            "responded_at": _utcnow().isoformat(),
+        }
 
 
 class _ShadowRequestHandler(BaseHTTPRequestHandler):

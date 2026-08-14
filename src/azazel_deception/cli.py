@@ -76,6 +76,15 @@ def _parser() -> argparse.ArgumentParser:
         "--compose",
         default="runtime/compose/reference-linux.compose.yaml",
     )
+    status.add_argument(
+        "--dev-relaxed-posture",
+        action="store_true",
+        help=(
+            "DEV ONLY: report the permissive, optional-gate posture instead of "
+            "the strict reference-deployment default. Never use against a real "
+            "deployment; AZAZEL_DECEPTION_RELAXED_POSTURE=1 does the same thing."
+        ),
+    )
 
     reconcile = sub.add_parser(
         "runtime-reconcile",
@@ -91,6 +100,16 @@ def _parser() -> argparse.ArgumentParser:
         "--compose",
         default="runtime/compose/reference-linux.compose.yaml",
     )
+    reconcile.add_argument(
+        "--dev-relaxed-posture",
+        action="store_true",
+        help=(
+            "DEV ONLY: construct the adapter with the permissive, optional-gate "
+            "posture instead of the strict reference-deployment default. Never "
+            "use against a real deployment; AZAZEL_DECEPTION_RELAXED_POSTURE=1 "
+            "does the same thing."
+        ),
+    )
     return parser
 
 
@@ -102,16 +121,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "runtime-status":
         # Imported lazily so package-only CLI use does not require the runtime.
-        from .runtime.compose import DockerComposeAdapter
+        from .runtime.posture import build_reference_adapter
 
-        adapter = DockerComposeAdapter(args.compose, args.state_root, live_enabled=False)
+        adapter = build_reference_adapter(
+            args.compose,
+            args.state_root,
+            live_enabled=False,
+            dev_relaxed_posture=(True if args.dev_relaxed_posture else None),
+        )
         print(json.dumps(adapter.health(), indent=2, sort_keys=True))
         return 0
 
     if args.command == "runtime-reconcile":
-        from .runtime.compose import DockerComposeAdapter
+        from .runtime.posture import build_reference_adapter
 
-        adapter = DockerComposeAdapter(args.compose, args.state_root, live_enabled=False)
+        adapter = build_reference_adapter(
+            args.compose,
+            args.state_root,
+            live_enabled=False,
+            dev_relaxed_posture=(True if args.dev_relaxed_posture else None),
+        )
         edge_active = [item for item in args.edge_active.split(",") if item.strip()]
         print(json.dumps(adapter.reconcile_with_edge(edge_active), indent=2, sort_keys=True))
         return 0
