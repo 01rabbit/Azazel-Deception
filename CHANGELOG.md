@@ -109,7 +109,9 @@ are not proven (see `docs/live-gate-checklist.md`).
 - Azazel-Fabric dependency pin moved from the reviewed development commit to
   the stable release tag `v0.5.0` (`pyproject.toml`, `docs/fabric-pin.md`);
   field/release packaging now consumes a tagged Fabric release as required by
-  the live-gate checklist.
+  the live-gate checklist. Confirmed formally released — `v0.5.0` tag + published
+  GitHub Release (not draft/prerelease) + green tag-driven `release.yml` — so the
+  "stable Fabric release exists and consumers pin the tag" live gate is satisfied.
 - Reference package `examples/packages/municipal-linux-v1/package.yaml` re-sealed
   via tooling (canonical digest), not a hand-copied CI value.
 - Bootstrap compatibility adapter preserves the caller's declared digest so
