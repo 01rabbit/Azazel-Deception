@@ -44,6 +44,40 @@ def test_github_attestation_verifier_reconstructs_canonical_payload(monkeypatch)
     assert observed["command"][4:6] == ["--repo", "01rabbit/Azazel-Deception"]
     assert "--signer-workflow" in observed["command"]
     assert "--deny-self-hosted-runners" in observed["command"]
+    # Source git ref is pinned so the workflow path alone cannot be trusted on
+    # an arbitrary branch/tag.
+    cmd = observed["command"]
+    assert cmd[cmd.index("--source-ref") + 1] == "refs/heads/main"
+
+
+def test_github_attestation_verifier_pins_configurable_source_ref(monkeypatch):
+    package = _package()
+    monkeypatch.setattr(verifier_module.shutil, "which", lambda command: "/usr/bin/gh")
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        return SimpleNamespace(returncode=0, stdout="verified")
+
+    monkeypatch.setattr(verifier_module.subprocess, "run", fake_run)
+    verifier = GitHubAttestationPackageVerifier(source_ref="refs/tags/v1.2.3")
+    assert verifier(package) is True
+    cmd = seen["command"]
+    assert cmd[cmd.index("--source-ref") + 1] == "refs/tags/v1.2.3"
+
+
+def test_github_attestation_verifier_omits_source_ref_when_unset(monkeypatch):
+    package = _package()
+    monkeypatch.setattr(verifier_module.shutil, "which", lambda command: "/usr/bin/gh")
+    seen = {}
+    monkeypatch.setattr(
+        verifier_module.subprocess,
+        "run",
+        lambda command, **k: seen.__setitem__("command", command)
+        or SimpleNamespace(returncode=0, stdout="verified"),
+    )
+    assert GitHubAttestationPackageVerifier(source_ref="")(package) is True
+    assert "--source-ref" not in seen["command"]
 
 
 def test_github_attestation_verifier_returns_false_on_cli_failure(monkeypatch):

@@ -234,7 +234,9 @@ attacker-flow channeling/routing.
   SPDX attestation. Making the SBOM gate mandatory is a remaining live-gate step.
 - `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
   payload bytes (not YAML) against a GitHub artifact attestation. It pins the
-  repository and signer-workflow identity, passes `--deny-self-hosted-runners`,
+  repository, signer-workflow identity, and source git ref (`--source-ref`,
+  default `refs/heads/main`, so an attestation built from another branch/tag is
+  rejected), passes `--deny-self-hosted-runners`,
   fails closed when `gh` is absent, on any CLI non-zero exit, on subprocess
   exception/timeout, on a non-`github-attestation:` `signature_ref`, and on a
   content-digest mismatch before any external call. A `verified: true` field in

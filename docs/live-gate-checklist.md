@@ -31,7 +31,7 @@ below is satisfied for the target release/profile.
 - [ ] The SBOM is additionally verified via a Sigstore-signed GitHub attestation (`GitHubSbomVerifier` is implemented and unit-tested, but the reference image publishes its SBOM as an OCI referrer, not yet as a GitHub SPDX attestation, so that verifier fails closed against it today).
 - [x] The SBOM gate can be made mandatory via the strict live posture (`require_sbom_verification=True` rejects live activation when no SBOM verifier is configured).
 - [ ] The strict posture is the enforced default for the reference live deployment (today it is opt-in and default-off).
-- [ ] Attestation signer identity is pinned to a git ref/tag as well as the workflow path (`gh attestation verify --signer-workflow` matches any ref of that workflow; consider `--source-ref`/`--cert-identity` before live).
+- [x] Attestation signer identity is pinned to a git ref as well as the workflow path: the verifier passes `--source-ref` (default `refs/heads/main`, configurable) so an attestation built from any other branch/tag is rejected. Proven end-to-end — the real verifier accepts the live `refs/heads/main` attestation and rejects a wrong ref. The in-workflow self-verify pins `--source-ref ${{ github.ref }}`.
 
 ## Isolation
 

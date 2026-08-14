@@ -25,14 +25,18 @@ class GitHubAttestationPackageVerifier:
     therefore has exactly the bytes bound by ``package_digest``; YAML formatting
     and the detached ``signature_ref`` cannot influence verification.
 
-    The verifier constrains both repository and signer workflow identity and can
-    reject attestations produced by self-hosted runners.  It makes no network or
-    runtime authorization decision; returning ``True`` only satisfies the
+    The verifier constrains the repository, the signer workflow *path*, and the
+    source git ref (``--signer-workflow`` alone matches the workflow on any ref,
+    so ``source_ref`` additionally pins the branch/tag the attestation was built
+    from — production trusts only ``refs/heads/main``). It can reject
+    attestations produced by self-hosted runners. It makes no network or runtime
+    authorization decision; returning ``True`` only satisfies the
     package-authenticity gate used by the AZ-06 lifecycle adapter.
     """
 
     repository: str = "01rabbit/Azazel-Deception"
     signer_workflow: str = "01rabbit/Azazel-Deception/.github/workflows/reference-package.yml"
+    source_ref: str = "refs/heads/main"
     gh_binary: str = "gh"
     deny_self_hosted_runners: bool = True
 
@@ -73,6 +77,8 @@ class GitHubAttestationPackageVerifier:
                     "--signer-workflow",
                     self.signer_workflow,
                 ]
+                if self.source_ref:
+                    command += ["--source-ref", self.source_ref]
                 if self.deny_self_hosted_runners:
                     command.append("--deny-self-hosted-runners")
                 result = subprocess.run(
