@@ -57,6 +57,20 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Added
 
+- **Authenticated Edge shadow/replay service** —
+  `azazel_deception.runtime.shadow_server` provides the strictly non-executing
+  network boundary for Edge integration (issue #5): HMAC-SHA256-signed
+  request/response envelopes, Edge-identity allowlisting, AZ-06 node binding,
+  `issued_at` freshness, one-shot request anti-replay, and deterministic
+  rejection reason codes. Actions cover capability discovery, package
+  identity, decision-bound deterministic placement plans, and
+  activation/termination rehearsal via new `DockerComposeAdapter`
+  `shadow_activation`/`shadow_termination` methods that run the canonical
+  validation and binding gates without consuming the one-shot decision
+  ledger, writing runtime state, or starting a container. Every request is
+  appended to the tamper-evident evidence log for Edge audit. The matching
+  Edge client and a real networked E2E (full bootstrap session over HTTP with
+  zero container start) live in Azazel-Edge.
 - **GH-store SPDX attestation for the pinned reference image** — the SBOM
   workflow gains an `attest-existing-sbom` dispatch path that republishes the
   SPDX documents already attached to an immutable manifest digest as GitHub

@@ -387,6 +387,70 @@ class DockerComposeAdapter:
         self.state.append_evidence(environment_id, event.model_dump(mode="json"))
         return {"environment_id": environment_id, "status": "active", "live_execution": True}
 
+    def shadow_activation(
+        self,
+        environment_id: str,
+        raw_package: dict[str, Any],
+        placement_data: dict[str, Any],
+        decision_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate an activation end-to-end without executing anything.
+
+        Runs the same canonical parsing, decision authentication (when an
+        authenticator is configured), binding, and verified-image checks the
+        live path runs, but never consumes the one-shot decision ledger, never
+        writes runtime state, and never starts a container. The one-shot
+        ledger stays untouched so a shadow rehearsal cannot poison the later
+        live consumption of the same decision.
+        """
+
+        package = self.validate_package(raw_package)
+        placement = PlacementPlan.model_validate(placement_data)
+        decision = EnvironmentActivationDecision.model_validate(
+            self._decision_contract(decision_data)
+        )
+        self._authenticate_decision(decision_data)
+        self._assert_activation_binding(package, placement, decision)
+        self._assert_verified_images(package, placement)
+        return {
+            "environment_id": environment_id,
+            "status": "shadow_accepted",
+            "live_execution": False,
+            "enforcement_applied": False,
+            "simulated_state": "active",
+            "decision_id": decision.decision_id,
+            "package_id": package.package_id,
+            "package_digest": package.package_digest,
+            "node_id": placement.node_id,
+            "selected_tier": placement.selected_tier,
+            "runtime_adapter": self.adapter_id,
+        }
+
+    def shadow_termination(
+        self,
+        environment_id: str,
+        decision_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate a termination decision without executing anything."""
+
+        decision = EnvironmentTerminationDecision.model_validate(
+            self._decision_contract(decision_data)
+        )
+        self._authenticate_decision(decision_data)
+        if decision.environment_id != environment_id:
+            raise RuntimeGateError("termination decision environment binding mismatch")
+        if decision.expires_at <= _utcnow():
+            raise RuntimeGateError("termination decision is expired")
+        return {
+            "environment_id": environment_id,
+            "status": "shadow_accepted",
+            "live_execution": False,
+            "enforcement_applied": False,
+            "simulated_state": "terminated",
+            "decision_id": decision.decision_id,
+            "reason": decision.reason,
+        }
+
     def collect_status(self, environment_id: str) -> dict[str, Any]:
         state = self.state.read(environment_id)
         return state or {"environment_id": environment_id, "state": "absent"}
