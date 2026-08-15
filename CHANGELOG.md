@@ -19,6 +19,16 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Added
 
+- **Incremental attacker-interaction emitter** — `runtime/observation.py`
+  (`InteractionObserver`, `build_runtime_context`, and
+  `DockerComposeAdapter.make_observer`) records fact-only interaction/reaction/
+  outcome observations to the tamper-evident evidence chain using the canonical
+  Fabric `InteractionObservation` shape, with confounder tags and runtime
+  context (active/omitted components, tier, architecture, adapter). AZ-06 emits
+  facts, not verdicts: the observer refuses any belief/effectiveness field via
+  `assert_no_effectiveness_verdict`, and an `interaction`-class observation
+  cannot carry a reaction. The layer-4 effectiveness inference stays with
+  Knowledge. Requires Fabric `v0.6.0`.
 - **Canonical package content digest** — a normalize-first, representation-invariant
   `package_digest` pipeline (raw/bootstrap → Fabric model → canonical payload →
   deterministic JSON → SHA-256). Same meaning hashes identically across raw dict,

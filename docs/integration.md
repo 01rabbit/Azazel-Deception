@@ -22,6 +22,13 @@ Fabric defines versioned wire contracts and invariants. AZ-06 consumes them; it 
 
 Knowledge consumes measured outcomes and returns advisory-only effectiveness context. It never selects a node, deployment tier, runtime adapter, placement, transition, or action.
 
+The relationship, effectiveness-observation model, and the finite-state
+transition path are specified in
+[`docs/deception-knowledge-integration.md`](deception-knowledge-integration.md):
+data is bidirectionally visible but control is one-directional (through the
+human and Edge), and effectiveness is observed as a layered
+interaction/reaction/outcome/inference ladder where AZ-06 emits only facts.
+
 ## Azazel-Gadget
 
 Gadget remains outside the full AZ-06 runtime. It may consume a minimal static compatible package subset for `scapegoat`, but it does not host dynamic narratives, personas, multi-step credential paths, or long-running state machines.
