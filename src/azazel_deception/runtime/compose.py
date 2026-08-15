@@ -37,6 +37,10 @@ from azazel_deception.runtime.preflight import (
     require_supply_chain_backed_images,
     require_trusted_package_verifier,
 )
+from azazel_deception.runtime.observation import (
+    InteractionObserver,
+    build_runtime_context,
+)
 from azazel_deception.runtime.state import RuntimeStateStore
 from azazel_deception.runtime.transport import (
     DEFAULT_SIGNATURE_FIELD,
@@ -454,6 +458,37 @@ class DockerComposeAdapter:
     def collect_status(self, environment_id: str) -> dict[str, Any]:
         state = self.state.read(environment_id)
         return state or {"environment_id": environment_id, "state": "absent"}
+
+    def make_observer(
+        self,
+        environment_id: str,
+        package: DeceptionPackage,
+        placement: PlacementPlan,
+        *,
+        resource_saturation: dict[str, float] | None = None,
+        capability_drift: list[str] | None = None,
+    ) -> InteractionObserver:
+        """Return an interaction observer bound to this adapter's evidence chain.
+
+        The observer records fact-only attacker-interaction observations (with
+        runtime context and confounder tags) to the same tamper-evident
+        evidence log the lifecycle uses. It authorizes nothing and cannot
+        assert effectiveness — AZ-06 emits facts, Knowledge infers.
+        """
+
+        runtime_context = build_runtime_context(
+            package,
+            placement,
+            resource_saturation=resource_saturation,
+            capability_drift=capability_drift,
+        )
+        return InteractionObserver(
+            self.state,
+            environment_id=environment_id,
+            package_id=package.package_id,
+            node_id=placement.node_id,
+            runtime_context=runtime_context,
+        )
 
     def terminate_environment(
         self,

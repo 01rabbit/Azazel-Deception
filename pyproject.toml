@@ -12,7 +12,7 @@ license = {text = "MIT"}
 authors = [{name = "01rabbit"}]
 dependencies = [
     "PyYAML>=6.0",
-    "azazel-fabric @ git+https://github.com/01rabbit/Azazel-Fabric.git@v0.5.0",
+    "azazel-fabric @ git+https://github.com/01rabbit/Azazel-Fabric.git@v0.6.0",
 ]
 
 [project.optional-dependencies]
