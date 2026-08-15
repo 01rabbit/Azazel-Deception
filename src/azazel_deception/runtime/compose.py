@@ -41,6 +41,7 @@ from azazel_deception.runtime.observation import (
     InteractionObserver,
     build_runtime_context,
 )
+from azazel_deception.runtime.observation_export import export_observations
 from azazel_deception.runtime.state import RuntimeStateStore
 from azazel_deception.runtime.transport import (
     DEFAULT_SIGNATURE_FIELD,
@@ -750,3 +751,16 @@ class DockerComposeAdapter:
             if line.strip():
                 events.append(json.loads(line))
         return events
+
+    def export_observations(self, environment_id: str) -> list[dict[str, Any]]:
+        """Return this environment's interaction observations only.
+
+        Delegates to :func:`azazel_deception.runtime.observation_export.
+        export_observations`: filters :meth:`export_evidence`'s mixed
+        lifecycle/observation chain down to fact-only interaction
+        observations, in order, as canonical Fabric-shaped dicts. This is
+        the surface a dev/virtual-E2E relay reads to hand facts onward to
+        Edge; AZ-06 itself performs no Knowledge push.
+        """
+
+        return export_observations(self.state, environment_id)
