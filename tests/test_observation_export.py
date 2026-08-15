@@ -209,12 +209,12 @@ def test_push_observations_forwards_exact_canonical_dicts(tmp_path):
     assert status == 202
     assert len(server.received_bodies) == 1
     received = json.loads(server.received_bodies[0].decode("utf-8"))
-    assert received == {"observations": observations}
+    assert received == {"environment_id": observations[0]["environment_id"], "items": observations}
     assert server.received_headers[0]["Authorization"] == "Bearer dev-token"
 
     # Each forwarded dict is unchanged and still Fabric-validates: the relay
     # neither adds nor interprets anything.
-    for record in received["observations"]:
+    for record in received["items"]:
         InteractionObservation.model_validate(record)
 
 

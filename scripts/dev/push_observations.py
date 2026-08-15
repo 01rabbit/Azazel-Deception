@@ -61,8 +61,10 @@ def push_observations(
 ) -> int | None:
     """POST a batch of observation dicts to a Knowledge-style ingest URL.
 
-    Sends the exact list of dicts given, JSON-encoded as
-    ``{"observations": [...]}``, in one POST. A dumb transport only: it does
+    Sends the exact list of dicts given, JSON-encoded as the Knowledge AZ-04
+    ingest envelope ``{"environment_id": ..., "items": [...]}`` (its
+    api/contracts.py boundary keys on ``items`` + ``environment_id``), in one
+    POST. A dumb transport only: it does
     not validate, filter, reorder, or annotate the payload, and it does not
     interpret attacker content -- that is the caller's job (typically
     ``export_observations``/``observations_since``, which already produced
@@ -77,7 +79,10 @@ def push_observations(
     if not observations:
         return None
 
-    payload = json.dumps({"observations": observations}).encode("utf-8")
+    environment_id = str(observations[0].get("environment_id", ""))
+    payload = json.dumps(
+        {"environment_id": environment_id, "items": observations}
+    ).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
