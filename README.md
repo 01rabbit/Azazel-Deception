@@ -1,5 +1,7 @@
 # AZ-06 Azazel-Deception - Container-First Engagement Environment Host
 
+![AZ-06 Azazel-Deception banner](images/Azazel-Deception_Banner.png)
+
 > **Codename:** `THEATRE`
 
 Azazel-Deception is **AZ-06 Azazel-Deception Host**, the attacker-facing Engagement Environment Plane of the Azazel series.
