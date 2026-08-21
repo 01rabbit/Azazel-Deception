@@ -155,6 +155,30 @@ def _safe_get(table: dict[Any, Any], key: Any) -> Any:
         return None
 
 
+def _safe_str(value: Any) -> str:
+    """``str(value)`` that never raises.
+
+    CPython enforces a digit limit on int<->str conversion
+    (``sys.get_int_max_str_digits()``); formatting an oversized int (which JSON
+    can carry) raises ``ValueError``. A malformed package must be reported, not
+    crash the checker, so any formatting error degrades to a sentinel string.
+    """
+
+    try:
+        return str(value)
+    except Exception:
+        return "<unrepresentable-value>"
+
+
+def _safe_repr(value: Any) -> str:
+    """``repr(value)`` counterpart of :func:`_safe_str` (never raises)."""
+
+    try:
+        return repr(value)
+    except Exception:
+        return "<unrepresentable-value>"
+
+
 def _safe_contains(container: Any, value: Any) -> bool:
     """``value in container`` that tolerates an unhashable, package-supplied value.
 
@@ -259,7 +283,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
     raw_os_family = environment.get("os_family")
     # Normalize the declared family so a mis-cased/space-padded value ("Linux",
     # " windows ") cannot silently disable the banner-family checks below.
-    os_family = str(raw_os_family).strip().lower() if raw_os_family is not None else None
+    os_family = _safe_str(raw_os_family).strip().lower() if raw_os_family is not None else None
 
     if os_generation is not None:
         profile = _safe_get(_OS_GENERATION_PROFILES, os_generation)
@@ -269,7 +293,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
                 _fatal(
                     "os_service_generation",
                     "unknown-os-generation",
-                    str(os_generation),
+                    _safe_str(os_generation),
                     "environment.os_generation is not a recognized synthetic OS generation",
                 )
             )
@@ -278,8 +302,8 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
                 _fatal(
                     "os_service_generation",
                     "os-family-generation-mismatch",
-                    str(os_generation),
-                    f"environment.os_family={raw_os_family!r} contradicts os_generation family {profile['family']!r}",
+                    _safe_str(os_generation),
+                    f"environment.os_family={_safe_repr(raw_os_family)} contradicts os_generation family {_safe_repr(profile['family'])}",
                 )
             )
 
@@ -293,8 +317,8 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
             _fatal(
                 "os_service_generation",
                 "unknown-os-family",
-                str(raw_os_family),
-                f"environment.os_family={raw_os_family!r} is not a recognized OS family "
+                _safe_str(raw_os_family),
+                f"environment.os_family={_safe_repr(raw_os_family)} is not a recognized OS family "
                 f"({sorted(_KNOWN_OS_FAMILIES)})",
             )
         )
@@ -303,7 +327,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
     declared_family = profile["family"] if profile else os_family
 
     for service in services:
-        component_id = str(service.get("component_id") or "<unknown-component>")
+        component_id = _safe_str(service.get("component_id") or "<unknown-component>")
         service_generation = service.get("os_generation")
         if service_generation is not None and os_generation is not None and service_generation != os_generation:
             findings.append(
@@ -311,7 +335,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
                     "os_service_generation",
                     "service-generation-mismatch",
                     component_id,
-                    f"service declares os_generation={service_generation!r} but environment is {os_generation!r}",
+                    f"service declares os_generation={_safe_repr(service_generation)} but environment is {_safe_repr(os_generation)}",
                 )
             )
 
@@ -319,14 +343,14 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
         if not banner:
             findings.append(_warn("os_service_generation", "missing-banner", component_id, "service has no banner declared"))
             continue
-        banner_lower = str(banner).lower()
+        banner_lower = _safe_str(banner).lower()
         if declared_family == "linux" and any(token in banner_lower for token in _WINDOWS_TOKENS):
             findings.append(
                 _fatal(
                     "os_service_generation",
                     "banner-family-mismatch",
                     component_id,
-                    f"banner {banner!r} names a Windows product but the environment family is linux",
+                    f"banner {_safe_repr(banner)} names a Windows product but the environment family is linux",
                 )
             )
         elif declared_family == "windows" and any(token in banner_lower for token in _LINUX_TOKENS):
@@ -335,7 +359,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
                     "os_service_generation",
                     "banner-family-mismatch",
                     component_id,
-                    f"banner {banner!r} names a Linux/Unix product but the environment family is windows",
+                    f"banner {_safe_repr(banner)} names a Linux/Unix product but the environment family is windows",
                 )
             )
 
@@ -358,7 +382,7 @@ def check_naming_coherence(
     env_organization = environment.get("organization")
 
     for account in accounts:
-        account_id = str(account.get("account_id") or "<unknown-account>")
+        account_id = _safe_str(account.get("account_id") or "<unknown-account>")
         hostname = account.get("hostname")
         if hostname is not None and env_hostname is not None and hostname != env_hostname:
             findings.append(
@@ -366,7 +390,7 @@ def check_naming_coherence(
                     "naming_coherence",
                     "account-hostname-mismatch",
                     account_id,
-                    f"account hostname {hostname!r} does not match environment hostname {env_hostname!r}",
+                    f"account hostname {_safe_repr(hostname)} does not match environment hostname {_safe_repr(env_hostname)}",
                 )
             )
         department = account.get("department")
@@ -376,7 +400,7 @@ def check_naming_coherence(
                     "naming_coherence",
                     "account-department-mismatch",
                     account_id,
-                    f"account department {department!r} does not match environment department {env_department!r}",
+                    f"account department {_safe_repr(department)} does not match environment department {_safe_repr(env_department)}",
                 )
             )
         organization = account.get("organization")
@@ -386,12 +410,12 @@ def check_naming_coherence(
                     "naming_coherence",
                     "account-organization-mismatch",
                     account_id,
-                    f"account organization {organization!r} does not match environment organization {env_organization!r}",
+                    f"account organization {_safe_repr(organization)} does not match environment organization {_safe_repr(env_organization)}",
                 )
             )
 
     for persona in personas:
-        persona_id = str(persona.get("persona_id") or "<unknown-persona>")
+        persona_id = _safe_str(persona.get("persona_id") or "<unknown-persona>")
         department = persona.get("department")
         if department is not None and env_department is not None and department != env_department:
             findings.append(
@@ -399,7 +423,7 @@ def check_naming_coherence(
                     "naming_coherence",
                     "persona-department-mismatch",
                     persona_id,
-                    f"persona department {department!r} does not match environment department {env_department!r}",
+                    f"persona department {_safe_repr(department)} does not match environment department {_safe_repr(env_department)}",
                 )
             )
         organization = persona.get("organization")
@@ -409,7 +433,7 @@ def check_naming_coherence(
                     "naming_coherence",
                     "persona-organization-mismatch",
                     persona_id,
-                    f"persona organization {organization!r} does not match environment organization {env_organization!r}",
+                    f"persona organization {_safe_repr(organization)} does not match environment organization {_safe_repr(env_organization)}",
                 )
             )
 
@@ -450,13 +474,13 @@ def check_chronology_locale_timezone(
     timezone = narrative.get("timezone")
     if locale is not None and timezone is not None:
         expected_prefix = _safe_get(_LOCALE_TIMEZONE_REGION, locale)
-        if expected_prefix is not None and not str(timezone).startswith(expected_prefix):
+        if expected_prefix is not None and not _safe_str(timezone).startswith(expected_prefix):
             findings.append(
                 _fatal(
                     "chronology_locale_timezone",
                     "locale-timezone-mismatch",
-                    str(locale),
-                    f"narrative locale {locale!r} is incoherent with timezone {timezone!r} "
+                    _safe_str(locale),
+                    f"narrative locale {_safe_repr(locale)} is incoherent with timezone {_safe_repr(timezone)} "
                     f"(expected a {expected_prefix}* zone)",
                 )
             )
@@ -465,7 +489,7 @@ def check_chronology_locale_timezone(
     working_days = calendar.get("working_days")
     normalized_working_days: set[str] | None = None
     if isinstance(working_days, (list, tuple, set)):
-        normalized_working_days = {str(day).lower()[:3] for day in working_days}
+        normalized_working_days = {_safe_str(day).lower()[:3] for day in working_days}
         unknown = normalized_working_days - _VALID_WEEKDAYS
         if unknown:
             findings.append(
@@ -478,7 +502,7 @@ def check_chronology_locale_timezone(
             )
 
     for file_ in files:
-        path = str(file_.get("path") or "<unknown-file>")
+        path = _safe_str(file_.get("path") or "<unknown-file>")
         created = _parse_iso(file_.get("created_at"))
         modified = _parse_iso(file_.get("modified_at"))
         if file_.get("created_at") is not None and created is None:
@@ -497,12 +521,12 @@ def check_chronology_locale_timezone(
 
     if normalized_working_days is not None:
         for persona in personas:
-            persona_id = str(persona.get("persona_id") or "<unknown-persona>")
+            persona_id = _safe_str(persona.get("persona_id") or "<unknown-persona>")
             schedule = _as_dict(persona.get("schedule"))
             days = schedule.get("days")
             if not isinstance(days, (list, tuple, set)) or not days:
                 continue
-            persona_days = {str(day).lower()[:3] for day in days}
+            persona_days = {_safe_str(day).lower()[:3] for day in days}
             outside = persona_days - _VALID_WEEKDAYS
             if outside:
                 findings.append(
@@ -537,7 +561,7 @@ def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[s
     findings: list[Finding] = []
 
     for file_ in files:
-        path = str(file_.get("path") or "<unknown-file>")
+        path = _safe_str(file_.get("path") or "<unknown-file>")
 
         for role in ("author_persona_id", "owner_persona_id"):
             persona_id = file_.get(role)
@@ -547,7 +571,7 @@ def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[s
                         "file_relationships",
                         f"unknown-{role.replace('_persona_id', '')}",
                         path,
-                        f"{role}={persona_id!r} does not match any declared persona",
+                        f"{role}={_safe_repr(persona_id)} does not match any declared persona",
                     )
                 )
 
@@ -567,20 +591,26 @@ def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[s
             elif isinstance(revision, str):
                 stripped = revision.strip()
                 if stripped.lstrip("+-").isdigit():
-                    revision_int = int(stripped)
+                    try:
+                        revision_int = int(stripped)
+                    except ValueError:
+                        # An oversized digit string exceeds CPython's int<->str
+                        # conversion limit; treat as an invalid revision rather
+                        # than crashing.
+                        revision_int = None
             if revision_int is None:
-                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {revision!r} is not an integer"))
+                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {_safe_repr(revision)} is not an integer"))
             elif revision_int < 1:
-                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {revision_int} must be >= 1"))
+                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {_safe_str(revision_int)} must be >= 1"))
 
         department = file_.get("department")
-        if department is not None and str(department).strip().lower().replace(" ", "-") not in path.lower().replace(" ", "-"):
+        if department is not None and _safe_str(department).strip().lower().replace(" ", "-") not in path.lower().replace(" ", "-"):
             findings.append(
                 _warn(
                     "file_relationships",
                     "path-department-mismatch",
                     path,
-                    f"file department {department!r} is not reflected in its path",
+                    f"file department {_safe_repr(department)} is not reflected in its path",
                 )
             )
 
@@ -606,7 +636,7 @@ def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Find
     findings: list[Finding] = []
 
     for persona in personas:
-        persona_id = str(persona.get("persona_id") or "<unknown-persona>")
+        persona_id = _safe_str(persona.get("persona_id") or "<unknown-persona>")
         role = persona.get("role")
         activities = _as_list(persona.get("activities"))
 
@@ -620,7 +650,7 @@ def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Find
                             "persona_relationships",
                             "role-activity-contradiction",
                             persona_id,
-                            f"role {role!r} is incompatible with declared activities {overlap}",
+                            f"role {_safe_repr(role)} is incompatible with declared activities {overlap}",
                         )
                     )
 
@@ -630,7 +660,7 @@ def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Find
             hours = schedule.get("hours")
             if hours is not None:
                 if not (isinstance(hours, (list, tuple)) and len(hours) == 2):
-                    findings.append(_fatal("persona_relationships", "invalid-schedule-hours", persona_id, f"schedule.hours {hours!r} must be a [start, end] pair"))
+                    findings.append(_fatal("persona_relationships", "invalid-schedule-hours", persona_id, f"schedule.hours {_safe_repr(hours)} must be a [start, end] pair"))
                 else:
                     start, end = hours
                     valid_bounds = all(isinstance(v, int) and 0 <= v <= 24 for v in (start, end))
@@ -640,7 +670,7 @@ def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Find
                                 "persona_relationships",
                                 "invalid-schedule-hours",
                                 persona_id,
-                                f"schedule.hours {hours!r} must satisfy 0 <= start < end <= 24",
+                                f"schedule.hours {_safe_repr(hours)} must satisfy 0 <= start < end <= 24",
                             )
                         )
         elif activities:
@@ -679,12 +709,16 @@ def check_credential_relationships(
     findings: list[Finding] = []
     # Normalize a caller-supplied reference_time the same way parsed timestamps
     # are, so a naive reference_time compared against an aware expiry (or vice
-    # versa) reports staleness instead of raising.
-    if reference_time is not None:
+    # versa) reports staleness instead of raising. A non-datetime reference_time
+    # is treated as "no reference" (freshness check skipped) rather than raising
+    # an AttributeError.
+    if isinstance(reference_time, datetime):
         reference_time = _as_aware(reference_time)
+    else:
+        reference_time = None
 
     for credential in credentials:
-        credential_id = str(credential.get("credential_id") or "<unknown-credential>")
+        credential_id = _safe_str(credential.get("credential_id") or "<unknown-credential>")
 
         owner_id = credential.get("owner_persona_id")
         owner = _safe_get(personas_by_id, owner_id) if owner_id is not None else None
@@ -694,7 +728,7 @@ def check_credential_relationships(
                     "credential_relationships",
                     "unknown-owner",
                     credential_id,
-                    f"owner_persona_id={owner_id!r} does not match any declared persona",
+                    f"owner_persona_id={_safe_repr(owner_id)} does not match any declared persona",
                 )
             )
 
@@ -705,7 +739,7 @@ def check_credential_relationships(
                     "credential_relationships",
                     "unknown-source-artifact",
                     credential_id,
-                    f"source_artifact_path={source!r} does not match any declared file",
+                    f"source_artifact_path={_safe_repr(source)} does not match any declared file",
                 )
             )
 
@@ -716,7 +750,7 @@ def check_credential_relationships(
                     "credential_relationships",
                     "unknown-target-surface",
                     credential_id,
-                    f"target_surface_id={target!r} does not match any declared service/surface",
+                    f"target_surface_id={_safe_repr(target)} does not match any declared service/surface",
                 )
             )
 
@@ -730,7 +764,7 @@ def check_credential_relationships(
                         "credential_relationships",
                         "role-scope-contradiction",
                         credential_id,
-                        f"scope {scope!r} is incompatible with owner role {role!r}",
+                        f"scope {_safe_repr(scope)} is incompatible with owner role {_safe_repr(role)}",
                     )
                 )
 
@@ -741,7 +775,7 @@ def check_credential_relationships(
                     "credential_relationships",
                     "unparseable-expiry",
                     credential_id,
-                    f"expires_at {credential.get('expires_at')!r} is not a valid ISO-8601 timestamp",
+                    f"expires_at {_safe_repr(credential.get('expires_at'))} is not a valid ISO-8601 timestamp",
                 )
             )
 
@@ -768,16 +802,16 @@ def _surface_ids(package: dict[str, Any]) -> set[str]:
     for service in _as_list(package.get("services")):
         component_id = _as_dict(service).get("component_id")
         if component_id is not None:
-            ids.add(str(component_id))
+            ids.add(_safe_str(component_id))
     for component in _as_list(package.get("components")):
         component = _as_dict(component)
         component_id = component.get("component_id")
         if component_id is not None:
-            ids.add(str(component_id))
+            ids.add(_safe_str(component_id))
         for surface in _as_list(component.get("surfaces")):
             surface_id = _as_dict(surface).get("surface_id")
             if surface_id is not None:
-                ids.add(str(surface_id))
+                ids.add(_safe_str(surface_id))
     return ids
 
 
@@ -840,9 +874,9 @@ def check_narrative_consistency(
     files = [_as_dict(item) for item in _as_list(package.get("files"))]
     credentials = [_as_dict(item) for item in _as_list(package.get("credentials"))]
 
-    persona_ids = {str(p["persona_id"]) for p in personas if p.get("persona_id") is not None}
-    personas_by_id = {str(p["persona_id"]): p for p in personas if p.get("persona_id") is not None}
-    file_paths = {str(f["path"]) for f in files if f.get("path") is not None}
+    persona_ids = {_safe_str(p["persona_id"]) for p in personas if p.get("persona_id") is not None}
+    personas_by_id = {_safe_str(p["persona_id"]): p for p in personas if p.get("persona_id") is not None}
+    file_paths = {_safe_str(f["path"]) for f in files if f.get("path") is not None}
     surface_ids = _surface_ids(package)
 
     findings: list[Finding] = []
@@ -862,10 +896,10 @@ def check_narrative_consistency(
     report_id = package.get("report_id") or f"{narrative.get('narrative_id') or package.get('package_id') or 'narrative'}-consistency-check"
 
     existing_consistency = _as_dict(package.get("consistency"))
-    waivers = [str(w) for w in _as_list(existing_consistency.get("waivers"))]
+    waivers = [_safe_str(w) for w in _as_list(existing_consistency.get("waivers"))]
 
     return NarrativeConsistencyReport(
-        report_id=str(report_id),
+        report_id=_safe_str(report_id),
         fatal_contradictions=fatal,
         warnings=warnings,
         waivers=waivers,

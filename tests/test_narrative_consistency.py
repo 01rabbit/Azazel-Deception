@@ -388,3 +388,46 @@ def test_non_dict_elements_in_sections_do_not_crash():
 def test_non_dict_package_does_not_crash():
     report = check_narrative_consistency(5)  # type: ignore[arg-type]
     assert isinstance(report.fatal_contradictions, list)
+
+
+# -- oversized-int (CPython int<->str digit limit) must not crash ------------
+
+_BIG = 10 ** 5000  # exceeds sys.get_int_max_str_digits() default of 4300
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p["services"][0].__setitem__("component_id", _BIG),
+    lambda p: p["services"][0].__setitem__("banner", _BIG),
+    lambda p: p["environment"].__setitem__("os_generation", _BIG),
+    lambda p: p["environment"].__setitem__("os_family", _BIG),
+    lambda p: p["accounts"][0].__setitem__("account_id", _BIG),
+    lambda p: p["personas"][0].__setitem__("persona_id", _BIG),
+    lambda p: p["files"][0].__setitem__("revision", _BIG),
+    lambda p: p["files"][0].__setitem__("revision", "9" * 5000),
+    lambda p: p["files"][0].__setitem__("path", _BIG),
+    lambda p: p["credentials"][0].__setitem__("owner_persona_id", _BIG),
+    lambda p: (p["personas"][0].__setitem__("role", "guest"),
+               p["credentials"][0].__setitem__("scope", _BIG)),
+    lambda p: p["personas"][0].__setitem__("schedule", {"days": ["mon"], "hours": [_BIG, _BIG + 1]}),
+    lambda p: p["narrative"].__setitem__("locale", _BIG),
+    lambda p: p.__setitem__("report_id", _BIG),
+    lambda p: p.__setitem__("consistency", {"waivers": [_BIG]}),
+])
+def test_oversized_int_fields_do_not_crash(mutate):
+    package = _coherent_package()
+    mutate(package)
+    report = check_narrative_consistency(package)  # must not raise ValueError
+    assert isinstance(report.fatal_contradictions, list)
+
+
+def test_oversized_int_revision_reported_as_invalid():
+    package = _coherent_package()
+    package["files"][0]["revision"] = "9" * 5000
+    report = check_narrative_consistency(package)  # must not raise
+    assert any("invalid-revision" in f for f in report.fatal_contradictions)
+
+
+@pytest.mark.parametrize("bad_ref", ["2026-01-01", 5, ["x"]])
+def test_non_datetime_reference_time_does_not_crash(bad_ref):
+    report = check_narrative_consistency(_coherent_package(), reference_time=bad_ref)  # no raise
+    assert isinstance(report.warnings, list)
