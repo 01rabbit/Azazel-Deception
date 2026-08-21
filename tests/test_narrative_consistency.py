@@ -313,3 +313,43 @@ def test_unhashable_locale_and_role_and_owner_do_not_crash():
     package["credentials"][0]["owner_persona_id"] = ["p-clerk"]  # unhashable owner
     report = check_narrative_consistency(package)  # must not raise TypeError
     assert isinstance(report.fatal_contradictions, list)
+
+
+def test_unhashable_membership_fields_do_not_crash():
+    # Every `in`/`not in` membership test against a package-supplied value that
+    # could be a list/dict must fail closed, not raise TypeError.
+    package = _coherent_package()
+    package["files"][0]["author_persona_id"] = ["p-clerk"]  # membership vs persona_ids
+    package["credentials"][0]["source_artifact_path"] = ["/x"]  # membership vs file_paths
+    package["credentials"][0]["target_surface_id"] = ["intranet-web"]  # vs surface_ids
+    report = check_narrative_consistency(package)  # must not raise
+    assert isinstance(report.fatal_contradictions, list)
+
+
+def test_unhashable_scope_against_forbidden_set_does_not_crash():
+    package = _coherent_package()
+    package["personas"][0]["role"] = "guest"  # has a non-empty forbidden-scope set
+    package["credentials"][0]["owner_persona_id"] = "p-clerk"
+    package["credentials"][0]["scope"] = ["admin"]  # unhashable scope
+    report = check_narrative_consistency(package)  # must not raise
+    assert isinstance(report.fatal_contradictions, list)
+
+
+def test_nested_unhashable_activities_do_not_crash():
+    package = _coherent_package()
+    package["personas"][0]["role"] = "guest"  # has a forbidden-activities set
+    package["personas"][0]["activities"] = [["nested-unhashable"], "file_records"]
+    report = check_narrative_consistency(package)  # set(activities) must not raise
+    assert isinstance(report.fatal_contradictions, list)
+
+
+def test_non_list_working_days_and_schedule_days_do_not_crash():
+    package = _coherent_package()
+    package["environment"]["operational_calendar"]["working_days"] = 5  # non-iterable
+    report = check_narrative_consistency(package)  # must not raise
+    assert isinstance(report.fatal_contradictions, list)
+
+    package2 = _coherent_package()
+    package2["personas"][0]["schedule"]["days"] = 7  # non-iterable
+    report2 = check_narrative_consistency(package2)  # must not raise
+    assert isinstance(report2.fatal_contradictions, list)

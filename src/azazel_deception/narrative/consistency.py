@@ -148,6 +148,43 @@ def _safe_get(table: dict[Any, Any], key: Any) -> Any:
         return None
 
 
+def _safe_contains(container: Any, value: Any) -> bool:
+    """``value in container`` that tolerates an unhashable, package-supplied value.
+
+    Membership tests against a set/dict raise ``TypeError`` on an unhashable
+    (list/dict) ``value`` exactly like ``dict.get`` does. A malformed package
+    must be reported as a contradiction, not crash the checker, so an
+    unhashable value is treated as simply "not a member" (``False``).
+    """
+
+    try:
+        return value in container
+    except TypeError:
+        return False
+
+
+def _safe_hashable_set(values: Any) -> set[Any]:
+    """Build a set from an iterable, dropping unhashable elements.
+
+    A package-supplied ``activities``/token list can itself contain unhashable
+    elements (e.g. a nested list); constructing ``set(values)`` over them would
+    raise. This keeps only the hashable members so downstream set algebra is
+    crash-safe; a dropped element simply cannot match any allowlist token.
+    """
+
+    out: set[Any] = set()
+    try:
+        iterator = iter(values)
+    except TypeError:
+        return out
+    for item in iterator:
+        try:
+            out.add(item)
+        except TypeError:
+            continue
+    return out
+
+
 def _as_aware(value: datetime) -> datetime:
     """Coerce a datetime to timezone-aware UTC (naive is assumed UTC).
 
@@ -420,7 +457,7 @@ def check_chronology_locale_timezone(
     calendar = _as_dict(environment.get("operational_calendar"))
     working_days = calendar.get("working_days")
     normalized_working_days: set[str] | None = None
-    if working_days is not None:
+    if isinstance(working_days, (list, tuple, set)):
         normalized_working_days = {str(day).lower()[:3] for day in working_days}
         unknown = normalized_working_days - _VALID_WEEKDAYS
         if unknown:
@@ -456,7 +493,7 @@ def check_chronology_locale_timezone(
             persona_id = str(persona.get("persona_id") or "<unknown-persona>")
             schedule = _as_dict(persona.get("schedule"))
             days = schedule.get("days")
-            if not days:
+            if not isinstance(days, (list, tuple, set)) or not days:
                 continue
             persona_days = {str(day).lower()[:3] for day in days}
             outside = persona_days - _VALID_WEEKDAYS
@@ -497,7 +534,7 @@ def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[s
 
         for role in ("author_persona_id", "owner_persona_id"):
             persona_id = file_.get(role)
-            if persona_id is not None and persona_id not in persona_ids:
+            if persona_id is not None and not _safe_contains(persona_ids, persona_id):
                 findings.append(
                     _fatal(
                         "file_relationships",
@@ -569,7 +606,7 @@ def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Find
         if role is not None:
             forbidden = _safe_get(_ROLE_FORBIDDEN_ACTIVITIES, role)
             if forbidden:
-                overlap = sorted(set(activities) & forbidden)
+                overlap = sorted(_safe_hashable_set(activities) & forbidden)
                 if overlap:
                     findings.append(
                         _fatal(
@@ -655,7 +692,7 @@ def check_credential_relationships(
             )
 
         source = credential.get("source_artifact_path")
-        if source is not None and source not in file_paths:
+        if source is not None and not _safe_contains(file_paths, source):
             findings.append(
                 _fatal(
                     "credential_relationships",
@@ -666,7 +703,7 @@ def check_credential_relationships(
             )
 
         target = credential.get("target_surface_id")
-        if target is not None and target not in surface_ids:
+        if target is not None and not _safe_contains(surface_ids, target):
             findings.append(
                 _fatal(
                     "credential_relationships",
@@ -680,7 +717,7 @@ def check_credential_relationships(
         if scope is not None and owner is not None:
             role = owner.get("role")
             forbidden = _safe_get(_ROLE_FORBIDDEN_SCOPES, role)
-            if forbidden and scope in forbidden:
+            if forbidden and _safe_contains(forbidden, scope):
                 findings.append(
                     _fatal(
                         "credential_relationships",
