@@ -237,6 +237,33 @@ class LureRegistry:
         expires_dt = _as_aware(record.lure.expires_at)
         return as_of_dt < expires_dt
 
+    def authorize(
+        self,
+        lure_id: str,
+        *,
+        target_surface_id: str,
+        as_of: str,
+    ) -> bool:
+        """Return whether ``lure_id`` may be presented at ``target_surface_id``.
+
+        Unlike :meth:`is_valid`, the target surface is **mandatory**: this is
+        the gate a caller uses to decide "may this honeytoken authenticate
+        against *this* surface right now". A lure minted for one surface can
+        never authorize against another, and a lure with no scoped target (or
+        an empty/blank ``target_surface_id`` argument) fails closed. This
+        exists so an authorization decision cannot accidentally omit the scope
+        check the way an ``is_valid(lure_id, as_of=...)`` call (target defaulted
+        to ``None``) silently would.
+        """
+        if not target_surface_id or not target_surface_id.strip():
+            return False
+        record = self._records.get(lure_id)
+        if record is None:
+            return False
+        if not record.lure.target_surface_id:
+            return False  # an unscoped lure authorizes nothing, fail closed
+        return self.is_valid(lure_id, as_of=as_of, target_surface_id=target_surface_id)
+
     def invalidate(self, lure_id: str, reason: str, *, as_of: str) -> None:
         """Invalidate a single lure, recording ``reason`` and ``as_of``.
 

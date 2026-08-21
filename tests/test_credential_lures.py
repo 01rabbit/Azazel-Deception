@@ -185,6 +185,58 @@ def test_registry_is_valid_false_for_unknown_lure_id():
     assert registry.is_valid("nonexistent-lure-id", as_of=ISSUED_AT) is False
 
 
+# -- authorize(): scope is mandatory (adversarial-review regression) ---------
+
+
+def test_authorize_requires_matching_target_surface():
+    registry = LureRegistry()
+    lure = _mint()
+    registry.add(lure)
+    as_of_mid_window = "2026-08-21T00:30:00+00:00"
+
+    # Correct surface within the window authorizes.
+    assert registry.authorize(
+        lure.credential_id, target_surface_id=DECOY_TARGET, as_of=as_of_mid_window
+    ) is True
+    # A lure minted for one surface never authorizes against another.
+    assert registry.authorize(
+        lure.credential_id, target_surface_id=OTHER_TARGET, as_of=as_of_mid_window
+    ) is False
+
+
+def test_authorize_fails_closed_on_missing_or_blank_target():
+    registry = LureRegistry()
+    lure = _mint()
+    registry.add(lure)
+    as_of_mid_window = "2026-08-21T00:30:00+00:00"
+    for bad in ("", "   "):
+        assert registry.authorize(
+            lure.credential_id, target_surface_id=bad, as_of=as_of_mid_window
+        ) is False
+
+
+def test_authorize_fails_closed_when_expired_or_unknown():
+    registry = LureRegistry()
+    lure = _mint(ttl_seconds=60)
+    registry.add(lure)
+    assert registry.authorize(
+        lure.credential_id, target_surface_id=DECOY_TARGET, as_of="2026-08-21T00:05:00+00:00"
+    ) is False
+    assert registry.authorize(
+        "nonexistent-lure-id", target_surface_id=DECOY_TARGET, as_of=ISSUED_AT
+    ) is False
+
+
+def test_authorize_fails_closed_after_invalidation():
+    registry = LureRegistry()
+    lure = _mint()
+    registry.add(lure)
+    registry.invalidate(lure.credential_id, "engagement-terminated", as_of=ISSUED_AT)
+    assert registry.authorize(
+        lure.credential_id, target_surface_id=DECOY_TARGET, as_of="2026-08-21T00:30:00+00:00"
+    ) is False
+
+
 def test_registry_invalidate_tracks_reason_and_timestamp():
     registry = LureRegistry()
     lure = _mint()

@@ -36,6 +36,12 @@ from azazel_fabric.deception_contracts.transitions import (
 from azazel_fabric.deception_integrity import catalog_content_digest
 
 from azazel_deception.runtime.compose import RuntimeGateError
+from azazel_deception.runtime.state import RuntimeStateStore
+from azazel_deception.runtime.transport import (
+    DecisionAuthenticationError,
+    DecisionAuthenticator,
+    require_authenticated_decision,
+)
 
 _APPROVED_STATUS = "approved"
 
@@ -50,9 +56,27 @@ class TransitionExecutor:
     ``catalog_digest`` field itself — is rejected rather than trusted.
     """
 
-    def __init__(self, catalog: TransitionCatalog, *, live_enabled: bool = False) -> None:
+    def __init__(
+        self,
+        catalog: TransitionCatalog,
+        *,
+        live_enabled: bool = False,
+        decision_authenticator: DecisionAuthenticator | None = None,
+        state: RuntimeStateStore | None = None,
+        require_authenticated_decisions: bool = False,
+    ) -> None:
         self.catalog = catalog
         self.live_enabled = bool(live_enabled)
+        # Optional transport authentication + one-shot anti-replay, mirroring
+        # DockerComposeAdapter's doctrine. When an authenticator is injected the
+        # edge_decision's HMAC signature is verified fail-closed; when a state
+        # store is injected the edge_decision_id is consumed one-shot so a
+        # replayed (or forged-then-replayed) "approved" decision is refused on
+        # the second use. ``require_authenticated_decisions`` promotes the
+        # authenticator from optional to mandatory (a strict live posture).
+        self.decision_authenticator = decision_authenticator
+        self.state = state
+        self.require_authenticated_decisions = bool(require_authenticated_decisions)
         # Seal/trust the digest the catalog carried at construction time.
         # Recomputed digests are always compared back to *this* value, never
         # to whatever `self.catalog.catalog_digest` happens to read as later.
@@ -103,13 +127,19 @@ class TransitionExecutor:
         return resolved
 
     @staticmethod
-    def _authorize(edge_decision: Any, transition_id: str) -> str:
+    def _authorize(edge_decision: Any, transition_id: str, environment_id: str) -> str:
         """Fail-closed check that Edge approved exactly this transition.
 
         Minimal expected shape: a mapping with ``transition_id`` matching the
         requested transition, a non-empty ``edge_decision_id``, and
         ``status == "approved"``. Anything absent, mismatched, or not
         explicitly approved is refused -- there is no default-open case.
+
+        When the decision carries an ``environment_id`` it must match the
+        environment being transitioned: an approval minted for one environment
+        can never be replayed against another. (It is optional only so that
+        callers minting a decision without an explicit environment binding stay
+        backward-compatible; a present-but-mismatched binding always fails.)
         """
 
         if not isinstance(edge_decision, dict):
@@ -120,6 +150,12 @@ class TransitionExecutor:
                 "edge_decision does not authorize this transition_id "
                 f"(decision={decision_transition_id!r} requested={transition_id!r})"
             )
+        decision_environment_id = edge_decision.get("environment_id")
+        if decision_environment_id is not None and decision_environment_id != environment_id:
+            raise RuntimeGateError(
+                "edge_decision does not authorize this environment_id "
+                f"(decision={decision_environment_id!r} requested={environment_id!r})"
+            )
         edge_decision_id = edge_decision.get("edge_decision_id")
         if not isinstance(edge_decision_id, str) or not edge_decision_id:
             raise RuntimeGateError("edge_decision is missing a non-empty edge_decision_id")
@@ -129,6 +165,48 @@ class TransitionExecutor:
                 f"edge_decision status is not {_APPROVED_STATUS!r}: {status!r}"
             )
         return edge_decision_id
+
+    def _authenticate_decision(self, edge_decision: dict[str, Any]) -> None:
+        """Verify the decision's transport authenticity (fail-closed).
+
+        Skipped only when no authenticator is configured *and* the strict
+        ``require_authenticated_decisions`` posture is off — matching the
+        DockerComposeAdapter contract that a forged/tampered decision cannot
+        pass once authentication is wired, and that the strict posture refuses
+        to run at all without an authenticator.
+        """
+
+        if self.require_authenticated_decisions and self.decision_authenticator is None:
+            raise RuntimeGateError(
+                "authenticated Edge decision required but no authenticator is configured"
+            )
+        try:
+            require_authenticated_decision(edge_decision, self.decision_authenticator)
+        except DecisionAuthenticationError as exc:
+            raise RuntimeGateError(str(exc)) from exc
+
+    def _consume_decision(self, edge_decision_id: str, environment_id: str, as_of: str) -> None:
+        """One-shot anti-replay: refuse a decision id already exercised.
+
+        Deterministic — the consume record is stamped with the caller-supplied
+        ``as_of`` (the decision-time context), never a wall-clock read, so this
+        executor keeps its no-``datetime.now`` invariant. A no-op when no state
+        store is injected.
+        """
+
+        if self.state is None:
+            return
+        consumed = self.state.consume_decision(
+            edge_decision_id,
+            {
+                "decision_id": edge_decision_id,
+                "kind": "transition",
+                "environment_id": environment_id,
+                "consumed_as_of": as_of,
+            },
+        )
+        if not consumed:
+            raise RuntimeGateError(f"Edge decision already consumed: {edge_decision_id}")
 
     @staticmethod
     def _validate_bounds_and_conditions(transition: FiniteStateTransition) -> None:
@@ -176,10 +254,16 @@ class TransitionExecutor:
         # 2. The transition must exist in the frozen catalog.
         transition = self._lookup_transition(transition_id)
 
-        # 3. Edge must have approved exactly this transition.
-        edge_decision_id = self._authorize(edge_decision, transition_id)
+        # 3. Transport authenticity: a forged/tampered decision is rejected
+        #    before its self-declared fields are trusted (fail-closed when an
+        #    authenticator is configured or the strict posture demands one).
+        self._authenticate_decision(edge_decision)
 
-        # 4. The caller's reported current_state must match the transition's
+        # 4. Edge must have approved exactly this transition for exactly this
+        #    environment.
+        edge_decision_id = self._authorize(edge_decision, transition_id, environment_id)
+
+        # 5. The caller's reported current_state must match the transition's
         #    declared from-state -- executing from the wrong state is refused.
         if current_state != transition.from_state:
             raise RuntimeGateError(
@@ -188,8 +272,12 @@ class TransitionExecutor:
                 f"expected={transition.from_state!r})"
             )
 
-        # 5. Bounds and rollback/termination conditions must be declared.
+        # 6. Bounds and rollback/termination conditions must be declared.
         self._validate_bounds_and_conditions(transition)
+
+        # 7. One-shot anti-replay: exercising this decision id consumes it, so
+        #    a replayed approval cannot drive a second transition.
+        self._consume_decision(edge_decision_id, environment_id, as_of)
 
         result: dict[str, Any] = {
             "environment_id": environment_id,

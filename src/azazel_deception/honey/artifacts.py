@@ -72,12 +72,31 @@ class SyntheticGuardViolation(HoneyArtifactError):
 # a false negative would leak a real-secret-shaped string into a manifest.
 BANNED_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
-        "private_key_header",
+        "pem_private_key_header",
+        # Any PEM private-key header (named algorithm or not), not just the
+        # short enumerated set -- e.g. "BEGIN PGP PRIVATE KEY BLOCK" too.
+        re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"),
+    ),
+    ("ssh_private_key_body", re.compile(r"\bMII[A-Za-z0-9+/=]{16,}")),
+    ("aws_access_key_id", re.compile(r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[0-9A-Z]{16}\b")),
+    (
+        "aws_secret_access_key",
+        # AWS-CLI-style assignment of a 40-char base64 secret. Anchored to an
+        # aws_secret_access_key / aws-secret label so it does not fire on every
+        # unrelated 40-char token.
         re.compile(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+            r"(?i)aws[_-]?secret[_-]?access[_-]?key\W{0,4}[A-Za-z0-9/+]{40}\b"
         ),
     ),
-    ("aws_access_key_id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("github_token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("stripe_secret_key", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("openai_api_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}\b")),
+    (
+        "jwt",
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\b"),
+    ),
     (
         "credit_card_visa",
         re.compile(r"\b4[0-9]{3}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}\b"),
@@ -311,6 +330,9 @@ def _build_artifact(
     extra_metadata: dict[str, Any],
 ) -> HoneyArtifact:
     assert_synthetic_only(content, context=f"{kind} artifact body ({path})")
+    # Defense-in-depth: the path itself (partly caller-derived) is guarded too,
+    # not only the body, so a secret-shaped string cannot ride in via a path.
+    assert_synthetic_only(path, context=f"{kind} artifact path")
 
     base = (package_id, seed, kind, *salt)
     artifact_id = f"honey-{kind}-" + _digest_hex(*base, "artifact-id")[:16]
@@ -542,6 +564,10 @@ def generate_honey_artifacts(
     package_id = package.get("package_id")
     if not isinstance(package_id, str) or not package_id.strip():
         raise HoneyArtifactError("package must declare a non-empty string package_id")
+    # package_id is woven into every generated artifact path (e.g.
+    # ``/srv/{package_id}/...``); guard it directly so a mis-authored id
+    # carrying a secret-shaped string cannot slip in via a path.
+    assert_synthetic_only(package_id, context="package field package_id")
 
     if not isinstance(seed, str) or not seed.strip():
         raise HoneyArtifactError("seed must be a non-empty string")

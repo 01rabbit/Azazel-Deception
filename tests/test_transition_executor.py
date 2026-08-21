@@ -8,9 +8,12 @@ import pytest
 from azazel_fabric.testing import make_transition_catalog
 
 from azazel_deception.runtime.compose import RuntimeGateError
+from azazel_deception.runtime.state import RuntimeStateStore
 from azazel_deception.runtime.transitions import TransitionExecutor
+from azazel_deception.runtime.transport import HmacDecisionAuthenticator, sign_decision
 
 AS_OF = "2026-08-21T00:00:00+00:00"
+_KEY = "test-edge-transport-key"
 
 
 def _approved_decision(**overrides: Any) -> dict[str, Any]:
@@ -192,3 +195,128 @@ def test_execute_never_mutates_the_sealed_catalog_digest():
         as_of=AS_OF,
     )
     assert catalog.catalog_digest == original_digest
+
+
+# -- transport authentication (forgery) -------------------------------------
+
+
+def test_forged_decision_fails_closed_when_authenticator_configured():
+    executor = _executor(decision_authenticator=HmacDecisionAuthenticator(_KEY))
+    # An "approved"-shaped dict with no valid signature must not pass once an
+    # authenticator is wired: this is exactly the forgery the gate exists for.
+    with pytest.raises(RuntimeGateError, match="authentication"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(),
+            as_of=AS_OF,
+        )
+
+
+def test_tampered_signed_decision_fails_closed():
+    executor = _executor(decision_authenticator=HmacDecisionAuthenticator(_KEY))
+    signed = sign_decision(_approved_decision(), _KEY)
+    signed["status"] = "approved"  # unchanged
+    signed["edge_decision_id"] = "swapped-after-signing"  # tamper post-signature
+    with pytest.raises(RuntimeGateError, match="authentication"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=signed,
+            as_of=AS_OF,
+        )
+
+
+def test_authentically_signed_decision_is_accepted():
+    executor = _executor(decision_authenticator=HmacDecisionAuthenticator(_KEY))
+    signed = sign_decision(_approved_decision(), _KEY)
+    result = executor.execute(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=signed,
+        as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"
+    assert result["edge_decision_id"] == "edge-decision-1"
+
+
+def test_strict_posture_requires_an_authenticator():
+    executor = _executor(require_authenticated_decisions=True)
+    with pytest.raises(RuntimeGateError, match="no authenticator is configured"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(),
+            as_of=AS_OF,
+        )
+
+
+# -- environment binding -----------------------------------------------------
+
+
+def test_decision_bound_to_another_environment_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="environment_id"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(environment_id="env-2"),
+            as_of=AS_OF,
+        )
+
+
+def test_decision_bound_to_matching_environment_is_accepted():
+    executor = _executor()
+    result = executor.execute(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=_approved_decision(environment_id="env-1"),
+        as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"
+
+
+# -- one-shot anti-replay ----------------------------------------------------
+
+
+def test_replayed_decision_fails_closed_with_state_store(tmp_path):
+    state = RuntimeStateStore(tmp_path)
+    executor = TransitionExecutor(make_transition_catalog(), state=state)
+    kwargs = dict(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=_approved_decision(),
+        as_of=AS_OF,
+    )
+    first = executor.execute(**kwargs)
+    assert first["status"] == "shadow_simulated"
+    with pytest.raises(RuntimeGateError, match="already consumed"):
+        executor.execute(**kwargs)
+
+
+def test_distinct_decision_ids_are_not_replays(tmp_path):
+    state = RuntimeStateStore(tmp_path)
+    executor = TransitionExecutor(make_transition_catalog(), state=state)
+    executor.execute(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=_approved_decision(edge_decision_id="edge-decision-1"),
+        as_of=AS_OF,
+    )
+    # A different, genuinely new decision id is not a replay.
+    result = executor.execute(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=_approved_decision(edge_decision_id="edge-decision-2"),
+        as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"

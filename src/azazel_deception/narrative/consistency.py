@@ -68,7 +68,7 @@ the following optional narrative-detail sections, each a list/dict of plain
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
 from azazel_fabric.deception_contracts import NarrativeConsistencyReport
@@ -132,21 +132,37 @@ def _as_dict(value: Any) -> dict[str, Any]:
     raise TypeError(f"expected a dict, got {type(value).__name__}")
 
 
+def _as_aware(value: datetime) -> datetime:
+    """Coerce a datetime to timezone-aware UTC (naive is assumed UTC).
+
+    Every timestamp this module reasons about is normalized through here so a
+    mix of naive and tz-aware inputs can never raise a ``TypeError`` on
+    comparison -- the consistency checker reports contradictions, it must never
+    crash on them. Does not read the wall clock.
+    """
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _parse_iso(value: Any) -> datetime | None:
     """Parse an ISO-8601 timestamp string. Returns ``None`` if unparseable.
 
-    Never touches the wall clock; purely a string -> datetime conversion.
+    Never touches the wall clock; purely a string -> datetime conversion. The
+    result is always timezone-aware (naive input is treated as UTC) so callers
+    can compare any two parsed timestamps without a naive/aware ``TypeError``.
     """
 
     if isinstance(value, datetime):
-        return value
+        return _as_aware(value)
     if not isinstance(value, str) or not value:
         return None
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        return _as_aware(datetime.fromisoformat(text))
     except ValueError:
         return None
 
@@ -174,10 +190,16 @@ _LINUX_TOKENS = {"ubuntu", "debian", "centos", "red hat", "rhel", "openssh", "li
 _WINDOWS_TOKENS = {"windows", "microsoft", "iis", ".net", "win32"}
 
 
+_KNOWN_OS_FAMILIES = {"linux", "windows"}
+
+
 def check_os_service_generation(environment: dict[str, Any], services: Iterable[dict[str, Any]]) -> list[Finding]:
     findings: list[Finding] = []
     os_generation = environment.get("os_generation")
-    os_family = environment.get("os_family")
+    raw_os_family = environment.get("os_family")
+    # Normalize the declared family so a mis-cased/space-padded value ("Linux",
+    # " windows ") cannot silently disable the banner-family checks below.
+    os_family = str(raw_os_family).strip().lower() if raw_os_family is not None else None
 
     if os_generation is not None:
         profile = _OS_GENERATION_PROFILES.get(os_generation)
@@ -197,9 +219,25 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
                     "os_service_generation",
                     "os-family-generation-mismatch",
                     str(os_generation),
-                    f"environment.os_family={os_family!r} contradicts os_generation family {profile['family']!r}",
+                    f"environment.os_family={raw_os_family!r} contradicts os_generation family {profile['family']!r}",
                 )
             )
+
+    # A declared os_family that is neither recognized nor pinned by a known
+    # os_generation profile fails closed: it must not be allowed to slip past
+    # the banner-family checks (which only fire for a known family).
+    if os_family is not None and os_family not in _KNOWN_OS_FAMILIES and (
+        os_generation is None or _OS_GENERATION_PROFILES.get(os_generation) is None
+    ):
+        findings.append(
+            _fatal(
+                "os_service_generation",
+                "unknown-os-family",
+                str(raw_os_family),
+                f"environment.os_family={raw_os_family!r} is not a recognized OS family "
+                f"({sorted(_KNOWN_OS_FAMILIES)})",
+            )
+        )
 
     profile = _OS_GENERATION_PROFILES.get(os_generation) if os_generation else None
     declared_family = profile["family"] if profile else os_family
@@ -455,13 +493,25 @@ def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[s
 
         revision = file_.get("revision")
         if revision is not None:
-            try:
-                revision_int = int(revision)
-            except (TypeError, ValueError):
+            # A revision must be a whole number >= 1. Reject a bool, a
+            # non-integral float (2.5 -> not "3"), or an unparseable string
+            # rather than silently truncating via int().
+            revision_int: int | None = None
+            if isinstance(revision, bool):
+                pass  # bool is an int subclass but never a valid revision
+            elif isinstance(revision, int):
+                revision_int = revision
+            elif isinstance(revision, float):
+                if revision.is_integer():
+                    revision_int = int(revision)
+            elif isinstance(revision, str):
+                stripped = revision.strip()
+                if stripped.lstrip("+-").isdigit():
+                    revision_int = int(stripped)
+            if revision_int is None:
                 findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {revision!r} is not an integer"))
-            else:
-                if revision_int < 1:
-                    findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {revision_int} must be >= 1"))
+            elif revision_int < 1:
+                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {revision_int} must be >= 1"))
 
         department = file_.get("department")
         if department is not None and department.strip().lower().replace(" ", "-") not in path.lower().replace(" ", "-"):
@@ -567,6 +617,11 @@ def check_credential_relationships(
     reference_time: datetime | None,
 ) -> list[Finding]:
     findings: list[Finding] = []
+    # Normalize a caller-supplied reference_time the same way parsed timestamps
+    # are, so a naive reference_time compared against an aware expiry (or vice
+    # versa) reports staleness instead of raising.
+    if reference_time is not None:
+        reference_time = _as_aware(reference_time)
 
     for credential in credentials:
         credential_id = str(credential.get("credential_id") or "<unknown-credential>")

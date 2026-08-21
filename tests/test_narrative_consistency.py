@@ -227,3 +227,62 @@ def test_unknown_os_generation_fails_closed():
     report = check_narrative_consistency(package)
     assert not report.activatable
     assert any("os_service_generation/unknown-os-generation" in f for f in report.fatal_contradictions)
+
+
+# -- adversarial-review regressions -----------------------------------------
+
+
+def test_mixed_naive_and_aware_timestamps_do_not_raise():
+    # created_at is tz-aware, modified_at is naive: comparing them must report
+    # (or not) a contradiction, never raise a naive/aware TypeError.
+    package = _coherent_package()
+    package["files"][0]["created_at"] = "2024-01-10T09:00:00+09:00"
+    package["files"][0]["modified_at"] = "2024-01-10T00:30:00"  # naive, == 09:30 JST
+    report = check_narrative_consistency(package)  # must not raise
+    # 00:30Z == 09:30 JST is after 09:00 JST, so no reversed-chronology fatal.
+    assert not any("reversed-file-chronology" in f for f in report.fatal_contradictions)
+
+
+def test_naive_reference_time_against_aware_expiry_does_not_raise():
+    package = _coherent_package()
+    package["credentials"][0]["expires_at"] = "2020-01-01T00:00:00+09:00"  # aware, past
+    naive_reference = datetime(2026, 1, 1, 0, 0, 0)  # naive
+    report = check_narrative_consistency(package, reference_time=naive_reference)  # no raise
+    # Expiry is in the past relative to the reference: reported as a warning,
+    # and crucially the comparison did not raise a naive/aware TypeError.
+    assert any("credential-already-expired" in f for f in report.warnings)
+
+
+def test_miscased_os_family_still_catches_banner_mismatch():
+    # A capitalized os_family must not silently disable the banner-family check.
+    package = _coherent_package()
+    del package["environment"]["os_generation"]
+    package["environment"]["os_family"] = "Linux"  # note the capital L
+    package["services"][0]["banner"] = "Microsoft-IIS/10.0"
+    report = check_narrative_consistency(package)
+    assert not report.activatable
+    assert any("banner-family-mismatch" in f for f in report.fatal_contradictions)
+
+
+def test_unknown_os_family_without_generation_fails_closed():
+    package = _coherent_package()
+    del package["environment"]["os_generation"]
+    package["environment"]["os_family"] = "plan9"
+    report = check_narrative_consistency(package)
+    assert not report.activatable
+    assert any("os_service_generation/unknown-os-family" in f for f in report.fatal_contradictions)
+
+
+def test_non_integral_float_revision_is_rejected():
+    package = _coherent_package()
+    package["files"][0]["revision"] = 2.5
+    report = check_narrative_consistency(package)
+    assert not report.activatable
+    assert any("file_relationships/invalid-revision" in f for f in report.fatal_contradictions)
+
+
+def test_integral_float_revision_is_accepted():
+    package = _coherent_package()
+    package["files"][0]["revision"] = 3.0
+    report = check_narrative_consistency(package)
+    assert not any("invalid-revision" in f for f in report.fatal_contradictions)
