@@ -117,19 +117,26 @@ def _warn(dimension: str, code: str, subject: str, message: str) -> Finding:
 
 
 def _as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
+    """Coerce to a list, tolerating malformed input.
+
+    A wrong-typed value degrades to ``[]`` rather than raising, so the
+    consistency checker never crashes on a package that puts the wrong
+    container type where a list is expected. Wrong-typed *sections* are still
+    surfaced as fatal findings (see ``_section_type_findings``); this helper
+    just guarantees no uncaught ``TypeError`` escapes the checker.
+    """
+
     if isinstance(value, list):
         return value
-    raise TypeError(f"expected a list, got {type(value).__name__}")
+    return []
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
+    """Coerce to a dict, tolerating malformed input (see :func:`_as_list`)."""
+
     if isinstance(value, dict):
         return value
-    raise TypeError(f"expected a dict, got {type(value).__name__}")
+    return {}
 
 
 def _safe_get(table: dict[Any, Any], key: Any) -> Any:
@@ -759,18 +766,50 @@ def check_credential_relationships(
 def _surface_ids(package: dict[str, Any]) -> set[str]:
     ids: set[str] = set()
     for service in _as_list(package.get("services")):
-        component_id = service.get("component_id")
+        component_id = _as_dict(service).get("component_id")
         if component_id is not None:
             ids.add(str(component_id))
     for component in _as_list(package.get("components")):
+        component = _as_dict(component)
         component_id = component.get("component_id")
         if component_id is not None:
             ids.add(str(component_id))
         for surface in _as_list(component.get("surfaces")):
-            surface_id = surface.get("surface_id")
+            surface_id = _as_dict(surface).get("surface_id")
             if surface_id is not None:
                 ids.add(str(surface_id))
     return ids
+
+
+_DICT_SECTIONS = ("narrative", "environment", "consistency")
+_LIST_SECTIONS = ("services", "accounts", "personas", "files", "credentials", "components")
+
+
+def _section_type_findings(package: dict[str, Any]) -> list[Finding]:
+    """Fail closed on a top-level section of the wrong container type.
+
+    ``_as_dict``/``_as_list`` degrade a malformed section to empty so nothing
+    crashes; this additionally records the malformation as a fatal finding so a
+    structurally-broken package is reported as not-activatable rather than
+    silently treated as if the section were absent.
+    """
+
+    findings: list[Finding] = []
+    for key in _DICT_SECTIONS:
+        value = package.get(key)
+        if value is not None and not isinstance(value, dict):
+            findings.append(
+                _fatal("structure", "invalid-section-type", key,
+                       f"package.{key} must be a mapping, got {type(value).__name__}")
+            )
+    for key in _LIST_SECTIONS:
+        value = package.get(key)
+        if value is not None and not isinstance(value, list):
+            findings.append(
+                _fatal("structure", "invalid-section-type", key,
+                       f"package.{key} must be a list, got {type(value).__name__}")
+            )
+    return findings
 
 
 def check_narrative_consistency(
@@ -791,6 +830,8 @@ def check_narrative_consistency(
     identical report regardless of internal iteration order.
     """
 
+    package = _as_dict(package)  # tolerate a non-dict package, never crash
+
     narrative = _as_dict(package.get("narrative"))
     environment = _as_dict(package.get("environment"))
     services = [_as_dict(item) for item in _as_list(package.get("services"))]
@@ -805,6 +846,7 @@ def check_narrative_consistency(
     surface_ids = _surface_ids(package)
 
     findings: list[Finding] = []
+    findings.extend(_section_type_findings(package))
     findings.extend(check_os_service_generation(environment, services))
     findings.extend(check_naming_coherence(environment, accounts, personas))
     findings.extend(check_chronology_locale_timezone(narrative, environment, files, personas))

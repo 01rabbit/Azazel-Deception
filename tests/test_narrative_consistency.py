@@ -353,3 +353,38 @@ def test_non_list_working_days_and_schedule_days_do_not_crash():
     package2["personas"][0]["schedule"]["days"] = 7  # non-iterable
     report2 = check_narrative_consistency(package2)  # must not raise
     assert isinstance(report2.fatal_contradictions, list)
+
+
+# -- wrong-typed sections/elements: report, never raise ----------------------
+
+
+@pytest.mark.parametrize("section", ["services", "accounts", "personas", "files", "credentials", "components"])
+def test_wrong_typed_list_section_is_fatal_not_crash(section):
+    package = _coherent_package()
+    package[section] = 5  # wrong container type where a list is expected
+    report = check_narrative_consistency(package)  # must not raise TypeError
+    assert not report.activatable
+    assert any(f"structure/invalid-section-type:{section}" in f or f"invalid-section-type" in f
+               for f in report.fatal_contradictions)
+
+
+@pytest.mark.parametrize("section", ["narrative", "environment", "consistency"])
+def test_wrong_typed_dict_section_is_fatal_not_crash(section):
+    package = _coherent_package()
+    package[section] = 5  # wrong container type where a mapping is expected
+    report = check_narrative_consistency(package)  # must not raise TypeError
+    assert not report.activatable
+    assert any("invalid-section-type" in f for f in report.fatal_contradictions)
+
+
+def test_non_dict_elements_in_sections_do_not_crash():
+    package = _coherent_package()
+    package["files"] = [1, 2, 3]  # non-dict elements
+    package["components"] = [1, {"component_id": "c1", "surfaces": [7]}]  # bad elems + surfaces
+    report = check_narrative_consistency(package)  # must not raise AttributeError
+    assert isinstance(report.fatal_contradictions, list)
+
+
+def test_non_dict_package_does_not_crash():
+    report = check_narrative_consistency(5)  # type: ignore[arg-type]
+    assert isinstance(report.fatal_contradictions, list)
