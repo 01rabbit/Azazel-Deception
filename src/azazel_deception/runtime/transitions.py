@@ -25,6 +25,7 @@ contract, not to this executor.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from azazel_fabric.deception_contracts.transitions import (
@@ -46,6 +47,28 @@ from azazel_deception.runtime.transport import (
 _APPROVED_STATUS = "approved"
 
 
+def _parse_iso_aware(value: Any, *, field: str) -> datetime:
+    """Parse an ISO-8601 timestamp to a tz-aware UTC datetime (naive -> UTC).
+
+    Fail-closed: an absent/non-string/unparseable value raises
+    :class:`RuntimeGateError`. Pure string->datetime conversion; never reads the
+    wall clock, so callers stay deterministic.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeGateError(f"{field} must be a non-empty ISO-8601 timestamp string")
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise RuntimeGateError(f"{field} is not a valid ISO-8601 timestamp: {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class TransitionExecutor:
     """Executes only Edge-authorized transitions frozen into a catalog.
 
@@ -64,19 +87,33 @@ class TransitionExecutor:
         decision_authenticator: DecisionAuthenticator | None = None,
         state: RuntimeStateStore | None = None,
         require_authenticated_decisions: bool = False,
+        require_replay_protection: bool = False,
+        require_decision_expiry: bool = False,
     ) -> None:
         self.catalog = catalog
         self.live_enabled = bool(live_enabled)
-        # Optional transport authentication + one-shot anti-replay, mirroring
-        # DockerComposeAdapter's doctrine. When an authenticator is injected the
-        # edge_decision's HMAC signature is verified fail-closed; when a state
-        # store is injected the edge_decision_id is consumed one-shot so a
-        # replayed (or forged-then-replayed) "approved" decision is refused on
-        # the second use. ``require_authenticated_decisions`` promotes the
-        # authenticator from optional to mandatory (a strict live posture).
+        # Optional transport authentication + one-shot anti-replay + decision
+        # expiry, mirroring DockerComposeAdapter's doctrine. When an
+        # authenticator is injected the edge_decision's HMAC signature is
+        # verified fail-closed; when a state store is injected the
+        # edge_decision_id is consumed one-shot so a replayed (or
+        # forged-then-replayed) "approved" decision is refused on the second
+        # use; when the decision carries an expires_at it is enforced against
+        # the caller-supplied as_of so a captured decision cannot be replayed
+        # indefinitely into the future.
+        #
+        # The three ``require_*`` flags each promote one protection from
+        # opportunistic to mandatory, so a strict live posture fails closed
+        # when the corresponding protection is not actually wired (rather than
+        # silently shipping without it):
+        #   * require_authenticated_decisions -> an authenticator must be set
+        #   * require_replay_protection       -> a state store must be set
+        #   * require_decision_expiry         -> the decision must carry expires_at
         self.decision_authenticator = decision_authenticator
         self.state = state
         self.require_authenticated_decisions = bool(require_authenticated_decisions)
+        self.require_replay_protection = bool(require_replay_protection)
+        self.require_decision_expiry = bool(require_decision_expiry)
         # Seal/trust the digest the catalog carried at construction time.
         # Recomputed digests are always compared back to *this* value, never
         # to whatever `self.catalog.catalog_digest` happens to read as later.
@@ -185,16 +222,44 @@ class TransitionExecutor:
         except DecisionAuthenticationError as exc:
             raise RuntimeGateError(str(exc)) from exc
 
+    def _check_decision_expiry(self, edge_decision: dict[str, Any], as_of: str) -> None:
+        """Reject an expired (or expiry-required-but-absent) Edge decision.
+
+        Deterministic: compares two caller-supplied timestamps (the decision's
+        ``expires_at`` and ``as_of``), never the wall clock. When the decision
+        carries an ``expires_at`` it is always enforced; ``require_decision_
+        expiry`` additionally makes the field mandatory so a strict posture will
+        not accept an unbounded, never-expiring decision.
+        """
+
+        expires_at = edge_decision.get("expires_at")
+        if expires_at is None:
+            if self.require_decision_expiry:
+                raise RuntimeGateError("edge_decision is missing a required expires_at")
+            return
+        expiry_dt = _parse_iso_aware(expires_at, field="edge_decision.expires_at")
+        as_of_dt = _parse_iso_aware(as_of, field="as_of")
+        if as_of_dt >= expiry_dt:
+            raise RuntimeGateError(
+                "edge_decision is expired as of the decision-time context "
+                f"(as_of={as_of!r} >= expires_at={expires_at!r})"
+            )
+
     def _consume_decision(self, edge_decision_id: str, environment_id: str, as_of: str) -> None:
         """One-shot anti-replay: refuse a decision id already exercised.
 
         Deterministic — the consume record is stamped with the caller-supplied
         ``as_of`` (the decision-time context), never a wall-clock read, so this
         executor keeps its no-``datetime.now`` invariant. A no-op when no state
-        store is injected.
+        store is injected, unless ``require_replay_protection`` is set, in which
+        case a missing store fails closed rather than silently skipping.
         """
 
         if self.state is None:
+            if self.require_replay_protection:
+                raise RuntimeGateError(
+                    "replay protection required but no state store is configured"
+                )
             return
         consumed = self.state.consume_decision(
             edge_decision_id,
@@ -262,6 +327,11 @@ class TransitionExecutor:
         # 4. Edge must have approved exactly this transition for exactly this
         #    environment.
         edge_decision_id = self._authorize(edge_decision, transition_id, environment_id)
+
+        # 4b. A decision carrying an expiry must not be exercised past it (and,
+        #     under a strict posture, must carry one at all) -- so a captured
+        #     approval cannot be replayed indefinitely into the future.
+        self._check_decision_expiry(edge_decision, as_of)
 
         # 5. The caller's reported current_state must match the transition's
         #    declared from-state -- executing from the wrong state is refused.

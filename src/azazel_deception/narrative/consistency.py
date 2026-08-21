@@ -132,6 +132,22 @@ def _as_dict(value: Any) -> dict[str, Any]:
     raise TypeError(f"expected a dict, got {type(value).__name__}")
 
 
+def _safe_get(table: dict[Any, Any], key: Any) -> Any:
+    """``table.get(key)`` that tolerates an unhashable, package-supplied key.
+
+    A malformed package can put a list/dict where a scalar is expected; using
+    such a value directly as a dict key raises ``TypeError``. The consistency
+    checker must report contradictions, never crash on malformed input, so an
+    unhashable key is treated as simply "not found" (``None``) and fails closed
+    through the normal unknown-value path.
+    """
+
+    try:
+        return table.get(key)
+    except TypeError:
+        return None
+
+
 def _as_aware(value: datetime) -> datetime:
     """Coerce a datetime to timezone-aware UTC (naive is assumed UTC).
 
@@ -202,7 +218,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
     os_family = str(raw_os_family).strip().lower() if raw_os_family is not None else None
 
     if os_generation is not None:
-        profile = _OS_GENERATION_PROFILES.get(os_generation)
+        profile = _safe_get(_OS_GENERATION_PROFILES, os_generation)
         if profile is None:
             # Unknown OS generation: fail closed rather than assume it is fine.
             findings.append(
@@ -227,7 +243,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
     # os_generation profile fails closed: it must not be allowed to slip past
     # the banner-family checks (which only fire for a known family).
     if os_family is not None and os_family not in _KNOWN_OS_FAMILIES and (
-        os_generation is None or _OS_GENERATION_PROFILES.get(os_generation) is None
+        os_generation is None or _safe_get(_OS_GENERATION_PROFILES, os_generation) is None
     ):
         findings.append(
             _fatal(
@@ -239,7 +255,7 @@ def check_os_service_generation(environment: dict[str, Any], services: Iterable[
             )
         )
 
-    profile = _OS_GENERATION_PROFILES.get(os_generation) if os_generation else None
+    profile = _safe_get(_OS_GENERATION_PROFILES, os_generation) if os_generation else None
     declared_family = profile["family"] if profile else os_family
 
     for service in services:
@@ -389,7 +405,7 @@ def check_chronology_locale_timezone(
     locale = narrative.get("locale")
     timezone = narrative.get("timezone")
     if locale is not None and timezone is not None:
-        expected_prefix = _LOCALE_TIMEZONE_REGION.get(locale)
+        expected_prefix = _safe_get(_LOCALE_TIMEZONE_REGION, locale)
         if expected_prefix is not None and not str(timezone).startswith(expected_prefix):
             findings.append(
                 _fatal(
@@ -514,7 +530,7 @@ def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[s
                 findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {revision_int} must be >= 1"))
 
         department = file_.get("department")
-        if department is not None and department.strip().lower().replace(" ", "-") not in path.lower().replace(" ", "-"):
+        if department is not None and str(department).strip().lower().replace(" ", "-") not in path.lower().replace(" ", "-"):
             findings.append(
                 _warn(
                     "file_relationships",
@@ -551,7 +567,7 @@ def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Find
         activities = _as_list(persona.get("activities"))
 
         if role is not None:
-            forbidden = _ROLE_FORBIDDEN_ACTIVITIES.get(role)
+            forbidden = _safe_get(_ROLE_FORBIDDEN_ACTIVITIES, role)
             if forbidden:
                 overlap = sorted(set(activities) & forbidden)
                 if overlap:
@@ -627,7 +643,7 @@ def check_credential_relationships(
         credential_id = str(credential.get("credential_id") or "<unknown-credential>")
 
         owner_id = credential.get("owner_persona_id")
-        owner = personas_by_id.get(owner_id) if owner_id is not None else None
+        owner = _safe_get(personas_by_id, owner_id) if owner_id is not None else None
         if owner_id is not None and owner is None:
             findings.append(
                 _fatal(
@@ -663,7 +679,7 @@ def check_credential_relationships(
         scope = credential.get("scope")
         if scope is not None and owner is not None:
             role = owner.get("role")
-            forbidden = _ROLE_FORBIDDEN_SCOPES.get(role)
+            forbidden = _safe_get(_ROLE_FORBIDDEN_SCOPES, role)
             if forbidden and scope in forbidden:
                 findings.append(
                     _fatal(

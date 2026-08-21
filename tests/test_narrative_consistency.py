@@ -286,3 +286,30 @@ def test_integral_float_revision_is_accepted():
     package["files"][0]["revision"] = 3.0
     report = check_narrative_consistency(package)
     assert not any("invalid-revision" in f for f in report.fatal_contradictions)
+
+
+# -- malformed package fields must report, never crash ----------------------
+
+
+def test_unhashable_os_generation_does_not_crash():
+    package = _coherent_package()
+    package["environment"]["os_generation"] = ["ubuntu-22.04"]  # list, unhashable
+    report = check_narrative_consistency(package)  # must not raise TypeError
+    assert not report.activatable
+    assert any("unknown-os-generation" in f for f in report.fatal_contradictions)
+
+
+def test_non_string_department_does_not_crash():
+    package = _coherent_package()
+    package["files"][0]["department"] = 5  # non-string
+    report = check_narrative_consistency(package)  # must not raise AttributeError
+    assert isinstance(report.fatal_contradictions, list)
+
+
+def test_unhashable_locale_and_role_and_owner_do_not_crash():
+    package = _coherent_package()
+    package["narrative"]["locale"] = ["ja-JP"]  # unhashable locale
+    package["personas"][0]["role"] = ["clerk"]  # unhashable role
+    package["credentials"][0]["owner_persona_id"] = ["p-clerk"]  # unhashable owner
+    report = check_narrative_consistency(package)  # must not raise TypeError
+    assert isinstance(report.fatal_contradictions, list)

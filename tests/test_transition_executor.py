@@ -320,3 +320,89 @@ def test_distinct_decision_ids_are_not_replays(tmp_path):
         as_of=AS_OF,
     )
     assert result["status"] == "shadow_simulated"
+
+
+def test_strict_replay_protection_requires_a_state_store():
+    executor = _executor(require_replay_protection=True)  # no state store
+    with pytest.raises(RuntimeGateError, match="replay protection required"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(),
+            as_of=AS_OF,
+        )
+
+
+# -- decision expiry ---------------------------------------------------------
+
+
+def test_expired_decision_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="expired"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(expires_at="2026-08-20T00:00:00+00:00"),
+            as_of=AS_OF,  # 2026-08-21, strictly after expiry
+        )
+
+
+def test_far_future_as_of_cannot_replay_an_expiring_decision():
+    # The finding: an approved decision replayed with an arbitrary far-future
+    # as_of. With an expiry present, that is now refused.
+    executor = _executor()
+    decision = _approved_decision(expires_at="2026-08-21T01:00:00+00:00")
+    ok = executor.execute(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=decision,
+        as_of="2026-08-21T00:30:00+00:00",  # before expiry
+    )
+    assert ok["status"] == "shadow_simulated"
+    with pytest.raises(RuntimeGateError, match="expired"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=decision,
+            as_of="2030-01-01T00:00:00+00:00",  # long past expiry
+        )
+
+
+def test_unexpired_decision_is_accepted():
+    executor = _executor()
+    result = executor.execute(
+        environment_id="env-1",
+        current_state="baseline",
+        transition_id="open-smb-share",
+        edge_decision=_approved_decision(expires_at="2999-01-01T00:00:00+00:00"),
+        as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"
+
+
+def test_strict_expiry_requires_the_field():
+    executor = _executor(require_decision_expiry=True)
+    with pytest.raises(RuntimeGateError, match="missing a required expires_at"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(),  # no expires_at
+            as_of=AS_OF,
+        )
+
+
+def test_unparseable_expiry_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="valid ISO-8601"):
+        executor.execute(
+            environment_id="env-1",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_approved_decision(expires_at="not-a-timestamp"),
+            as_of=AS_OF,
+        )
