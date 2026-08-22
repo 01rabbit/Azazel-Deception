@@ -26,6 +26,30 @@ def _evidence_hash(record: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _fsync_dir(directory: Path) -> None:
+    """fsync a directory so a newly created/renamed entry in it survives a crash.
+
+    fsync of a file persists only its data blocks; the directory entry that
+    links the file name to its inode is separate metadata, durable only when the
+    *parent directory* is itself fsync'd. Without this, an OS crash / power loss
+    on a field-deployed edge node can lose a just-created decision-consumed
+    marker, letting the same one-shot Edge decision be consumed (and acted on) a
+    second time on reboot. Best-effort: a platform/filesystem that cannot fsync a
+    directory raises OSError, which is swallowed rather than failing the write.
+    """
+
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 class RuntimeStateStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
@@ -56,8 +80,17 @@ class RuntimeStateStore:
         path = self._state_path(environment_id)
         tmp = path.with_suffix(".tmp")
         payload = json.dumps(state, sort_keys=True, indent=2) + "\n"
-        tmp.write_text(payload, encoding="utf-8")
+        # Durable atomic replace: fsync the temp file's data before the rename,
+        # then fsync the parent directory so the rename itself is durable --
+        # otherwise a crash can leave the state reverted/truncated (the classic
+        # rename-without-fsync hazard), which could let a tracked environment's
+        # state regress and permit a second activation attempt.
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
 
     def consume_decision(self, decision_id: str, record: dict[str, Any]) -> bool:
         """Atomically record a one-shot Edge decision.
@@ -78,6 +111,10 @@ class RuntimeStateStore:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            # Persist the new directory entry too: fsync of the file data alone
+            # does not make the just-created marker's dirent durable, so a crash
+            # could lose it and let this one-shot decision be consumed again.
+            _fsync_dir(path.parent)
         except Exception:
             try:
                 path.unlink()

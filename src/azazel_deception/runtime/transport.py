@@ -31,7 +31,19 @@ DecisionAuthenticator = Callable[[Mapping[str, Any]], bool]
 
 
 def _as_key(key: str | bytes) -> bytes:
-    return key.encode("utf-8") if isinstance(key, str) else bytes(key)
+    if isinstance(key, str):
+        return key.encode("utf-8")
+    if isinstance(key, (bytes, bytearray, memoryview)):
+        return bytes(key)
+    # Reject anything else explicitly. ``bytes(n)`` for an int ``n`` does NOT
+    # encode the integer -- it returns ``n`` zero bytes -- so a misconfigured
+    # non-bytes key (e.g. a numeric secret/key-id loaded from config that was
+    # never cast to str) would silently become a fully predictable all-zero
+    # key. Fail loudly rather than sign/verify with degenerate key material.
+    raise TypeError(
+        f"signing key must be str or bytes-like, not {type(key).__name__} "
+        "(a non-bytes value such as an int would silently become an all-zero key)"
+    )
 
 
 def canonical_decision_bytes(

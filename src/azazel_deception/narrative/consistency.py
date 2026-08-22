@@ -1,0 +1,926 @@
+"""Deterministic narrative-consistency compiler for AZ-06 environment profiles.
+
+``check_narrative_consistency`` walks one versioned deception-environment /
+narrative profile (a plain ``dict``, the shape produced by
+``azazel_deception.package`` plus the narrative-detail sections documented
+below) and reports internal contradictions as a Fabric
+``NarrativeConsistencyReport``.
+
+Doctrine, enforced structurally:
+
+* **Synthetic-only.** This module never contacts a network, filesystem clock,
+  or external service; it only reasons about the dict it is handed.
+* **Deterministic & replayable.** No ``datetime.now()``, ``time.time()``, or
+  ``random`` is used anywhere in a logic path. The one place a "current time"
+  could matter (credential freshness) takes it as an explicit
+  ``reference_time`` parameter that defaults to ``None`` (freshness check
+  skipped) rather than ever sampling the wall clock. Given the same
+  ``package`` dict (and the same ``reference_time``), the returned report is
+  byte-for-byte identical: findings are rendered to plain strings and sorted
+  by a stable key before being split into ``fatal_contradictions`` /
+  ``warnings``.
+* **No LLM.** Every check below is plain, inspectable Python over small
+  static lookup tables.
+* **Fail-closed on contradiction/unknown.** A reference that cannot be
+  resolved (an unknown OS generation, a credential owner that names no
+  declared persona, a malformed timestamp, ...) is treated as a *fatal*
+  finding, never silently skipped. Sections that are simply absent from the
+  input (e.g. no ``credentials`` declared at all) are not evaluated -- there
+  is nothing to contradict -- but any item that *is* present must resolve
+  cleanly against the rest of the profile.
+
+Input shape
+-----------
+``package`` is expected to carry the canonical ``narrative`` mapping shaped
+by :mod:`azazel_deception.package` (``narrative_id``, ``purpose``,
+``environment_profile_id``, ``synthetic_only``, ``locale``, ``timezone``,
+``engage_objective``, ``engage_approach``, ``engage_activities``) alongside
+the following optional narrative-detail sections, each a list/dict of plain
+``dict`` records (unknown/missing sections are simply not checked):
+
+``environment``
+    ``{"hostname", "organization", "department", "os_family",
+    "os_generation", "operational_calendar": {"working_days": [...]}}``
+
+``services``
+    ``[{"component_id", "banner", "os_generation"?}]`` -- ``os_generation``
+    is optional and, when present, must match ``environment.os_generation``.
+
+``accounts``
+    ``[{"account_id", "hostname"?, "department"?, "organization"?}]``
+
+``personas``
+    ``[{"persona_id", "role", "department"?, "organization"?,
+    "schedule": {"days": [...], "hours": [start, end]}, "activities": [...]}]``
+
+``files``
+    ``[{"path", "author_persona_id"?, "owner_persona_id"?, "department"?,
+    "created_at", "modified_at", "revision"}]`` -- timestamps are ISO-8601
+    strings.
+
+``credentials``
+    ``[{"credential_id", "owner_persona_id", "source_artifact_path"?,
+    "target_surface_id"?, "scope"?, "expires_at"}]``
+
+``report_id`` (optional) overrides the derived report id.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Iterable, Literal
+
+from azazel_fabric.deception_contracts import NarrativeConsistencyReport
+
+__all__ = [
+    "Finding",
+    "NarrativeContradiction",
+    "check_narrative_consistency",
+    "assert_narrative_consistent",
+]
+
+Severity = Literal["fatal", "warning"]
+
+
+class NarrativeContradiction(ValueError):
+    """Raised by :func:`assert_narrative_consistent` on a fatal finding.
+
+    ``check_narrative_consistency`` itself never raises for narrative
+    contradictions -- it always returns a (possibly unusable, i.e.
+    ``activatable is False``) report so callers can inspect every finding.
+    This exception is available for callers that want fail-closed
+    all-or-nothing behavior instead.
+    """
+
+
+@dataclass(frozen=True, order=True)
+class Finding:
+    """One contradiction/observation, sortable for deterministic output."""
+
+    dimension: str
+    code: str
+    subject: str
+    message: str
+    severity: Severity
+
+    def render(self) -> str:
+        return f"[{self.dimension}/{self.code}] {self.subject}: {self.message}"
+
+
+def _fatal(dimension: str, code: str, subject: str, message: str) -> Finding:
+    return Finding(dimension=dimension, code=code, subject=subject, message=message, severity="fatal")
+
+
+def _warn(dimension: str, code: str, subject: str, message: str) -> Finding:
+    return Finding(dimension=dimension, code=code, subject=subject, message=message, severity="warning")
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Coerce to a list, tolerating malformed input.
+
+    A wrong-typed value degrades to ``[]`` rather than raising, so the
+    consistency checker never crashes on a package that puts the wrong
+    container type where a list is expected. Wrong-typed *sections* are still
+    surfaced as fatal findings (see ``_section_type_findings``); this helper
+    just guarantees no uncaught ``TypeError`` escapes the checker.
+    """
+
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Coerce to a dict, tolerating malformed input (see :func:`_as_list`)."""
+
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _safe_get(table: dict[Any, Any], key: Any) -> Any:
+    """``table.get(key)`` that tolerates an unhashable, package-supplied key.
+
+    A malformed package can put a list/dict where a scalar is expected; using
+    such a value directly as a dict key raises ``TypeError``. The consistency
+    checker must report contradictions, never crash on malformed input, so an
+    unhashable key is treated as simply "not found" (``None``) and fails closed
+    through the normal unknown-value path.
+    """
+
+    try:
+        return table.get(key)
+    except TypeError:
+        return None
+
+
+def _safe_str(value: Any) -> str:
+    """``str(value)`` that never raises.
+
+    CPython enforces a digit limit on int<->str conversion
+    (``sys.get_int_max_str_digits()``); formatting an oversized int (which JSON
+    can carry) raises ``ValueError``. A malformed package must be reported, not
+    crash the checker, so any formatting error degrades to a sentinel string.
+    """
+
+    try:
+        return str(value)
+    except Exception:
+        return "<unrepresentable-value>"
+
+
+def _safe_repr(value: Any) -> str:
+    """``repr(value)`` counterpart of :func:`_safe_str` (never raises)."""
+
+    try:
+        return repr(value)
+    except Exception:
+        return "<unrepresentable-value>"
+
+
+def _safe_contains(container: Any, value: Any) -> bool:
+    """``value in container`` that tolerates an unhashable, package-supplied value.
+
+    Membership tests against a set/dict raise ``TypeError`` on an unhashable
+    (list/dict) ``value`` exactly like ``dict.get`` does. A malformed package
+    must be reported as a contradiction, not crash the checker, so an
+    unhashable value is treated as simply "not a member" (``False``).
+    """
+
+    try:
+        return value in container
+    except TypeError:
+        return False
+
+
+def _safe_hashable_set(values: Any) -> set[Any]:
+    """Build a set from an iterable, dropping unhashable elements.
+
+    A package-supplied ``activities``/token list can itself contain unhashable
+    elements (e.g. a nested list); constructing ``set(values)`` over them would
+    raise. This keeps only the hashable members so downstream set algebra is
+    crash-safe; a dropped element simply cannot match any allowlist token.
+    """
+
+    out: set[Any] = set()
+    try:
+        iterator = iter(values)
+    except TypeError:
+        return out
+    for item in iterator:
+        try:
+            out.add(item)
+        except TypeError:
+            continue
+    return out
+
+
+def _as_aware(value: datetime) -> datetime:
+    """Coerce a datetime to timezone-aware UTC (naive is assumed UTC).
+
+    Every timestamp this module reasons about is normalized through here so a
+    mix of naive and tz-aware inputs can never raise a ``TypeError`` on
+    comparison -- the consistency checker reports contradictions, it must never
+    crash on them. Does not read the wall clock.
+    """
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp string. Returns ``None`` if unparseable.
+
+    Never touches the wall clock; purely a string -> datetime conversion. The
+    result is always timezone-aware (naive input is treated as UTC) so callers
+    can compare any two parsed timestamps without a naive/aware ``TypeError``.
+    """
+
+    if isinstance(value, datetime):
+        return _as_aware(value)
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return _as_aware(datetime.fromisoformat(text))
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Dimension 1: OS/service generation & banner compatibility
+# ---------------------------------------------------------------------------
+
+# Small, static allowlist of synthetic OS generations this compiler knows how
+# to reason about. Deliberately not exhaustive: an unrecognized
+# ``os_generation`` fails closed (dimension below) rather than being guessed.
+_OS_GENERATION_PROFILES: dict[str, dict[str, Any]] = {
+    "ubuntu-20.04": {"family": "linux", "tokens": ("ubuntu", "debian", "openssh")},
+    "ubuntu-22.04": {"family": "linux", "tokens": ("ubuntu", "debian", "openssh")},
+    "debian-11": {"family": "linux", "tokens": ("debian", "openssh")},
+    "debian-12": {"family": "linux", "tokens": ("debian", "openssh")},
+    "centos-7": {"family": "linux", "tokens": ("centos", "red hat", "rhel", "openssh")},
+    "rhel-8": {"family": "linux", "tokens": ("red hat", "rhel", "openssh")},
+    "windows-server-2016": {"family": "windows", "tokens": ("windows", "microsoft", "iis")},
+    "windows-server-2019": {"family": "windows", "tokens": ("windows", "microsoft", "iis")},
+    "windows-server-2022": {"family": "windows", "tokens": ("windows", "microsoft", "iis")},
+}
+
+_LINUX_TOKENS = {"ubuntu", "debian", "centos", "red hat", "rhel", "openssh", "linux"}
+_WINDOWS_TOKENS = {"windows", "microsoft", "iis", ".net", "win32"}
+
+
+_KNOWN_OS_FAMILIES = {"linux", "windows"}
+
+
+def check_os_service_generation(environment: dict[str, Any], services: Iterable[dict[str, Any]]) -> list[Finding]:
+    findings: list[Finding] = []
+    os_generation = environment.get("os_generation")
+    raw_os_family = environment.get("os_family")
+    # Normalize the declared family so a mis-cased/space-padded value ("Linux",
+    # " windows ") cannot silently disable the banner-family checks below.
+    os_family = _safe_str(raw_os_family).strip().lower() if raw_os_family is not None else None
+
+    if os_generation is not None:
+        profile = _safe_get(_OS_GENERATION_PROFILES, os_generation)
+        if profile is None:
+            # Unknown OS generation: fail closed rather than assume it is fine.
+            findings.append(
+                _fatal(
+                    "os_service_generation",
+                    "unknown-os-generation",
+                    _safe_str(os_generation),
+                    "environment.os_generation is not a recognized synthetic OS generation",
+                )
+            )
+        elif os_family is not None and profile["family"] != os_family:
+            findings.append(
+                _fatal(
+                    "os_service_generation",
+                    "os-family-generation-mismatch",
+                    _safe_str(os_generation),
+                    f"environment.os_family={_safe_repr(raw_os_family)} contradicts os_generation family {_safe_repr(profile['family'])}",
+                )
+            )
+
+    # A declared os_family that is neither recognized nor pinned by a known
+    # os_generation profile fails closed: it must not be allowed to slip past
+    # the banner-family checks (which only fire for a known family).
+    if os_family is not None and os_family not in _KNOWN_OS_FAMILIES and (
+        os_generation is None or _safe_get(_OS_GENERATION_PROFILES, os_generation) is None
+    ):
+        findings.append(
+            _fatal(
+                "os_service_generation",
+                "unknown-os-family",
+                _safe_str(raw_os_family),
+                f"environment.os_family={_safe_repr(raw_os_family)} is not a recognized OS family "
+                f"({sorted(_KNOWN_OS_FAMILIES)})",
+            )
+        )
+
+    profile = _safe_get(_OS_GENERATION_PROFILES, os_generation) if os_generation else None
+    declared_family = profile["family"] if profile else os_family
+
+    for service in services:
+        component_id = _safe_str(service.get("component_id") or "<unknown-component>")
+        service_generation = service.get("os_generation")
+        if service_generation is not None and os_generation is not None and service_generation != os_generation:
+            findings.append(
+                _fatal(
+                    "os_service_generation",
+                    "service-generation-mismatch",
+                    component_id,
+                    f"service declares os_generation={_safe_repr(service_generation)} but environment is {_safe_repr(os_generation)}",
+                )
+            )
+
+        banner = service.get("banner")
+        if not banner:
+            findings.append(_warn("os_service_generation", "missing-banner", component_id, "service has no banner declared"))
+            continue
+        banner_lower = _safe_str(banner).lower()
+        if declared_family == "linux" and any(token in banner_lower for token in _WINDOWS_TOKENS):
+            findings.append(
+                _fatal(
+                    "os_service_generation",
+                    "banner-family-mismatch",
+                    component_id,
+                    f"banner {_safe_repr(banner)} names a Windows product but the environment family is linux",
+                )
+            )
+        elif declared_family == "windows" and any(token in banner_lower for token in _LINUX_TOKENS):
+            findings.append(
+                _fatal(
+                    "os_service_generation",
+                    "banner-family-mismatch",
+                    component_id,
+                    f"banner {_safe_repr(banner)} names a Linux/Unix product but the environment family is windows",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Dimension 2: hostname/account/department/organization naming coherence
+# ---------------------------------------------------------------------------
+
+
+def check_naming_coherence(
+    environment: dict[str, Any],
+    accounts: Iterable[dict[str, Any]],
+    personas: Iterable[dict[str, Any]],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    env_hostname = environment.get("hostname")
+    env_department = environment.get("department")
+    env_organization = environment.get("organization")
+
+    for account in accounts:
+        account_id = _safe_str(account.get("account_id") or "<unknown-account>")
+        hostname = account.get("hostname")
+        if hostname is not None and env_hostname is not None and hostname != env_hostname:
+            findings.append(
+                _fatal(
+                    "naming_coherence",
+                    "account-hostname-mismatch",
+                    account_id,
+                    f"account hostname {_safe_repr(hostname)} does not match environment hostname {_safe_repr(env_hostname)}",
+                )
+            )
+        department = account.get("department")
+        if department is not None and env_department is not None and department != env_department:
+            findings.append(
+                _fatal(
+                    "naming_coherence",
+                    "account-department-mismatch",
+                    account_id,
+                    f"account department {_safe_repr(department)} does not match environment department {_safe_repr(env_department)}",
+                )
+            )
+        organization = account.get("organization")
+        if organization is not None and env_organization is not None and organization != env_organization:
+            findings.append(
+                _fatal(
+                    "naming_coherence",
+                    "account-organization-mismatch",
+                    account_id,
+                    f"account organization {_safe_repr(organization)} does not match environment organization {_safe_repr(env_organization)}",
+                )
+            )
+
+    for persona in personas:
+        persona_id = _safe_str(persona.get("persona_id") or "<unknown-persona>")
+        department = persona.get("department")
+        if department is not None and env_department is not None and department != env_department:
+            findings.append(
+                _fatal(
+                    "naming_coherence",
+                    "persona-department-mismatch",
+                    persona_id,
+                    f"persona department {_safe_repr(department)} does not match environment department {_safe_repr(env_department)}",
+                )
+            )
+        organization = persona.get("organization")
+        if organization is not None and env_organization is not None and organization != env_organization:
+            findings.append(
+                _fatal(
+                    "naming_coherence",
+                    "persona-organization-mismatch",
+                    persona_id,
+                    f"persona organization {_safe_repr(organization)} does not match environment organization {_safe_repr(env_organization)}",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Dimension 3: chronology/locale/timezone/operational-calendar coherence
+# ---------------------------------------------------------------------------
+
+# Minimal, static locale -> expected timezone-region prefix table. This is a
+# coherence heuristic for a synthetic narrative, not a real geo/locale
+# database: an unlisted locale is simply not checked against timezone.
+_LOCALE_TIMEZONE_REGION: dict[str, str] = {
+    "ja-JP": "Asia/",
+    "en-US": "America/",
+    "en-GB": "Europe/",
+    "de-DE": "Europe/",
+    "fr-FR": "Europe/",
+    "pt-BR": "America/",
+    "zh-CN": "Asia/",
+    "ko-KR": "Asia/",
+    "es-ES": "Europe/",
+    "en-AU": "Australia/",
+}
+
+_VALID_WEEKDAYS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+
+
+def check_chronology_locale_timezone(
+    narrative: dict[str, Any],
+    environment: dict[str, Any],
+    files: Iterable[dict[str, Any]],
+    personas: Iterable[dict[str, Any]],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    locale = narrative.get("locale")
+    timezone = narrative.get("timezone")
+    if locale is not None and timezone is not None:
+        expected_prefix = _safe_get(_LOCALE_TIMEZONE_REGION, locale)
+        if expected_prefix is not None and not _safe_str(timezone).startswith(expected_prefix):
+            findings.append(
+                _fatal(
+                    "chronology_locale_timezone",
+                    "locale-timezone-mismatch",
+                    _safe_str(locale),
+                    f"narrative locale {_safe_repr(locale)} is incoherent with timezone {_safe_repr(timezone)} "
+                    f"(expected a {expected_prefix}* zone)",
+                )
+            )
+
+    calendar = _as_dict(environment.get("operational_calendar"))
+    working_days = calendar.get("working_days")
+    normalized_working_days: set[str] | None = None
+    if isinstance(working_days, (list, tuple, set)):
+        normalized_working_days = {_safe_str(day).lower()[:3] for day in working_days}
+        unknown = normalized_working_days - _VALID_WEEKDAYS
+        if unknown:
+            findings.append(
+                _fatal(
+                    "chronology_locale_timezone",
+                    "unknown-working-day",
+                    "operational_calendar",
+                    f"operational_calendar.working_days contains unrecognized day tokens: {sorted(unknown)}",
+                )
+            )
+
+    for file_ in files:
+        path = _safe_str(file_.get("path") or "<unknown-file>")
+        created = _parse_iso(file_.get("created_at"))
+        modified = _parse_iso(file_.get("modified_at"))
+        if file_.get("created_at") is not None and created is None:
+            findings.append(_fatal("chronology_locale_timezone", "unparseable-timestamp", path, "created_at is not a valid ISO-8601 timestamp"))
+        if file_.get("modified_at") is not None and modified is None:
+            findings.append(_fatal("chronology_locale_timezone", "unparseable-timestamp", path, "modified_at is not a valid ISO-8601 timestamp"))
+        if created is not None and modified is not None and modified < created:
+            findings.append(
+                _fatal(
+                    "chronology_locale_timezone",
+                    "reversed-file-chronology",
+                    path,
+                    f"modified_at ({modified.isoformat()}) precedes created_at ({created.isoformat()})",
+                )
+            )
+
+    if normalized_working_days is not None:
+        for persona in personas:
+            persona_id = _safe_str(persona.get("persona_id") or "<unknown-persona>")
+            schedule = _as_dict(persona.get("schedule"))
+            days = schedule.get("days")
+            if not isinstance(days, (list, tuple, set)) or not days:
+                continue
+            persona_days = {_safe_str(day).lower()[:3] for day in days}
+            outside = persona_days - _VALID_WEEKDAYS
+            if outside:
+                findings.append(
+                    _fatal(
+                        "chronology_locale_timezone",
+                        "unknown-persona-day",
+                        persona_id,
+                        f"persona schedule.days contains unrecognized day tokens: {sorted(outside)}",
+                    )
+                )
+                continue
+            if not persona_days & normalized_working_days:
+                findings.append(
+                    _fatal(
+                        "chronology_locale_timezone",
+                        "persona-outside-operational-calendar",
+                        persona_id,
+                        f"persona schedule days {sorted(persona_days)} never overlap the operational "
+                        f"calendar's working days {sorted(normalized_working_days)}",
+                    )
+                )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Dimension 4: file author/owner/timestamp/revision/path relationships
+# ---------------------------------------------------------------------------
+
+
+def check_file_relationships(files: Iterable[dict[str, Any]], persona_ids: set[str]) -> list[Finding]:
+    findings: list[Finding] = []
+
+    for file_ in files:
+        path = _safe_str(file_.get("path") or "<unknown-file>")
+
+        for role in ("author_persona_id", "owner_persona_id"):
+            persona_id = file_.get(role)
+            if persona_id is not None and not _safe_contains(persona_ids, persona_id):
+                findings.append(
+                    _fatal(
+                        "file_relationships",
+                        f"unknown-{role.replace('_persona_id', '')}",
+                        path,
+                        f"{role}={_safe_repr(persona_id)} does not match any declared persona",
+                    )
+                )
+
+        revision = file_.get("revision")
+        if revision is not None:
+            # A revision must be a whole number >= 1. Reject a bool, a
+            # non-integral float (2.5 -> not "3"), or an unparseable string
+            # rather than silently truncating via int().
+            revision_int: int | None = None
+            if isinstance(revision, bool):
+                pass  # bool is an int subclass but never a valid revision
+            elif isinstance(revision, int):
+                revision_int = revision
+            elif isinstance(revision, float):
+                if revision.is_integer():
+                    revision_int = int(revision)
+            elif isinstance(revision, str):
+                stripped = revision.strip()
+                if stripped.lstrip("+-").isdigit():
+                    try:
+                        revision_int = int(stripped)
+                    except ValueError:
+                        # An oversized digit string exceeds CPython's int<->str
+                        # conversion limit; treat as an invalid revision rather
+                        # than crashing.
+                        revision_int = None
+            if revision_int is None:
+                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {_safe_repr(revision)} is not an integer"))
+            elif revision_int < 1:
+                findings.append(_fatal("file_relationships", "invalid-revision", path, f"revision {_safe_str(revision_int)} must be >= 1"))
+
+        department = file_.get("department")
+        if department is not None and _safe_str(department).strip().lower().replace(" ", "-") not in path.lower().replace(" ", "-"):
+            findings.append(
+                _warn(
+                    "file_relationships",
+                    "path-department-mismatch",
+                    path,
+                    f"file department {_safe_repr(department)} is not reflected in its path",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Dimension 5: persona role/schedule/activity relationships
+# ---------------------------------------------------------------------------
+
+# Static allowlist of activities each role may plausibly perform in a
+# synthetic decoy narrative. Roles/activities outside this table are simply
+# not checked (unknown activity strings are the operator's business); the
+# table only rules out *known* incoherent combinations.
+_ROLE_FORBIDDEN_ACTIVITIES: dict[str, set[str]] = {
+    "guest": {"admin_console_access", "modify_firewall_rules", "rotate_credentials", "deploy_release"},
+    "read_only_visitor": {"modify_config", "delete_records", "admin_console_access", "rotate_credentials"},
+    "intern": {"rotate_credentials", "deploy_release", "modify_firewall_rules"},
+}
+
+
+def check_persona_relationships(personas: Iterable[dict[str, Any]]) -> list[Finding]:
+    findings: list[Finding] = []
+
+    for persona in personas:
+        persona_id = _safe_str(persona.get("persona_id") or "<unknown-persona>")
+        role = persona.get("role")
+        activities = _as_list(persona.get("activities"))
+
+        if role is not None:
+            forbidden = _safe_get(_ROLE_FORBIDDEN_ACTIVITIES, role)
+            if forbidden:
+                overlap = sorted(_safe_hashable_set(activities) & forbidden)
+                if overlap:
+                    findings.append(
+                        _fatal(
+                            "persona_relationships",
+                            "role-activity-contradiction",
+                            persona_id,
+                            f"role {_safe_repr(role)} is incompatible with declared activities {overlap}",
+                        )
+                    )
+
+        schedule = persona.get("schedule")
+        if schedule is not None:
+            schedule = _as_dict(schedule)
+            hours = schedule.get("hours")
+            if hours is not None:
+                if not (isinstance(hours, (list, tuple)) and len(hours) == 2):
+                    findings.append(_fatal("persona_relationships", "invalid-schedule-hours", persona_id, f"schedule.hours {_safe_repr(hours)} must be a [start, end] pair"))
+                else:
+                    start, end = hours
+                    valid_bounds = all(isinstance(v, int) and 0 <= v <= 24 for v in (start, end))
+                    if not valid_bounds or start >= end:
+                        findings.append(
+                            _fatal(
+                                "persona_relationships",
+                                "invalid-schedule-hours",
+                                persona_id,
+                                f"schedule.hours {_safe_repr(hours)} must satisfy 0 <= start < end <= 24",
+                            )
+                        )
+        elif activities:
+            findings.append(
+                _warn(
+                    "persona_relationships",
+                    "activity-without-schedule",
+                    persona_id,
+                    "persona declares activities but no schedule to anchor them to",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Dimension 6: credential owner/source/target/scope/expiry relationships
+# ---------------------------------------------------------------------------
+
+# Static allowlist mirroring the dimension-5 role table: which credential
+# scopes a given persona role may plausibly own.
+_ROLE_FORBIDDEN_SCOPES: dict[str, set[str]] = {
+    "guest": {"admin", "domain_admin", "root"},
+    "read_only_visitor": {"admin", "domain_admin", "root", "write"},
+    "intern": {"domain_admin", "root"},
+}
+
+
+def check_credential_relationships(
+    credentials: Iterable[dict[str, Any]],
+    personas_by_id: dict[str, dict[str, Any]],
+    file_paths: set[str],
+    surface_ids: set[str],
+    reference_time: datetime | None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    # Normalize a caller-supplied reference_time the same way parsed timestamps
+    # are, so a naive reference_time compared against an aware expiry (or vice
+    # versa) reports staleness instead of raising. A non-datetime reference_time
+    # is treated as "no reference" (freshness check skipped) rather than raising
+    # an AttributeError.
+    if isinstance(reference_time, datetime):
+        reference_time = _as_aware(reference_time)
+    else:
+        reference_time = None
+
+    for credential in credentials:
+        credential_id = _safe_str(credential.get("credential_id") or "<unknown-credential>")
+
+        owner_id = credential.get("owner_persona_id")
+        owner = _safe_get(personas_by_id, owner_id) if owner_id is not None else None
+        if owner_id is not None and owner is None:
+            findings.append(
+                _fatal(
+                    "credential_relationships",
+                    "unknown-owner",
+                    credential_id,
+                    f"owner_persona_id={_safe_repr(owner_id)} does not match any declared persona",
+                )
+            )
+
+        source = credential.get("source_artifact_path")
+        if source is not None and not _safe_contains(file_paths, source):
+            findings.append(
+                _fatal(
+                    "credential_relationships",
+                    "unknown-source-artifact",
+                    credential_id,
+                    f"source_artifact_path={_safe_repr(source)} does not match any declared file",
+                )
+            )
+
+        target = credential.get("target_surface_id")
+        if target is not None and not _safe_contains(surface_ids, target):
+            findings.append(
+                _fatal(
+                    "credential_relationships",
+                    "unknown-target-surface",
+                    credential_id,
+                    f"target_surface_id={_safe_repr(target)} does not match any declared service/surface",
+                )
+            )
+
+        scope = credential.get("scope")
+        if scope is not None and owner is not None:
+            role = owner.get("role")
+            forbidden = _safe_get(_ROLE_FORBIDDEN_SCOPES, role)
+            if forbidden and _safe_contains(forbidden, scope):
+                findings.append(
+                    _fatal(
+                        "credential_relationships",
+                        "role-scope-contradiction",
+                        credential_id,
+                        f"scope {_safe_repr(scope)} is incompatible with owner role {_safe_repr(role)}",
+                    )
+                )
+
+        expires_at = _parse_iso(credential.get("expires_at"))
+        if credential.get("expires_at") is not None and expires_at is None:
+            findings.append(
+                _fatal(
+                    "credential_relationships",
+                    "unparseable-expiry",
+                    credential_id,
+                    f"expires_at {_safe_repr(credential.get('expires_at'))} is not a valid ISO-8601 timestamp",
+                )
+            )
+
+        if expires_at is not None and reference_time is not None and expires_at <= reference_time:
+            findings.append(
+                _warn(
+                    "credential_relationships",
+                    "credential-already-expired",
+                    credential_id,
+                    f"expires_at ({expires_at.isoformat()}) is not after reference_time ({reference_time.isoformat()})",
+                )
+            )
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+
+def _surface_ids(package: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for service in _as_list(package.get("services")):
+        component_id = _as_dict(service).get("component_id")
+        if component_id is not None:
+            ids.add(_safe_str(component_id))
+    for component in _as_list(package.get("components")):
+        component = _as_dict(component)
+        component_id = component.get("component_id")
+        if component_id is not None:
+            ids.add(_safe_str(component_id))
+        for surface in _as_list(component.get("surfaces")):
+            surface_id = _as_dict(surface).get("surface_id")
+            if surface_id is not None:
+                ids.add(_safe_str(surface_id))
+    return ids
+
+
+_DICT_SECTIONS = ("narrative", "environment", "consistency")
+_LIST_SECTIONS = ("services", "accounts", "personas", "files", "credentials", "components")
+
+
+def _section_type_findings(package: dict[str, Any]) -> list[Finding]:
+    """Fail closed on a top-level section of the wrong container type.
+
+    ``_as_dict``/``_as_list`` degrade a malformed section to empty so nothing
+    crashes; this additionally records the malformation as a fatal finding so a
+    structurally-broken package is reported as not-activatable rather than
+    silently treated as if the section were absent.
+    """
+
+    findings: list[Finding] = []
+    for key in _DICT_SECTIONS:
+        value = package.get(key)
+        if value is not None and not isinstance(value, dict):
+            findings.append(
+                _fatal("structure", "invalid-section-type", key,
+                       f"package.{key} must be a mapping, got {type(value).__name__}")
+            )
+    for key in _LIST_SECTIONS:
+        value = package.get(key)
+        if value is not None and not isinstance(value, list):
+            findings.append(
+                _fatal("structure", "invalid-section-type", key,
+                       f"package.{key} must be a list, got {type(value).__name__}")
+            )
+    return findings
+
+
+def check_narrative_consistency(
+    package: dict[str, Any],
+    *,
+    reference_time: datetime | None = None,
+) -> NarrativeConsistencyReport:
+    """Validate one narrative/environment profile and return a Fabric report.
+
+    ``package`` is a plain dict (see module docstring for the sections it may
+    carry). ``reference_time``, if given, is used only for the credential
+    freshness check (dimension 6) -- it must be supplied by the caller
+    (e.g. from an evidence timestamp), never sampled from the wall clock, to
+    keep this function deterministic and replayable.
+
+    Findings are collected from every dimension, rendered to plain strings,
+    and sorted by a stable key so that identical input always produces an
+    identical report regardless of internal iteration order.
+    """
+
+    package = _as_dict(package)  # tolerate a non-dict package, never crash
+
+    narrative = _as_dict(package.get("narrative"))
+    environment = _as_dict(package.get("environment"))
+    services = [_as_dict(item) for item in _as_list(package.get("services"))]
+    accounts = [_as_dict(item) for item in _as_list(package.get("accounts"))]
+    personas = [_as_dict(item) for item in _as_list(package.get("personas"))]
+    files = [_as_dict(item) for item in _as_list(package.get("files"))]
+    credentials = [_as_dict(item) for item in _as_list(package.get("credentials"))]
+
+    persona_ids = {_safe_str(p["persona_id"]) for p in personas if p.get("persona_id") is not None}
+    personas_by_id = {_safe_str(p["persona_id"]): p for p in personas if p.get("persona_id") is not None}
+    file_paths = {_safe_str(f["path"]) for f in files if f.get("path") is not None}
+    surface_ids = _surface_ids(package)
+
+    findings: list[Finding] = []
+    findings.extend(_section_type_findings(package))
+    findings.extend(check_os_service_generation(environment, services))
+    findings.extend(check_naming_coherence(environment, accounts, personas))
+    findings.extend(check_chronology_locale_timezone(narrative, environment, files, personas))
+    findings.extend(check_file_relationships(files, persona_ids))
+    findings.extend(check_persona_relationships(personas))
+    findings.extend(check_credential_relationships(credentials, personas_by_id, file_paths, surface_ids, reference_time))
+
+    findings.sort()
+
+    fatal = [f.render() for f in findings if f.severity == "fatal"]
+    warnings = [f.render() for f in findings if f.severity == "warning"]
+
+    report_id = package.get("report_id") or f"{narrative.get('narrative_id') or package.get('package_id') or 'narrative'}-consistency-check"
+
+    existing_consistency = _as_dict(package.get("consistency"))
+    waivers = [_safe_str(w) for w in _as_list(existing_consistency.get("waivers"))]
+
+    return NarrativeConsistencyReport(
+        report_id=_safe_str(report_id),
+        fatal_contradictions=fatal,
+        warnings=warnings,
+        waivers=waivers,
+    )
+
+
+def assert_narrative_consistent(
+    package: dict[str, Any],
+    *,
+    reference_time: datetime | None = None,
+) -> NarrativeConsistencyReport:
+    """Like :func:`check_narrative_consistency`, but raises on any fatal finding.
+
+    Fail-closed convenience wrapper for callers that want an exception rather
+    than an inspectable-but-unusable report.
+    """
+
+    report = check_narrative_consistency(package, reference_time=reference_time)
+    if not report.activatable:
+        raise NarrativeContradiction(
+            f"{report.report_id}: {len(report.fatal_contradictions)} fatal narrative contradiction(s): "
+            + "; ".join(report.fatal_contradictions)
+        )
+    return report
