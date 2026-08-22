@@ -28,6 +28,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from azazel_fabric.deception_contracts import EnvironmentTransitionDecision
 from azazel_fabric.deception_contracts.transitions import (
     FiniteStateTransition,
     TransitionCatalog,
@@ -35,16 +36,31 @@ from azazel_fabric.deception_contracts.transitions import (
     select_transition,
 )
 from azazel_fabric.deception_integrity import catalog_content_digest
+from pydantic import ValidationError
 
 from azazel_deception.runtime.compose import RuntimeGateError
 from azazel_deception.runtime.state import RuntimeStateStore
 from azazel_deception.runtime.transport import (
+    DEFAULT_SIGNATURE_FIELD,
     DecisionAuthenticationError,
     DecisionAuthenticator,
     require_authenticated_decision,
 )
 
+# Interim (pre-canonical) decision shape, retained for backward compatibility
+# with callers that have not migrated to the Fabric contract. A live posture
+# should set ``require_canonical_decision=True`` to reject it.
 _APPROVED_STATUS = "approved"
+
+# The canonical Fabric transition-decision contract this executor prefers.
+_TRANSITION_SCHEMA_VERSION = "environment-transition-decision/v0.1"
+# Any decision in the transition-decision family is routed to canonical
+# validation, so an unknown *version* (e.g. .../v9.9) is rejected by the model's
+# exact-version Literal rather than silently falling back to the interim path.
+_TRANSITION_SCHEMA_PREFIX = "environment-transition-decision/"
+# Only an accepted/modified Edge decision is executable; a rejected (or any
+# other) status is refused fail-closed.
+_EXECUTABLE_STATUSES = frozenset({"accepted", "modified"})
 
 
 def _parse_iso_aware(value: Any, *, field: str) -> datetime:
@@ -89,6 +105,7 @@ class TransitionExecutor:
         require_authenticated_decisions: bool = False,
         require_replay_protection: bool = False,
         require_decision_expiry: bool = False,
+        require_canonical_decision: bool = False,
     ) -> None:
         self.catalog = catalog
         self.live_enabled = bool(live_enabled)
@@ -114,6 +131,12 @@ class TransitionExecutor:
         self.require_authenticated_decisions = bool(require_authenticated_decisions)
         self.require_replay_protection = bool(require_replay_protection)
         self.require_decision_expiry = bool(require_decision_expiry)
+        # When set, only a valid canonical Fabric EnvironmentTransitionDecision
+        # is accepted; the interim ``{transition_id, edge_decision_id, status:
+        # "approved"}`` dict is rejected. This is the posture a live integration
+        # uses so a decision is always the authoritative, schema-versioned,
+        # expiry-bearing contract rather than an ad-hoc mapping.
+        self.require_canonical_decision = bool(require_canonical_decision)
         # Seal/trust the digest the catalog carried at construction time.
         # Recomputed digests are always compared back to *this* value, never
         # to whatever `self.catalog.catalog_digest` happens to read as later.
@@ -202,6 +225,86 @@ class TransitionExecutor:
                 f"edge_decision status is not {_APPROVED_STATUS!r}: {status!r}"
             )
         return edge_decision_id
+
+    @staticmethod
+    def _is_canonical_decision(edge_decision: dict[str, Any]) -> bool:
+        version = edge_decision.get("schema_version")
+        return isinstance(version, str) and version.startswith(_TRANSITION_SCHEMA_PREFIX)
+
+    def _bind_canonical_decision(
+        self,
+        edge_decision: dict[str, Any],
+        environment_id: str,
+        current_state: str,
+        transition: FiniteStateTransition,
+        as_of: str,
+    ) -> str:
+        """Validate a canonical Fabric ``EnvironmentTransitionDecision`` and
+        bind it to this exact environment/transition/time.
+
+        The decision is parsed through the Fabric model (``extra="forbid"``,
+        ``schema_version`` a fail-closed ``Literal``, ``expires_at >
+        effective_at`` enforced by the contract). Beyond that the decision must:
+
+        * be executable -- ``status`` in accepted/modified (a rejected or any
+          other status is refused);
+        * bind to this environment -- ``decision.environment_id`` equals the
+          caller's ``environment_id``;
+        * bind to the caller's observed state and to the catalog transition --
+          ``decision.current_state`` equals both ``current_state`` and the
+          transition's ``from_state``, and ``decision.target_state`` equals the
+          transition's ``to_state``; and
+        * be within its own validity window -- ``effective_at <= as_of <
+          expires_at`` (deterministic: both are supplied, never wall-clock).
+
+        Returns the canonical ``decision_id`` (the one-shot anti-replay key).
+        """
+
+        payload = {k: v for k, v in edge_decision.items() if k != DEFAULT_SIGNATURE_FIELD}
+        try:
+            decision = EnvironmentTransitionDecision.model_validate(payload)
+        except ValidationError as exc:
+            raise RuntimeGateError(f"edge_decision is not a valid transition decision: {exc}") from exc
+
+        if decision.status not in _EXECUTABLE_STATUSES:
+            raise RuntimeGateError(
+                f"edge_decision status is not executable: {decision.status!r}"
+            )
+        if decision.environment_id != environment_id:
+            raise RuntimeGateError(
+                "edge_decision does not authorize this environment_id "
+                f"(decision={decision.environment_id!r} requested={environment_id!r})"
+            )
+        if decision.current_state != current_state:
+            raise RuntimeGateError(
+                "edge_decision current_state does not match the reported current_state "
+                f"(decision={decision.current_state!r} reported={current_state!r})"
+            )
+        if decision.current_state != transition.from_state:
+            raise RuntimeGateError(
+                "edge_decision current_state does not match the transition's from_state "
+                f"(decision={decision.current_state!r} from_state={transition.from_state!r})"
+            )
+        if decision.target_state != transition.to_state:
+            raise RuntimeGateError(
+                "edge_decision target_state does not match the transition's to_state "
+                f"(decision={decision.target_state!r} to_state={transition.to_state!r})"
+            )
+
+        as_of_dt = _parse_iso_aware(as_of, field="as_of")
+        effective_dt = _parse_iso_aware(decision.effective_at.isoformat(), field="edge_decision.effective_at")
+        expiry_dt = _parse_iso_aware(decision.expires_at.isoformat(), field="edge_decision.expires_at")
+        if as_of_dt < effective_dt:
+            raise RuntimeGateError(
+                "edge_decision is not yet effective as of the decision-time context "
+                f"(as_of={as_of!r} < effective_at={decision.effective_at.isoformat()!r})"
+            )
+        if as_of_dt >= expiry_dt:
+            raise RuntimeGateError(
+                "edge_decision is expired as of the decision-time context "
+                f"(as_of={as_of!r} >= expires_at={decision.expires_at.isoformat()!r})"
+            )
+        return decision.decision_id
 
     def _authenticate_decision(self, edge_decision: dict[str, Any]) -> None:
         """Verify the decision's transport authenticity (fail-closed).
@@ -312,6 +415,14 @@ class TransitionExecutor:
         if not as_of:
             raise RuntimeGateError("as_of is required")
 
+        # Accept either the canonical Fabric model instance or its dict/JSON
+        # envelope; normalize to a dict so authentication and validation share
+        # one path.
+        if isinstance(edge_decision, EnvironmentTransitionDecision):
+            edge_decision = edge_decision.model_dump(mode="json")
+        if not isinstance(edge_decision, dict):
+            raise RuntimeGateError("edge_decision must be a mapping or EnvironmentTransitionDecision")
+
         # 1. Catalog digest integrity: a tampered/drifted catalog is
         #    rejected before any transition-specific logic runs.
         self._verify_catalog_integrity()
@@ -324,28 +435,41 @@ class TransitionExecutor:
         #    authenticator is configured or the strict posture demands one).
         self._authenticate_decision(edge_decision)
 
-        # 4. Edge must have approved exactly this transition for exactly this
-        #    environment.
-        edge_decision_id = self._authorize(edge_decision, transition_id, environment_id)
-
-        # 4b. A decision carrying an expiry must not be exercised past it (and,
-        #     under a strict posture, must carry one at all) -- so a captured
-        #     approval cannot be replayed indefinitely into the future.
-        self._check_decision_expiry(edge_decision, as_of)
-
-        # 5. The caller's reported current_state must match the transition's
-        #    declared from-state -- executing from the wrong state is refused.
-        if current_state != transition.from_state:
+        # 4. Authorize + bind the decision. The canonical Fabric contract is
+        #    preferred (and mandatory under require_canonical_decision); the
+        #    interim dict shape remains only for un-migrated callers and is
+        #    rejected outright in a strict posture.
+        canonical = self._is_canonical_decision(edge_decision)
+        if self.require_canonical_decision and not canonical:
             raise RuntimeGateError(
-                "current_state does not match the transition's declared "
-                f"from_state (current={current_state!r} "
-                f"expected={transition.from_state!r})"
+                "a canonical EnvironmentTransitionDecision is required "
+                f"(schema_version={_TRANSITION_SCHEMA_VERSION!r})"
             )
+        if canonical:
+            # The canonical path binds environment, current/target state, status,
+            # and the effective/expiry window from the contract itself.
+            edge_decision_id = self._bind_canonical_decision(
+                edge_decision, environment_id, current_state, transition, as_of
+            )
+        else:
+            edge_decision_id = self._authorize(edge_decision, transition_id, environment_id)
+            # A decision carrying an expiry must not be exercised past it (and,
+            # under a strict posture, must carry one at all) -- so a captured
+            # approval cannot be replayed indefinitely into the future.
+            self._check_decision_expiry(edge_decision, as_of)
+            # The caller's reported current_state must match the transition's
+            # declared from-state -- executing from the wrong state is refused.
+            if current_state != transition.from_state:
+                raise RuntimeGateError(
+                    "current_state does not match the transition's declared "
+                    f"from_state (current={current_state!r} "
+                    f"expected={transition.from_state!r})"
+                )
 
-        # 6. Bounds and rollback/termination conditions must be declared.
+        # 5. Bounds and rollback/termination conditions must be declared.
         self._validate_bounds_and_conditions(transition)
 
-        # 7. One-shot anti-replay: exercising this decision id consumes it, so
+        # 6. One-shot anti-replay: exercising this decision id consumes it, so
         #    a replayed approval cannot drive a second transition.
         self._consume_decision(edge_decision_id, environment_id, as_of)
 

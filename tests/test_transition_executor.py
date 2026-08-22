@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 from azazel_fabric.testing import make_transition_catalog
 
+from azazel_fabric.deception_contracts import EnvironmentTransitionDecision
+
 from azazel_deception.runtime.compose import RuntimeGateError
 from azazel_deception.runtime.state import RuntimeStateStore
 from azazel_deception.runtime.transitions import TransitionExecutor
@@ -14,6 +16,23 @@ from azazel_deception.runtime.transport import HmacDecisionAuthenticator, sign_d
 
 AS_OF = "2026-08-21T00:00:00+00:00"
 _KEY = "test-edge-transport-key"
+_EFFECTIVE = "2026-08-20T00:00:00+00:00"
+_EXPIRES = "2026-08-22T00:00:00+00:00"
+
+
+def _canonical(**over):
+    """A canonical Fabric EnvironmentTransitionDecision as a dict envelope."""
+    base = dict(
+        decision_id="edge-decision-1",
+        status="accepted",
+        environment_id="env-1",
+        current_state="baseline",
+        target_state="smb-share-open",
+        effective_at=_EFFECTIVE,
+        expires_at=_EXPIRES,
+    )
+    base.update(over)
+    return EnvironmentTransitionDecision(**base).model_dump(mode="json")
 
 
 def _approved_decision(**overrides: Any) -> dict[str, Any]:
@@ -406,3 +425,145 @@ def test_unparseable_expiry_fails_closed():
             edge_decision=_approved_decision(expires_at="not-a-timestamp"),
             as_of=AS_OF,
         )
+
+
+# -- canonical Fabric EnvironmentTransitionDecision path --------------------
+
+
+def test_canonical_decision_is_accepted_and_shadow_simulated():
+    executor = _executor()
+    result = executor.execute(
+        environment_id="env-1", current_state="baseline",
+        transition_id="open-smb-share", edge_decision=_canonical(), as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"
+    assert result["edge_decision_id"] == "edge-decision-1"
+    assert result["to_state"] == "smb-share-open"
+
+
+def test_canonical_decision_model_instance_is_accepted():
+    executor = _executor()
+    decision = EnvironmentTransitionDecision(
+        decision_id="edge-decision-1", status="accepted", environment_id="env-1",
+        current_state="baseline", target_state="smb-share-open",
+        effective_at=_EFFECTIVE, expires_at=_EXPIRES,
+    )
+    result = executor.execute(
+        environment_id="env-1", current_state="baseline",
+        transition_id="open-smb-share", edge_decision=decision, as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"
+
+
+def test_canonical_rejected_status_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="not executable"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=_canonical(status="rejected"),
+            as_of=AS_OF,
+        )
+
+
+def test_canonical_wrong_environment_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="environment_id"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=_canonical(environment_id="env-2"),
+            as_of=AS_OF,
+        )
+
+
+def test_canonical_target_state_mismatch_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="target_state"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=_canonical(target_state="some-other-state"), as_of=AS_OF,
+        )
+
+
+def test_canonical_current_state_mismatch_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="current_state"):
+        executor.execute(
+            environment_id="env-1", current_state="smb-share-open",
+            transition_id="open-smb-share", edge_decision=_canonical(current_state="smb-share-open"),
+            as_of=AS_OF,
+        )
+
+
+def test_canonical_expired_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="expired"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=_canonical(),
+            as_of="2026-08-23T00:00:00+00:00",
+        )
+
+
+def test_canonical_not_yet_effective_fails_closed():
+    executor = _executor()
+    with pytest.raises(RuntimeGateError, match="not yet effective"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=_canonical(),
+            as_of="2026-08-19T00:00:00+00:00",
+        )
+
+
+def test_canonical_extra_field_fails_closed():
+    executor = _executor()
+    bad = _canonical()
+    bad["force_execute"] = True
+    with pytest.raises(RuntimeGateError, match="not a valid transition decision"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=bad, as_of=AS_OF,
+        )
+
+
+def test_canonical_unknown_schema_version_fails_closed():
+    executor = _executor()
+    bad = _canonical()
+    bad["schema_version"] = "environment-transition-decision/v9.9"
+    with pytest.raises(RuntimeGateError, match="not a valid transition decision"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=bad, as_of=AS_OF,
+        )
+
+
+def test_require_canonical_decision_rejects_interim_dict():
+    executor = _executor(require_canonical_decision=True)
+    with pytest.raises(RuntimeGateError, match="canonical"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=_approved_decision(), as_of=AS_OF,
+        )
+
+
+def test_canonical_signed_decision_authenticates():
+    executor = _executor(decision_authenticator=HmacDecisionAuthenticator(_KEY))
+    signed = sign_decision(_canonical(), _KEY)
+    result = executor.execute(
+        environment_id="env-1", current_state="baseline",
+        transition_id="open-smb-share", edge_decision=signed, as_of=AS_OF,
+    )
+    assert result["status"] == "shadow_simulated"
+    assert result["edge_decision_id"] == "edge-decision-1"
+
+
+def test_canonical_replay_fails_closed(tmp_path):
+    state = RuntimeStateStore(tmp_path)
+    executor = TransitionExecutor(make_transition_catalog(), state=state)
+    kwargs = dict(
+        environment_id="env-1", current_state="baseline",
+        transition_id="open-smb-share", edge_decision=_canonical(), as_of=AS_OF,
+    )
+    assert executor.execute(**kwargs)["status"] == "shadow_simulated"
+    with pytest.raises(RuntimeGateError, match="already consumed"):
+        executor.execute(**kwargs)
