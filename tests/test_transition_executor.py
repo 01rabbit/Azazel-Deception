@@ -69,17 +69,33 @@ def test_edge_approved_in_catalog_transition_is_shadow_simulated_by_default():
 
 
 def test_live_enabled_still_performs_no_container_action():
-    executor = _executor(live_enabled=True)
+    # live_enabled now requires the mandatory-authentication posture (see
+    # test_live_enabled_requires_authenticated_posture); wire it and prove that
+    # even a fully live+authenticated executor performs no container action.
+    executor = _executor(
+        live_enabled=True,
+        require_authenticated_decisions=True,
+        decision_authenticator=HmacDecisionAuthenticator(_KEY),
+    )
+    signed = sign_decision(_approved_decision(environment_id="env-1"), _KEY)
     result = executor.execute(
         environment_id="env-1",
         current_state="baseline",
         transition_id="open-smb-share",
-        edge_decision=_approved_decision(),
+        edge_decision=signed,
         as_of=AS_OF,
     )
     assert result["status"] == "would_execute"
     assert result["enforcement_applied"] is False
     assert result["live_enabled"] is True
+
+
+def test_live_enabled_requires_authenticated_posture():
+    # Fail-closed: a "live" executor must authenticate decisions, so a
+    # "would_execute" go-signal can never be produced from an unauthenticated
+    # (forgeable) decision. Constructing one without that posture is refused.
+    with pytest.raises(ValueError, match="require_authenticated_decisions"):
+        _executor(live_enabled=True)
 
 
 def test_tampered_catalog_digest_fails_closed():
@@ -250,7 +266,9 @@ def test_tampered_signed_decision_fails_closed():
 
 def test_authentically_signed_decision_is_accepted():
     executor = _executor(decision_authenticator=HmacDecisionAuthenticator(_KEY))
-    signed = sign_decision(_approved_decision(), _KEY)
+    # An authenticated interim decision must bind its environment (see
+    # test_authenticated_interim_decision_without_environment_is_rejected).
+    signed = sign_decision(_approved_decision(environment_id="env-1"), _KEY)
     result = executor.execute(
         environment_id="env-1",
         current_state="baseline",
@@ -260,6 +278,23 @@ def test_authentically_signed_decision_is_accepted():
     )
     assert result["status"] == "shadow_simulated"
     assert result["edge_decision_id"] == "edge-decision-1"
+
+
+def test_authenticated_interim_decision_without_environment_is_rejected():
+    # A validly-signed interim decision that omits environment_id must not be
+    # redirectable to an arbitrary environment: the signature covers the payload,
+    # but an absent environment_id binds nothing. Under an authenticated posture
+    # this fails closed rather than authorizing whatever env the caller names.
+    executor = _executor(decision_authenticator=HmacDecisionAuthenticator(_KEY))
+    signed = sign_decision(_approved_decision(), _KEY)  # no environment_id bound
+    with pytest.raises(RuntimeGateError, match="must bind an environment_id"):
+        executor.execute(
+            environment_id="env-anything",
+            current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=signed,
+            as_of=AS_OF,
+        )
 
 
 def test_strict_posture_requires_an_authenticator():

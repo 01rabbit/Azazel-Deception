@@ -137,6 +137,19 @@ class TransitionExecutor:
         # uses so a decision is always the authoritative, schema-versioned,
         # expiry-bearing contract rather than an ad-hoc mapping.
         self.require_canonical_decision = bool(require_canonical_decision)
+        # Fail-closed coupling: a "live" posture must authenticate decisions.
+        # Without this, ``TransitionExecutor(catalog, live_enabled=True)`` would
+        # stamp a ``"would_execute"`` status onto an unauthenticated (and thus
+        # forgeable) decision, which a downstream runtime adapter could act on.
+        # ``live_enabled`` therefore requires the mandatory-authentication
+        # posture -- exactly what :meth:`strict` wires -- so a go-signal can
+        # never be produced from an unauthenticated decision.
+        if self.live_enabled and not self.require_authenticated_decisions:
+            raise ValueError(
+                "live_enabled=True requires require_authenticated_decisions=True "
+                "(use TransitionExecutor.strict): a 'would_execute' result must "
+                "never be produced from an unauthenticated, forgeable decision"
+            )
         # Seal/trust the digest the catalog carried at construction time.
         # Recomputed digests are always compared back to *this* value, never
         # to whatever `self.catalog.catalog_digest` happens to read as later.
@@ -216,8 +229,7 @@ class TransitionExecutor:
             )
         return resolved
 
-    @staticmethod
-    def _authorize(edge_decision: Any, transition_id: str, environment_id: str) -> str:
+    def _authorize(self, edge_decision: Any, transition_id: str, environment_id: str) -> str:
         """Fail-closed check that Edge approved exactly this transition.
 
         Minimal expected shape: a mapping with ``transition_id`` matching the
@@ -225,11 +237,17 @@ class TransitionExecutor:
         ``status == "approved"``. Anything absent, mismatched, or not
         explicitly approved is refused -- there is no default-open case.
 
-        When the decision carries an ``environment_id`` it must match the
-        environment being transitioned: an approval minted for one environment
-        can never be replayed against another. (It is optional only so that
-        callers minting a decision without an explicit environment binding stay
-        backward-compatible; a present-but-mismatched binding always fails.)
+        Environment binding: when the decision carries an ``environment_id`` it
+        must match the environment being transitioned. A *missing* binding is
+        tolerated only in the fully-unauthenticated back-compat path; once
+        decisions are authenticated (an authenticator is wired, or the strict
+        ``require_authenticated_decisions`` posture is on) a missing
+        ``environment_id`` is refused, because the signature covers the payload
+        but an absent field binds nothing -- a decision legitimately signed for
+        one environment could otherwise be redirected to another. A
+        present-but-mismatched binding always fails. (The canonical Fabric
+        contract makes ``environment_id`` mandatory; this only guards the
+        legacy interim shape.)
         """
 
         if not isinstance(edge_decision, dict):
@@ -241,7 +259,19 @@ class TransitionExecutor:
                 f"(decision={decision_transition_id!r} requested={transition_id!r})"
             )
         decision_environment_id = edge_decision.get("environment_id")
-        if decision_environment_id is not None and decision_environment_id != environment_id:
+        authentication_active = (
+            self.decision_authenticator is not None
+            or self.require_authenticated_decisions
+        )
+        if decision_environment_id is None:
+            if authentication_active:
+                raise RuntimeGateError(
+                    "an authenticated interim edge_decision must bind an environment_id "
+                    "(an absent environment_id would let a signed decision be redirected "
+                    "to any environment); migrate to the canonical "
+                    "EnvironmentTransitionDecision"
+                )
+        elif decision_environment_id != environment_id:
             raise RuntimeGateError(
                 "edge_decision does not authorize this environment_id "
                 f"(decision={decision_environment_id!r} requested={environment_id!r})"
