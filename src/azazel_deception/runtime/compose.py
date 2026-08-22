@@ -244,7 +244,15 @@ class DockerComposeAdapter:
     ) -> None:
         if decision.status not in {"accepted", "modified"}:
             raise RuntimeGateError(f"activation decision is not executable: {decision.status}")
-        if decision.expires_at <= _utcnow():
+        now = _utcnow()
+        # Enforce BOTH ends of the decision's validity window, matching the
+        # sibling TransitionExecutor (effective_at <= now < expires_at). Without
+        # the lower bound a decision Edge scheduled to take effect later would
+        # activate immediately, defeating the temporal-authority window it
+        # carries -- so a not-yet-effective decision fails closed here too.
+        if decision.effective_at > now:
+            raise RuntimeGateError("activation decision is not yet effective")
+        if decision.expires_at <= now:
             raise RuntimeGateError("activation decision is expired")
         if decision.package_id != package.package_id or decision.package_digest != package.package_digest:
             raise RuntimeGateError("activation decision package binding mismatch")

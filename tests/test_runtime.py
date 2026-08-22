@@ -168,6 +168,24 @@ def test_edge_budget_cannot_exceed_package_maximum(tmp_path):
     assert adapter.state.decision_consumed("edge-decision-1") is False
 
 
+def test_not_yet_effective_activation_is_rejected(tmp_path):
+    # A decision Edge scheduled to take effect later must NOT activate now: the
+    # binding enforces effective_at <= now (both ends of the validity window),
+    # matching the sibling TransitionExecutor. Fails closed before consuming.
+    package = _verified_reference_package()
+    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
+    decision = _decision(package, plan)
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    decision["effective_at"] = future.isoformat()
+    decision["expires_at"] = (future + timedelta(minutes=5)).isoformat()
+    with pytest.raises(RuntimeGateError, match="not yet effective"):
+        adapter.activate_environment("env-1", package, plan, decision)
+    assert adapter.state.decision_consumed("edge-decision-1") is False
+
+
 def test_edge_budget_must_cover_selected_tier_minimum(tmp_path):
     package = _verified_reference_package()
     plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
