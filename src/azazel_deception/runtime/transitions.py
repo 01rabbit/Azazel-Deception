@@ -47,16 +47,13 @@ from azazel_deception.runtime.transport import (
     require_authenticated_decision,
 )
 
-# Interim (pre-canonical) decision shape, retained for backward compatibility
-# with callers that have not migrated to the Fabric contract. A live posture
-# should set ``require_canonical_decision=True`` to reject it.
-_APPROVED_STATUS = "approved"
-
-# The canonical Fabric transition-decision contract this executor prefers.
-_TRANSITION_SCHEMA_VERSION = "environment-transition-decision/v0.1"
+# The canonical Fabric transition-decision contract is the ONLY accepted decision
+# shape. The legacy interim dict ({transition_id, edge_decision_id, status:
+# "approved"}) has been retired (canonical cutover, Step 3): a decision is always
+# the authoritative, schema-versioned, environment/state/window-bound contract.
 # Any decision in the transition-decision family is routed to canonical
 # validation, so an unknown *version* (e.g. .../v9.9) is rejected by the model's
-# exact-version Literal rather than silently falling back to the interim path.
+# exact-version Literal.
 _TRANSITION_SCHEMA_PREFIX = "environment-transition-decision/"
 # Only an accepted/modified Edge decision is executable; a rejected (or any
 # other) status is refused fail-closed.
@@ -131,24 +128,34 @@ class TransitionExecutor:
         self.require_authenticated_decisions = bool(require_authenticated_decisions)
         self.require_replay_protection = bool(require_replay_protection)
         self.require_decision_expiry = bool(require_decision_expiry)
-        # When set, only a valid canonical Fabric EnvironmentTransitionDecision
-        # is accepted; the interim ``{transition_id, edge_decision_id, status:
-        # "approved"}`` dict is rejected. This is the posture a live integration
-        # uses so a decision is always the authoritative, schema-versioned,
-        # expiry-bearing contract rather than an ad-hoc mapping.
+        # Retained for API compatibility and as an explicit posture flag. The
+        # interim decision shape has been retired, so a canonical
+        # EnvironmentTransitionDecision is now *unconditionally* required by
+        # :meth:`execute` regardless of this flag; it stays here so a live
+        # posture must still acknowledge canonical-only (see the guard below) and
+        # so existing callers/`strict()` keep working unchanged.
         self.require_canonical_decision = bool(require_canonical_decision)
-        # Fail-closed coupling: a "live" posture must authenticate decisions.
-        # Without this, ``TransitionExecutor(catalog, live_enabled=True)`` would
-        # stamp a ``"would_execute"`` status onto an unauthenticated (and thus
-        # forgeable) decision, which a downstream runtime adapter could act on.
-        # ``live_enabled`` therefore requires the mandatory-authentication
-        # posture -- exactly what :meth:`strict` wires -- so a go-signal can
-        # never be produced from an unauthenticated decision.
-        if self.live_enabled and not self.require_authenticated_decisions:
+        # Fail-closed coupling: a "live" posture must wire the FULL strict set,
+        # not merely authentication. Without this, a raw
+        # ``TransitionExecutor(catalog, live_enabled=True, ...)`` could stamp a
+        # ``"would_execute"`` status while leaving replay protection, decision
+        # expiry, or canonical-only merely optional, which a downstream runtime
+        # adapter could act on. ``live_enabled`` therefore requires every
+        # protection to be mandatory -- exactly what :meth:`strict` and
+        # ``build_reference_transition_executor`` wire -- so a go-signal can
+        # never be produced from an unauthenticated, replay-unprotected,
+        # non-expiring, or non-canonical decision.
+        if self.live_enabled and not (
+            self.require_authenticated_decisions
+            and self.require_replay_protection
+            and self.require_decision_expiry
+            and self.require_canonical_decision
+        ):
             raise ValueError(
-                "live_enabled=True requires require_authenticated_decisions=True "
-                "(use TransitionExecutor.strict): a 'would_execute' result must "
-                "never be produced from an unauthenticated, forgeable decision"
+                "live_enabled=True requires the full strict posture "
+                "(require_authenticated_decisions + require_replay_protection + "
+                "require_decision_expiry + require_canonical_decision); use "
+                "TransitionExecutor.strict(...) or build_reference_transition_executor(...)"
             )
         # Seal/trust the digest the catalog carried at construction time.
         # Recomputed digests are always compared back to *this* value, never
@@ -228,63 +235,6 @@ class TransitionExecutor:
                 "in the catalog"
             )
         return resolved
-
-    def _authorize(self, edge_decision: Any, transition_id: str, environment_id: str) -> str:
-        """Fail-closed check that Edge approved exactly this transition.
-
-        Minimal expected shape: a mapping with ``transition_id`` matching the
-        requested transition, a non-empty ``edge_decision_id``, and
-        ``status == "approved"``. Anything absent, mismatched, or not
-        explicitly approved is refused -- there is no default-open case.
-
-        Environment binding: when the decision carries an ``environment_id`` it
-        must match the environment being transitioned. A *missing* binding is
-        tolerated only in the fully-unauthenticated back-compat path; once
-        decisions are authenticated (an authenticator is wired, or the strict
-        ``require_authenticated_decisions`` posture is on) a missing
-        ``environment_id`` is refused, because the signature covers the payload
-        but an absent field binds nothing -- a decision legitimately signed for
-        one environment could otherwise be redirected to another. A
-        present-but-mismatched binding always fails. (The canonical Fabric
-        contract makes ``environment_id`` mandatory; this only guards the
-        legacy interim shape.)
-        """
-
-        if not isinstance(edge_decision, dict):
-            raise RuntimeGateError("edge_decision must be a mapping")
-        decision_transition_id = edge_decision.get("transition_id")
-        if decision_transition_id != transition_id:
-            raise RuntimeGateError(
-                "edge_decision does not authorize this transition_id "
-                f"(decision={decision_transition_id!r} requested={transition_id!r})"
-            )
-        decision_environment_id = edge_decision.get("environment_id")
-        authentication_active = (
-            self.decision_authenticator is not None
-            or self.require_authenticated_decisions
-        )
-        if decision_environment_id is None:
-            if authentication_active:
-                raise RuntimeGateError(
-                    "an authenticated interim edge_decision must bind an environment_id "
-                    "(an absent environment_id would let a signed decision be redirected "
-                    "to any environment); migrate to the canonical "
-                    "EnvironmentTransitionDecision"
-                )
-        elif decision_environment_id != environment_id:
-            raise RuntimeGateError(
-                "edge_decision does not authorize this environment_id "
-                f"(decision={decision_environment_id!r} requested={environment_id!r})"
-            )
-        edge_decision_id = edge_decision.get("edge_decision_id")
-        if not isinstance(edge_decision_id, str) or not edge_decision_id:
-            raise RuntimeGateError("edge_decision is missing a non-empty edge_decision_id")
-        status = edge_decision.get("status")
-        if status != _APPROVED_STATUS:
-            raise RuntimeGateError(
-                f"edge_decision status is not {_APPROVED_STATUS!r}: {status!r}"
-            )
-        return edge_decision_id
 
     @staticmethod
     def _is_canonical_decision(edge_decision: dict[str, Any]) -> bool:
@@ -385,29 +335,6 @@ class TransitionExecutor:
         except DecisionAuthenticationError as exc:
             raise RuntimeGateError(str(exc)) from exc
 
-    def _check_decision_expiry(self, edge_decision: dict[str, Any], as_of: str) -> None:
-        """Reject an expired (or expiry-required-but-absent) Edge decision.
-
-        Deterministic: compares two caller-supplied timestamps (the decision's
-        ``expires_at`` and ``as_of``), never the wall clock. When the decision
-        carries an ``expires_at`` it is always enforced; ``require_decision_
-        expiry`` additionally makes the field mandatory so a strict posture will
-        not accept an unbounded, never-expiring decision.
-        """
-
-        expires_at = edge_decision.get("expires_at")
-        if expires_at is None:
-            if self.require_decision_expiry:
-                raise RuntimeGateError("edge_decision is missing a required expires_at")
-            return
-        expiry_dt = _parse_iso_aware(expires_at, field="edge_decision.expires_at")
-        as_of_dt = _parse_iso_aware(as_of, field="as_of")
-        if as_of_dt >= expiry_dt:
-            raise RuntimeGateError(
-                "edge_decision is expired as of the decision-time context "
-                f"(as_of={as_of!r} >= expires_at={expires_at!r})"
-            )
-
     def _consume_decision(self, edge_decision_id: str, environment_id: str, as_of: str) -> None:
         """One-shot anti-replay: refuse a decision id already exercised.
 
@@ -495,36 +422,21 @@ class TransitionExecutor:
         #    authenticator is configured or the strict posture demands one).
         self._authenticate_decision(edge_decision)
 
-        # 4. Authorize + bind the decision. The canonical Fabric contract is
-        #    preferred (and mandatory under require_canonical_decision); the
-        #    interim dict shape remains only for un-migrated callers and is
-        #    rejected outright in a strict posture.
-        canonical = self._is_canonical_decision(edge_decision)
-        if self.require_canonical_decision and not canonical:
+        # 4. Bind the decision. Only the canonical Fabric
+        #    EnvironmentTransitionDecision is accepted -- the legacy interim dict
+        #    shape has been retired (canonical cutover), so a decision is always
+        #    the authoritative, schema-versioned contract. The canonical path
+        #    binds environment, current/target state, status, and the
+        #    effective/expiry window from the contract itself.
+        if not self._is_canonical_decision(edge_decision):
             raise RuntimeGateError(
                 "a canonical EnvironmentTransitionDecision is required "
-                f"(schema_version={_TRANSITION_SCHEMA_VERSION!r})"
+                f"(schema_version starting {_TRANSITION_SCHEMA_PREFIX!r}); the interim "
+                "decision shape has been retired"
             )
-        if canonical:
-            # The canonical path binds environment, current/target state, status,
-            # and the effective/expiry window from the contract itself.
-            edge_decision_id = self._bind_canonical_decision(
-                edge_decision, environment_id, current_state, transition, as_of
-            )
-        else:
-            edge_decision_id = self._authorize(edge_decision, transition_id, environment_id)
-            # A decision carrying an expiry must not be exercised past it (and,
-            # under a strict posture, must carry one at all) -- so a captured
-            # approval cannot be replayed indefinitely into the future.
-            self._check_decision_expiry(edge_decision, as_of)
-            # The caller's reported current_state must match the transition's
-            # declared from-state -- executing from the wrong state is refused.
-            if current_state != transition.from_state:
-                raise RuntimeGateError(
-                    "current_state does not match the transition's declared "
-                    f"from_state (current={current_state!r} "
-                    f"expected={transition.from_state!r})"
-                )
+        edge_decision_id = self._bind_canonical_decision(
+            edge_decision, environment_id, current_state, transition, as_of
+        )
 
         # 5. Bounds and rollback/termination conditions must be declared.
         self._validate_bounds_and_conditions(transition)

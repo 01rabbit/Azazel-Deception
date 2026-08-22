@@ -32,7 +32,14 @@ from pathlib import Path
 
 from azazel_deception.runtime.compose import DockerComposeAdapter
 from azazel_deception.runtime.preflight import PackageVerifier, SbomVerifier
+from azazel_deception.runtime.state import RuntimeStateStore
+from azazel_deception.runtime.transitions import TransitionExecutor
 from azazel_deception.runtime.transport import DecisionAuthenticator
+
+try:  # TransitionCatalog is only needed for the type hint; keep import soft.
+    from azazel_fabric.deception_contracts.transitions import TransitionCatalog
+except Exception:  # pragma: no cover - defensive
+    TransitionCatalog = object  # type: ignore[assignment,misc]
 
 # The one supported opt-out mechanism for relaxing the reference deployment's
 # strict posture. Loudly named on purpose: it must read as a development
@@ -90,4 +97,48 @@ def build_reference_adapter(
         decision_authenticator=decision_authenticator,
         require_sbom_verification=strict,
         require_authenticated_decisions=strict,
+    )
+
+
+def build_reference_transition_executor(
+    catalog: "TransitionCatalog",
+    *,
+    decision_authenticator: DecisionAuthenticator | None = None,
+    state: RuntimeStateStore | None = None,
+    live_enabled: bool | None = None,
+    dev_relaxed_posture: bool | None = None,
+) -> TransitionExecutor:
+    """Construct the strict-by-default ``TransitionExecutor`` for reference use.
+
+    The reference/production way to build a ``TransitionExecutor`` — analogous to
+    :func:`build_reference_adapter`. Strict posture enables every gate
+    (authentication, one-shot anti-replay, decision expiry, canonical-only). As
+    with the adapter, strict is not silently satisfied: a live ``execute()``
+    fails closed (``RuntimeGateError``) if the authenticator/state store are not
+    also provided.
+
+    Live gating mirrors ``DockerComposeAdapter``: ``live_enabled`` defaults to
+    ``AZAZEL_DECEPTION_LIVE == "1"``. Because ``TransitionExecutor`` couples
+    ``live_enabled`` to the *full* strict posture (see its constructor guard),
+    the dev-relaxed opt-out is **shadow-only** here — when the posture is relaxed,
+    ``live_enabled`` is forced ``False`` so relaxed development cannot go live for
+    transitions. Never relax the posture for a real reference deployment.
+    """
+
+    relaxed = dev_relaxed_posture_requested(dev_relaxed_posture)
+    strict = not relaxed
+    if live_enabled is None:
+        live_enabled = os.environ.get("AZAZEL_DECEPTION_LIVE", "0") == "1"
+    # Relaxed posture cannot satisfy the executor's strict-for-live guard, so a
+    # relaxed reference build is shadow-only rather than a construction error.
+    live_enabled = bool(live_enabled) and strict
+    return TransitionExecutor(
+        catalog,
+        live_enabled=live_enabled,
+        decision_authenticator=decision_authenticator,
+        state=state,
+        require_authenticated_decisions=strict,
+        require_replay_protection=strict,
+        require_decision_expiry=strict,
+        require_canonical_decision=strict,
     )
