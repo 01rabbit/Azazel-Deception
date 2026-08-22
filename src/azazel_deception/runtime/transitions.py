@@ -142,6 +142,36 @@ class TransitionExecutor:
         # to whatever `self.catalog.catalog_digest` happens to read as later.
         self._sealed_digest = catalog.catalog_digest
 
+    @classmethod
+    def strict(
+        cls,
+        catalog: TransitionCatalog,
+        *,
+        decision_authenticator: DecisionAuthenticator,
+        state: RuntimeStateStore,
+        live_enabled: bool = False,
+    ) -> "TransitionExecutor":
+        """Construct an executor with every hardening gate enabled at once.
+
+        A live/production wiring should prefer this over the raw constructor so
+        it cannot accidentally leave one protection off: a captured or forged
+        decision is then refused on every axis -- transport authentication,
+        one-shot anti-replay, decision expiry, and the canonical Fabric
+        contract. Both a ``decision_authenticator`` and a ``state`` store are
+        mandatory here (the strict flags fail closed without them).
+        """
+
+        return cls(
+            catalog,
+            live_enabled=live_enabled,
+            decision_authenticator=decision_authenticator,
+            state=state,
+            require_authenticated_decisions=True,
+            require_replay_protection=True,
+            require_decision_expiry=True,
+            require_canonical_decision=True,
+        )
+
     def _verify_catalog_integrity(self) -> None:
         try:
             recomputed = catalog_content_digest(self.catalog)

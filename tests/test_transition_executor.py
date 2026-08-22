@@ -567,3 +567,53 @@ def test_canonical_replay_fails_closed(tmp_path):
     assert executor.execute(**kwargs)["status"] == "shadow_simulated"
     with pytest.raises(RuntimeGateError, match="already consumed"):
         executor.execute(**kwargs)
+
+
+# -- strict-posture convenience constructor (adversarial-review hardening) ----
+
+
+def test_strict_constructor_enables_all_gates(tmp_path):
+    state = RuntimeStateStore(tmp_path)
+    executor = TransitionExecutor.strict(
+        make_transition_catalog(),
+        decision_authenticator=HmacDecisionAuthenticator(_KEY),
+        state=state,
+    )
+    assert executor.require_authenticated_decisions
+    assert executor.require_replay_protection
+    assert executor.require_decision_expiry
+    assert executor.require_canonical_decision
+    # A validly-signed canonical decision passes end to end...
+    signed = sign_decision(_canonical(), _KEY)
+    assert executor.execute(
+        environment_id="env-1", current_state="baseline",
+        transition_id="open-smb-share", edge_decision=signed, as_of=AS_OF,
+    )["status"] == "shadow_simulated"
+    # ...and a replay of it is refused (anti-replay is on)...
+    with pytest.raises(RuntimeGateError, match="already consumed"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=signed, as_of=AS_OF,
+        )
+
+
+def test_strict_constructor_rejects_interim_and_unsigned(tmp_path):
+    executor = TransitionExecutor.strict(
+        make_transition_catalog(),
+        decision_authenticator=HmacDecisionAuthenticator(_KEY),
+        state=RuntimeStateStore(tmp_path),
+    )
+    # A *signed* interim dict passes authentication but is then rejected for
+    # not being the canonical contract (require_canonical_decision).
+    with pytest.raises(RuntimeGateError, match="canonical"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share",
+            edge_decision=sign_decision(_approved_decision(), _KEY), as_of=AS_OF,
+        )
+    # canonical but UNSIGNED -> rejected at authentication (require_authenticated_decisions)
+    with pytest.raises(RuntimeGateError, match="authentication"):
+        executor.execute(
+            environment_id="env-1", current_state="baseline",
+            transition_id="open-smb-share", edge_decision=_canonical(), as_of=AS_OF,
+        )
