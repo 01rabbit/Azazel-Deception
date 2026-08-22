@@ -115,6 +115,13 @@ def test_accepts_model_instances_and_single_use_iterator():
     assert result.ready is True
 
 
+def test_empty_required_set_is_never_vacuously_ready():
+    # Fail-closed: an empty required set must not report ready with zero evidence
+    # (guards against a caller passing required=[] or a set that collapsed).
+    assert evaluate_live_gate_readiness([], required=[]).ready is False
+    assert evaluate_live_gate_readiness(_all_certs(), required=[]).ready is False
+
+
 def test_readiness_authorizes_nothing_it_is_only_a_precondition():
     # A ready result carries no authority token / live flag — it is a plain
     # readiness report. This documents that the flip still needs human sign-off.

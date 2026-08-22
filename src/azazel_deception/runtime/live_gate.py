@@ -154,7 +154,11 @@ def evaluate_live_gate_readiness(
             unknown_ids.append(c.gate_id)
 
     return LiveGateReadiness(
-        ready=satisfied == required_set,
+        # Fail-closed: an EMPTY required set is never "ready" (satisfaction over
+        # the empty set is vacuously true, which would report ready with zero
+        # evidence). Readiness for the live flip requires at least one gate and
+        # every required gate satisfied.
+        ready=bool(required_set) and satisfied == required_set,
         satisfied_gate_ids=satisfied_ids,
         missing_gate_ids=missing_ids,
         uncertified_gate_ids=uncertified_ids,
