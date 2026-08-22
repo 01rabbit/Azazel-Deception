@@ -22,6 +22,8 @@ fixtures with; it is never a real transport key.
 
 from __future__ import annotations
 
+import pytest
+
 from azazel_deception.runtime.transport import (
     HmacDecisionAuthenticator,
     canonical_decision_bytes,
@@ -72,3 +74,16 @@ def test_signature_field_is_excluded_from_canonical_bytes():
     # covered bytes are unchanged and the signature still verifies.
     assert canonical_decision_bytes(signed) == _GOLDEN_CANONICAL
     assert HmacDecisionAuthenticator(_GOLDEN_KEY)(signed) is True
+
+
+def test_non_bytes_key_is_rejected_not_silently_degenerate():
+    # bytes(n) for an int n returns n zero bytes -- NOT an encoding of n -- so a
+    # misconfigured int key would otherwise silently become a predictable
+    # all-zero key. Non-str/bytes keys must fail loudly, in the transport
+    # primitives and in the authenticator constructor alike.
+    with pytest.raises(TypeError):
+        compute_decision_signature(_GOLDEN_BODY, 16)
+    with pytest.raises(TypeError):
+        sign_decision(_GOLDEN_BODY, 16)
+    with pytest.raises(TypeError):
+        HmacDecisionAuthenticator(16)
