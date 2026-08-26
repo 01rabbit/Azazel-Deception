@@ -73,6 +73,18 @@ def test_terminal_snapshot_projects_after_and_preserves_reset_proof():
     assert payload["observation_values"]["reset_ref"] == "reset:proof:1"
 
 
+def test_stale_snapshot_is_not_rounded_to_after():
+    with pytest.raises(ValueError, match="stale Presented Terrain"):
+        presented_terrain_lifecycle_outcome(
+            snapshot(
+                lifecycle_state="stale",
+                active_surface_refs=(),
+                limitations=("runtime_active_not_independently_verified",),
+            ),
+            observed_at="2026-08-26T00:00:02Z",
+        )
+
+
 def test_nested_tactical_or_belief_claim_is_rejected():
     with pytest.raises(ValueError, match="forbidden"):
         presented_terrain_lifecycle_outcome(
