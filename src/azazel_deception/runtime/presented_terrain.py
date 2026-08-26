@@ -1,8 +1,8 @@
 """Fact-only Presented Terrain evidence projection.
 
-This module deliberately sits *after* an observed redirection mechanism.  It
+This module deliberately sits *after* an observed redirection mechanism. It
 never selects DIVERT, never authorizes materialization, and never infers attacker
-belief.  The existing runtime remains the only local lifecycle authority.
+belief. The existing runtime remains the only local lifecycle authority.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class PresentedTerrainSnapshotV0(_StrictFact):
     """Descriptive snapshot of a Deception presentation.
 
     ``lifecycle_state=active`` means the runtime was independently verified
-    active for this projection.  Persisted state alone can only produce a
+    active for this projection. Persisted state alone can only produce a
     ``stale`` snapshot after restart/reconciliation uncertainty.
     """
 
@@ -96,7 +96,13 @@ def _stable_presentation_id(
     package_digest: str,
 ) -> str:
     material = "|".join(
-        (environment_id, producer.trace_id, producer.execution_ref, producer.mechanism_observation_ref, package_digest)
+        (
+            environment_id,
+            producer.trace_id,
+            producer.execution_ref,
+            producer.mechanism_observation_ref,
+            package_digest,
+        )
     )
     return "presentation-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
@@ -106,6 +112,8 @@ def build_presented_terrain_snapshot(
     environment_id: str,
     producer: ProducerRedirectionEvidence,
     runtime_state: Mapping[str, Any],
+    expected_package_id: str,
+    expected_package_digest: str,
     package_version: str,
     observed_at: str,
     active_surface_refs: tuple[str, ...] = (),
@@ -123,7 +131,8 @@ def build_presented_terrain_snapshot(
 
     Persisted ``state=active`` is not sufficient after restart: callers must
     independently verify the runtime and set ``runtime_verified_active=True``.
-    Otherwise the projection is intentionally ``stale``.
+    The runtime's package identity must also match external package provenance;
+    runtime state is not allowed to vouch for itself.
     """
 
     if not isinstance(runtime_state, Mapping):
@@ -134,6 +143,8 @@ def build_presented_terrain_snapshot(
     recorded_environment = str(runtime_state.get("environment_id") or "")
     if not package_id or not package_digest or not runtime_node:
         raise ValueError("runtime state lacks package/runtime provenance")
+    if package_id != expected_package_id or package_digest != expected_package_digest:
+        raise ValueError("runtime package provenance does not match verified package")
     if recorded_environment and recorded_environment != environment_id:
         raise ValueError("runtime state environment does not match presentation")
 
@@ -157,9 +168,9 @@ def build_presented_terrain_snapshot(
         local_limitations.append("unknown_runtime_state")
 
     started_at = str(runtime_state.get("activated_at") or "") or None
-    ended_at = (
-        str(runtime_state.get("terminated_at") or runtime_state.get("reset_at") or "") or None
-    )
+    ended_at = str(
+        runtime_state.get("terminated_at") or runtime_state.get("reset_at") or ""
+    ) or None
     all_evidence = tuple(dict.fromkeys((*producer.evidence_refs, *evidence_refs)))
 
     return PresentedTerrainSnapshotV0(
