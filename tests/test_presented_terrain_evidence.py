@@ -14,6 +14,7 @@ from azazel_deception.runtime.presented_terrain import (
 def producer(**overrides):
     data = {
         "producer_product": "azazel-edge",
+        "producer_node": "edge-1",
         "trace_id": "trace-1",
         "decision_ref": "decision-1",
         "execution_ref": "execution-1",
@@ -59,17 +60,20 @@ def build(**overrides):
 def test_active_snapshot_requires_observed_redirection_not_divert():
     snapshot = build()
     assert snapshot.lifecycle_state == "active"
+    assert snapshot.producer_node == "edge-1"
     assert snapshot.producer_mechanism_kind == "redirection"
     assert "effect_class" not in snapshot.model_dump()
     assert "divert" not in snapshot.model_dump_json().lower()
     assert snapshot.executable is False
 
 
-def test_producer_cannot_claim_divert_as_mechanism():
+def test_producer_cannot_claim_divert_or_unverified_mechanism():
     with pytest.raises(ValidationError):
         producer(mechanism_kind="divert")
     with pytest.raises(ValidationError):
         producer(status="unverified")
+    with pytest.raises(ValidationError):
+        producer(producer_node="")
 
 
 def test_persisted_active_state_without_independent_readback_becomes_stale():
@@ -93,9 +97,11 @@ def test_cross_environment_runtime_state_fails_closed():
         build(runtime_state=state)
 
 
-def test_active_snapshot_requires_actual_surface_evidence():
+def test_active_snapshot_requires_surface_and_isolation_evidence():
     with pytest.raises(ValidationError, match="active surface"):
         build(active_surface_refs=())
+    with pytest.raises(ValidationError, match="isolation assertion"):
+        build(isolation_assertion_refs=())
 
 
 def test_terminal_reset_requires_reset_evidence():
@@ -114,23 +120,29 @@ def test_terminal_reset_requires_reset_evidence():
 
 
 def test_secret_or_effectiveness_fields_have_no_schema_surface():
-    payload = build().model_dump()
-    payload["credential_secret"] = "secret"
-    with pytest.raises(ValidationError):
-        PresentedTerrainSnapshotV0.model_validate(payload)
-    payload = build().model_dump()
-    payload["attacker_belief"] = "fooled"
-    with pytest.raises(ValidationError):
-        PresentedTerrainSnapshotV0.model_validate(payload)
-    payload = build().model_dump()
-    payload["success"] = True
-    with pytest.raises(ValidationError):
-        PresentedTerrainSnapshotV0.model_validate(payload)
+    for field, value in (
+        ("credential_secret", "secret"),
+        ("attacker_belief", "fooled"),
+        ("success", True),
+        ("effect_class", "DIVERT"),
+    ):
+        payload = build().model_dump()
+        payload[field] = value
+        with pytest.raises(ValidationError):
+            PresentedTerrainSnapshotV0.model_validate(payload)
 
 
-def test_credential_refs_are_refs_only_and_canonical_json_is_stable():
+def test_credential_refs_are_opaque_refs_not_secret_material():
+    snapshot = build(synthetic_credential_refs=("credential:lure:42",))
+    assert snapshot.synthetic_credential_refs == ("credential:lure:42",)
+    with pytest.raises(ValidationError, match="credential"):
+        build(synthetic_credential_refs=("AKIA=secret",))
+    with pytest.raises(ValidationError, match="credential"):
+        build(synthetic_credential_refs=("credential: lure secret",))
+
+
+def test_canonical_json_is_byte_stable():
     snapshot = build(synthetic_credential_refs=("credential:lure:42",))
     one = canonical_snapshot_json(snapshot)
     two = canonical_snapshot_json(PresentedTerrainSnapshotV0.model_validate_json(one))
     assert one == two
-    assert "credential:lure:42" in one
