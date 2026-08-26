@@ -18,6 +18,15 @@ class _StrictFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def _require_reference(label: str, value: str, *, prefix: str | None = None) -> None:
+    if not value or value != value.strip():
+        raise ValueError(f"{label} must be a non-empty trimmed reference")
+    if any(ch.isspace() for ch in value) or "=" in value:
+        raise ValueError(f"{label} must be an opaque reference, not secret material")
+    if prefix is not None and not value.startswith(prefix):
+        raise ValueError(f"{label} must use {prefix} reference namespace")
+
+
 class ProducerRedirectionEvidence(_StrictFact):
     """Opaque producer linkage proving only that REDIRECTION was observed."""
 
@@ -25,6 +34,7 @@ class ProducerRedirectionEvidence(_StrictFact):
         "deception-producer-mechanism/v0.1"
     )
     producer_product: str = Field(min_length=1, max_length=64)
+    producer_node: str = Field(min_length=1, max_length=128)
     trace_id: str = Field(min_length=1, max_length=256)
     decision_ref: str = Field(min_length=1, max_length=256)
     execution_ref: str = Field(min_length=1, max_length=256)
@@ -37,8 +47,8 @@ class ProducerRedirectionEvidence(_StrictFact):
 class PresentedTerrainSnapshotV0(_StrictFact):
     """Descriptive snapshot of a Deception presentation.
 
-    ``lifecycle_state=active`` means the runtime was independently verified
-    active for this projection. Persisted state alone can only produce a
+    ``lifecycle_state=active`` means the runtime and isolation were independently
+    verified for this projection. Persisted state alone can only produce a
     ``stale`` snapshot after restart/reconciliation uncertainty.
     """
 
@@ -48,6 +58,7 @@ class PresentedTerrainSnapshotV0(_StrictFact):
     presentation_id: str = Field(min_length=1, max_length=256)
     environment_id: str = Field(min_length=1, max_length=256)
     producer_product: str = Field(min_length=1, max_length=64)
+    producer_node: str = Field(min_length=1, max_length=128)
     trace_id: str = Field(min_length=1, max_length=256)
     producer_decision_ref: str = Field(min_length=1, max_length=256)
     producer_execution_ref: str = Field(min_length=1, max_length=256)
@@ -78,15 +89,30 @@ class PresentedTerrainSnapshotV0(_StrictFact):
 
     @model_validator(mode="after")
     def _lifecycle_invariants(self) -> "PresentedTerrainSnapshotV0":
+        for ref in self.synthetic_credential_refs:
+            _require_reference("synthetic_credential_ref", ref, prefix="credential:")
+        for label, refs in (
+            ("active_surface_ref", self.active_surface_refs),
+            ("synthetic_artifact_ref", self.synthetic_artifact_refs),
+            ("synthetic_identity_ref", self.synthetic_identity_refs),
+            ("isolation_assertion_ref", self.isolation_assertion_refs),
+            ("evidence_ref", self.evidence_refs),
+        ):
+            for ref in refs:
+                _require_reference(label, ref)
         if self.lifecycle_state == "active":
             if not self.started_at:
                 raise ValueError("active presentation requires started_at")
             if not self.active_surface_refs:
                 raise ValueError("active presentation requires active surface evidence")
+            if not self.isolation_assertion_refs:
+                raise ValueError("active presentation requires isolation assertion evidence")
         if self.lifecycle_state in {"terminated", "reset"} and not self.ended_at:
             raise ValueError("terminal presentation requires ended_at")
         if self.lifecycle_state == "reset" and not self.reset_ref:
             raise ValueError("reset presentation requires reset evidence reference")
+        if self.reset_ref is not None:
+            _require_reference("reset_ref", self.reset_ref)
         return self
 
 
@@ -98,6 +124,7 @@ def _stable_presentation_id(
     material = "|".join(
         (
             environment_id,
+            producer.producer_node,
             producer.trace_id,
             producer.execution_ref,
             producer.mechanism_observation_ref,
@@ -177,6 +204,7 @@ def build_presented_terrain_snapshot(
         presentation_id=_stable_presentation_id(environment_id, producer, package_digest),
         environment_id=environment_id,
         producer_product=producer.producer_product,
+        producer_node=producer.producer_node,
         trace_id=producer.trace_id,
         producer_decision_ref=producer.decision_ref,
         producer_execution_ref=producer.execution_ref,
