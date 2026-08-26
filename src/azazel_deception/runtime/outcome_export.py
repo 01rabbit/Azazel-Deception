@@ -89,10 +89,16 @@ def presented_terrain_lifecycle_outcome(
 
     This is lifecycle/materialization evidence only. Interaction with a decoy is not
     proof the adversary believed the presentation, and no such field exists here.
+
+    ``stale`` cannot be faithfully represented by the shared before/during/after
+    phase vocabulary: stale means current liveness is unknown, not that the
+    presentation ended. It therefore fails closed instead of being rounded to after.
     """
 
     if not observed_at.strip():
         raise ValueError("observed_at is required")
+    if snapshot.lifecycle_state == "stale":
+        raise ValueError("stale Presented Terrain cannot be projected into a terminal shared phase")
     phase: Literal["during", "after"] = "during" if snapshot.lifecycle_state == "active" else "after"
     values: dict[str, Any] = {
         "presentation_id": snapshot.presentation_id,
