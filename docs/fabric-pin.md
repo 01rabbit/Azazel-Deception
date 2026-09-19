@@ -1,11 +1,32 @@
-# Azazel-Fabric Pin
+# Versions and the Azazel-Fabric Pin
 
-> **Single source of truth.** The authoritative, machine-readable pin is the
-> `azazel-fabric` requirement in `pyproject.toml`. This document describes that
-> pin and nothing else restates the version number: every other document in this
-> repository links here (or to `pyproject.toml`) instead of repeating a version,
-> so a pin bump can never leave a stale copy behind. A bump changes exactly two
-> places — `pyproject.toml` and this file — plus a CHANGELOG entry.
+> **Single source of truth.** The authoritative, machine-readable values are in
+> `pyproject.toml`: `[project].version` for the product version and the
+> `azazel-fabric` requirement for the Fabric pin. This document describes them
+> and nothing else restates a version number: every other document in this
+> repository links here (or to `pyproject.toml`) instead of repeating one, so a
+> bump can never leave a stale copy behind. A bump changes exactly two places —
+> `pyproject.toml` and this file — plus a CHANGELOG entry.
+
+## Product version
+
+AZ-06 currently declares:
+
+`0.2.0.dev0`
+
+This is a pre-release development version. No stable version has been released
+and the repository carries no release tag; work in progress is recorded under
+`[Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md), which describes it as
+development toward `0.2.0`.
+
+> **Known defect.** `azazel_deception.__version__` (`src/azazel_deception/__init__.py`)
+> still reports `0.1.0.dev0`. `pyproject.toml` is the fact and the module
+> constant is the stale copy — a second machine-readable version that has
+> already drifted, which is precisely what the single-source rule above exists
+> to prevent. Reconciling it is a code change tracked by `Azazel-Deception#35`;
+> until it lands, do not quote `__version__` as the product version.
+
+## Fabric pin
 
 AZ-06 pins the stable Azazel-Fabric release tag:
 
