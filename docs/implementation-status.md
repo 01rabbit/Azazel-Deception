@@ -155,8 +155,10 @@ git-ignored `artifacts/lab/virtual-phase1-lab.json` and was therefore not
 recorded evidence. The `virtual-lab` job of `.github/workflows/executed-evidence.yml` now invokes it and uploads that
 report as a workflow artifact. `tests/test_virtual_lab.py` still only covers the
 driver's logic with the compose invocation monkeypatched and starts no
-container. The real-container lifecycle gate stays **open** until a green run of
-that job can be named — a job that exists is not a run that happened; see
+container. The real-container lifecycle gate is now **closed** on green run
+[35455625101](https://github.com/01rabbit/Azazel-Deception/actions/runs/35455625101), which also asserts (via `scripts/ci/assert_lab_report.py`)
+that the report shows activation, termination, reset, an intact evidence chain
+and consumed one-shot decisions rather than merely exiting 0; see
 [`live-gate-checklist.md`](live-gate-checklist.md). The lab is also explicitly
 **not** a physical/HIL isolation proof.
 
@@ -214,14 +216,14 @@ the operator kill switch.
 
 The authenticated `heartbeat` / `reconcile` actions on the AZ-06 shadow/replay
 service are implemented and covered by `tests/test_shadow_heartbeat.py`, and the
-polling `HeartbeatLoop` exists on the Edge side. The **end-to-end proof is
-open**: `Azazel-Edge/tests/test_deception_shadow_heartbeat_e2e.py` begins with
-`pytest.importorskip("azazel_deception")` and Edge CI never installs this
-package, so that test skipped in every recorded run. The
-`cross-repo-heartbeat-e2e` job of `.github/workflows/executed-evidence.yml` now runs it here instead — checking out
+polling `HeartbeatLoop` exists on the Edge side. The end-to-end proof is now
+**executed**: `Azazel-Edge/tests/test_deception_shadow_heartbeat_e2e.py` begins
+with `pytest.importorskip("azazel_deception")` and Edge CI never installs this
+package, so it skipped in every recorded Edge run; the
+`cross-repo-heartbeat-e2e` job of `.github/workflows/executed-evidence.yml` runs it here instead — checking out
 Azazel-Edge alongside AZ-06 rather than installing AZ-06 into Edge CI, which
-would invert the dependency direction — and refuses a result that skipped. The
-gate stays open until a green run of that job can be named. See
+would invert the dependency direction — and refuses a result that skipped. Green
+run [35455625101](https://github.com/01rabbit/Azazel-Deception/actions/runs/35455625101), 3 tests, 0 skipped. See
 [`live-gate-checklist.md`](live-gate-checklist.md).
 
 ### Static runtime isolation policy
@@ -328,8 +330,8 @@ The following are still open gates:
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
 - host-restart and route-drift failure injection in an appropriate Linux lab. These are HIL and have no software path. Runtime-daemon restart and resource exhaustion are written in `tests/test_docker_integration.py` and are now executed by the `docker-lifecycle` job of `.github/workflows/executed-evidence.yml`, which sets `AZAZEL_DECEPTION_DOCKER_TESTS=1` and rejects a skipped result
-- a *recorded* real-container proof: the full activation/evidence/termination/reset lifecycle and the attacker-modified termination/reset with evidence finalization are asserted by `tests/test_docker_integration.py` and by `make virtual-lab`, both of which `.github/workflows/executed-evidence.yml` now executes and archives. The gates close once a green run of that workflow can be named
-- the combined networked Edge→AZ-06 live flow and HMAC key distribution/rotation. The authenticated bi-directional transport, heartbeat loop and state reconciliation are implemented on both sides; the cross-repo E2E (`Azazel-Edge/tests/test_deception_shadow_heartbeat_e2e.py`) is now executed by the `cross-repo-heartbeat-e2e` job of `.github/workflows/executed-evidence.yml`. The *combined* networked flow (Edge decision → activation → evidence → termination → reset in one run) remains HIL and unproven
+- *(closed on green run [35455625101](https://github.com/01rabbit/Azazel-Deception/actions/runs/35455625101))* the recorded real-container proof: the full activation/evidence/termination/reset lifecycle and the attacker-modified termination/reset with evidence finalization, executed and archived by `.github/workflows/executed-evidence.yml`
+- the combined networked Edge→AZ-06 live flow and HMAC key distribution/rotation. The authenticated bi-directional transport, heartbeat loop and state reconciliation are implemented on both sides and the cross-repo E2E is executed by `.github/workflows/executed-evidence.yml` (green run [35455625101](https://github.com/01rabbit/Azazel-Deception/actions/runs/35455625101)). The *combined* networked flow — Edge decision → activation → evidence → termination → reset in one run — remains HIL and unproven, as does key distribution/rotation
 - end-to-end operator kill-switch control against a live, attacker-modified container (HIL)
 - live routing/channeling integration from Edge
 - Knowledge outcome ingest/effectiveness loop
