@@ -13,7 +13,9 @@ when authorized, is auditable and reversible.
 
 ## Prerequisites (Steps 0–3, done)
 
-- Fabric `v0.8.0` released; AZ-06/Edge pin it.
+- Fabric's canonical decision-signing release is cut, and AZ-06/Edge pin the
+  same exact tag (stated once in `pyproject.toml`, described in
+  [`fabric-pin.md`](fabric-pin.md)).
 - Canonical-only transition consumer; the interim decision shape is retired.
 - `TransitionExecutor` strict-for-live is **code-enforced** (its constructor
   refuses `live_enabled=True` without the full strict posture), and

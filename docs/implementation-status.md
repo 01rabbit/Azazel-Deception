@@ -1,6 +1,6 @@
 # AZ-06 Implementation Status
 
-Last updated: 2026-08-13
+Last updated: 2026-09-19
 
 This document separates **implemented software properties** from **field/HIL
 properties that are not yet proven**. A green unit/CI suite is not a claim of
@@ -11,7 +11,10 @@ safe live deception deployment.
 ### Canonical contracts
 
 AZ-06 consumes the Azazel-Fabric `azazel_fabric.deception_contracts`
-family through the exact stable release tag pin `v0.5.0`.
+family through an exact stable release tag. The pinned tag is stated in exactly
+one place — the `azazel-fabric` requirement in `pyproject.toml`, described in
+[`docs/fabric-pin.md`](fabric-pin.md). This document deliberately does not
+restate the version, so it cannot drift out of date behind a pin bump.
 
 Implemented canonical boundaries include:
 
@@ -309,9 +312,47 @@ at the required assurance level.
 
 ## Current issue map
 
-- `Azazel-Deception#1` — canonical Fabric contract migration: code integrated; canonical package content digest now normalize-first and representation-invariant; stable tag/migration exit still open
-- `Azazel-Deception#2` — lifecycle adapter: code integrated and heavily gated; live lab/signing validation still open
-- `Azazel-Deception#3` — native ARM64/AMD64 OCI build/run + immutable digest + provenance integrated; canonical package attestation verifier + workflow integrated, unit-tested, and proven by an executed green attestation run on `main`; reviewed SBOM-policy verification still open
-- `Azazel-Deception#4` — native Compose isolation evidence + static reset/anti-replay tests integrated; HIL/failure injection still open
-- `Azazel-Deception#5` — Edge shadow evaluator integrated; authenticated E2E shadow transport still open
-- `Azazel-Deception#6` — intentionally not started
+Issue states below were read from GitHub on 2026-09-19. **Open trackers are
+`#3`, `#6`, `#28`, `#30`, `#31`, `#35`.** `#1`, `#2`, `#4` and `#5` are closed
+and are listed only as history — do not route work to them.
+
+### Open
+
+- `Azazel-Deception#3` — prove one signed reference package on ARM64 and AMD64.
+  Native ARM64/AMD64 OCI build/run, immutable multi-arch digest, and provenance
+  are integrated; the canonical package-attestation verifier and workflow are
+  integrated, unit-tested, and proven by an executed green attestation run on
+  `main`. Still open: reviewed SBOM-*content* policy verification, and
+  equivalent end-to-end activation/evidence/termination/reset semantics
+  demonstrated on both architectures.
+- `Azazel-Deception#6` — Phase 2. Intentionally not started; gated by the phase
+  gate above.
+- `Azazel-Deception#28` — separate Deception lifecycle state from Edge/Gadget
+  Defensive State (integration).
+- `Azazel-Deception#30` — Presented Terrain engine research: transition,
+  fingerprint, and outcome-evidence discipline.
+- `Azazel-Deception#31` — static Presented Terrain vertical slice. **The v0
+  slice it specifies is delivered**: `src/azazel_deception/runtime/
+  presented_terrain.py` with `tests/test_presented_terrain_evidence.py`,
+  `tests/test_presented_terrain_producer_evidence.py` and
+  `tests/test_presented_terrain_outcome_export.py` (21 tests), merged as PR #32
+  / #34, CI and Portability green on `main`. Every acceptance box in the issue
+  body is checked. It remains open as the tracker for the follow-on work its
+  body explicitly excludes: adaptive transitions, live dynamic route control,
+  static-vs-adaptive fingerprint experiments, the full
+  materialization-to-Knowledge benchmark, and credential-invalidation
+  implementation beyond evidence-reference semantics.
+- `Azazel-Deception#35` — reconcile AZ-06 assurance evidence and define bounded
+  Nexus/Boot Lite profiles.
+
+### Closed (history only)
+
+- `Azazel-Deception#1` — canonical Fabric contract migration. Closed
+  2026-08-22.
+- `Azazel-Deception#2` — feature-disabled Docker Compose lifecycle adapter.
+  Closed 2026-08-21.
+- `Azazel-Deception#4` — isolation/evidence/termination/reset test harness.
+  Closed 2026-08-21. HIL and physical failure injection did **not** close with
+  it; they remain open in `docs/live-gate-checklist.md`.
+- `Azazel-Deception#5` — Edge shadow/replay integration. Closed 2026-08-21.
+  The combined networked live flow remains an open live-gate item.

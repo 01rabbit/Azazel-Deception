@@ -11,7 +11,7 @@ below is satisfied for the target release/profile.
 - [x] Edge decision IDs are one-shot at AZ-06.
 - [x] Package maximum resource budgets exist and Edge allocations cannot exceed them.
 - [x] Live Edge allocations require an explicit finite bandwidth budget.
-- [x] Stable compatible Azazel-Fabric `v0.5.x` release exists and consumers pin the tag. Azazel-Fabric `v0.5.0` is formally released: the `v0.5.0` git tag exists, the GitHub Release is published (not draft, not prerelease, marked Latest, 2026-08-14), and the tag-driven `release.yml` workflow ran green (tag/version match check + tests). AZ-06 pins `azazel-fabric @ …@v0.5.0` and its suite is green against it.
+- [x] A stable compatible Azazel-Fabric release exists and consumers pin the exact tag. The pinned tag is stated only in `pyproject.toml` and described in [`docs/fabric-pin.md`](fabric-pin.md) — this checklist does not restate it, so the gate cannot go stale behind a pin bump. `docs/fabric-pin.md` records that the tag exists, that its GitHub Release is published (not draft, not prerelease), that Fabric cuts it through the tag-driven `release.yml` workflow (tag/version match check + tests), and that the AZ-06 suite is green against it on Linux amd64, Linux arm64 and macOS arm64 CI.
 
 ## Supply chain
 

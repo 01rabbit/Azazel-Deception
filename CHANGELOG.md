@@ -28,7 +28,8 @@ are not proven (see `docs/live-gate-checklist.md`).
   facts, not verdicts: the observer refuses any belief/effectiveness field via
   `assert_no_effectiveness_verdict`, and an `interaction`-class observation
   cannot carry a reaction. The layer-4 effectiveness inference stays with
-  Knowledge. Requires Fabric `v0.6.0`.
+  Knowledge. Requires Fabric `v0.6.0` or newer (a minimum, not the pin — the
+  pinned tag is in `pyproject.toml`, described in `docs/fabric-pin.md`).
 - **Canonical package content digest** — a normalize-first, representation-invariant
   `package_digest` pipeline (raw/bootstrap → Fabric model → canonical payload →
   deterministic JSON → SHA-256). Same meaning hashes identically across raw dict,
@@ -116,12 +117,18 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Changed
 
-- Azazel-Fabric dependency pin moved from the reviewed development commit to
-  the stable release tag `v0.5.0` (`pyproject.toml`, `docs/fabric-pin.md`);
-  field/release packaging now consumes a tagged Fabric release as required by
-  the live-gate checklist. Confirmed formally released — `v0.5.0` tag + published
-  GitHub Release (not draft/prerelease) + green tag-driven `release.yml` — so the
-  "stable Fabric release exists and consumers pin the tag" live gate is satisfied.
+- Azazel-Fabric dependency pin moved from the reviewed development commit to a
+  stable release tag, then bumped twice within this cycle: `v0.5.0`
+  (`dba1400`) → `v0.6.0` (`c3154de`) → `v0.8.0` (`77ad0cd`). Fabric cut no
+  `v0.7.0` tag; its engagement-contracts family shipped inside `v0.8.0`.
+  Field/release packaging now consumes a tagged Fabric release as required by
+  the live-gate checklist, so the "stable Fabric release exists and consumers
+  pin the tag" live gate is satisfied. The pinned version is now stated in
+  exactly two places — the `azazel-fabric` requirement in `pyproject.toml` and
+  `docs/fabric-pin.md`, which describes it. Every other document cites
+  `docs/fabric-pin.md` instead of repeating the number, so a bump cannot leave
+  a stale copy behind (this cycle it had: three documents named three different
+  versions).
 - Reference package `examples/packages/municipal-linux-v1/package.yaml` re-sealed
   via tooling (canonical digest), not a hand-copied CI value.
 - Bootstrap compatibility adapter preserves the caller's declared digest so

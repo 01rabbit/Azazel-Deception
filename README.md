@@ -12,7 +12,7 @@ It materializes bounded, coherent deception environments from versioned packages
 
 ## Status
 
-**Bootstrap / Phase 0-1.** The repository exists and the AZ-06 designation is ratified, but live engagement remains disabled by default until the shared Azazel-Fabric deception-environment contracts and Edge integration gates are stable.
+**Phase 0 complete; Phase 1 in progress.** The AZ-06 designation is ratified and the canonical Azazel-Fabric deception-environment contracts are landed and pinned to an exact release tag (see [`docs/fabric-pin.md`](docs/fabric-pin.md)). Live engagement remains **disabled by default** and stays that way until the Phase-1 live gates close — including physical/hardware-in-the-loop isolation gates that no CI run can satisfy. Per-item status is in [`docs/roadmap.md`](docs/roadmap.md), [`docs/implementation-status.md`](docs/implementation-status.md) and [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
 
 Initial portability target:
 
@@ -23,7 +23,7 @@ Initial portability target:
 - deterministic package validation, lifecycle, evidence, and reset semantics
 - no GPU, KVM, Kubernetes, or online LLM requirement
 
-Current bootstrap already provides host capability discovery, fail-closed package validation, deterministic non-executing placement planning, a synthetic Linux reference package, isolated Compose assets, CI, tests, and safety/integration documentation.
+Implemented today: host capability discovery, fail-closed package validation with a normalize-first canonical content digest, deterministic non-executing placement planning, a synthetic Linux reference package on an immutable multi-architecture image digest, isolated Compose assets with a static isolation policy, a gated Compose lifecycle adapter (default-off), a tamper-evident evidence chain, authenticated one-shot Edge decision handling, an operator kill switch, an Edge shadow/replay boundary, native ARM64/AMD64 portability CI, tests, and safety/integration documentation. These are software properties; they are not field or HIL certification.
 
 ## Responsibility boundary
 
@@ -162,16 +162,20 @@ Primary cross-repository dependencies:
 
 ## Implementation trackers
 
-| Issue | Purpose |
-|---|---|
-| [#1](https://github.com/01rabbit/Azazel-Deception/issues/1) | Replace bootstrap schemas with canonical Azazel-Fabric deception contracts |
-| [#2](https://github.com/01rabbit/Azazel-Deception/issues/2) | Implement feature-disabled Docker Compose lifecycle adapter |
-| [#3](https://github.com/01rabbit/Azazel-Deception/issues/3) | Prove one signed reference package on ARM64 and AMD64 |
-| [#4](https://github.com/01rabbit/Azazel-Deception/issues/4) | Build isolation, evidence, termination, and deterministic reset test harness |
-| [#5](https://github.com/01rabbit/Azazel-Deception/issues/5) | Implement AZ-01 Edge shadow/replay integration before live activation |
-| [#6](https://github.com/01rabbit/Azazel-Deception/issues/6) | Phase 2 coherent narrative, honey artifacts, credentials, personas, and finite-state transitions |
+Issue states below were read from GitHub on 2026-09-19. Route work only to the open trackers.
 
-The intended implementation order is **#1 → #2/#3/#4 → #5 → live Phase 1 gate → #6**. Live exposure must not be enabled merely because a runtime adapter can start containers.
+| Open issue | Purpose |
+|---|---|
+| [#3](https://github.com/01rabbit/Azazel-Deception/issues/3) | Prove one signed reference package on ARM64 and AMD64 — reviewed SBOM-content policy and equivalent end-to-end lifecycle on both architectures remain open |
+| [#28](https://github.com/01rabbit/Azazel-Deception/issues/28) | Separate Deception lifecycle state from Edge/Gadget Defensive State |
+| [#30](https://github.com/01rabbit/Azazel-Deception/issues/30) | Research: Deception as a Presented Terrain engine with transition, fingerprint, and outcome-evidence discipline |
+| [#31](https://github.com/01rabbit/Azazel-Deception/issues/31) | Static Presented Terrain vertical slice — the v0 slice is delivered and CI-green; the issue tracks the adaptive/fingerprint/benchmark follow-ons its body excludes |
+| [#35](https://github.com/01rabbit/Azazel-Deception/issues/35) | Reconcile AZ-06 assurance evidence and define bounded Nexus/Boot Lite profiles |
+| [#6](https://github.com/01rabbit/Azazel-Deception/issues/6) | Phase 2 coherent narrative, honey artifacts, credentials, personas, and finite-state transitions — **gated, not started** |
+
+Closed, kept only as history: [#1](https://github.com/01rabbit/Azazel-Deception/issues/1) (canonical Fabric contracts), [#2](https://github.com/01rabbit/Azazel-Deception/issues/2) (feature-disabled Compose lifecycle adapter), [#4](https://github.com/01rabbit/Azazel-Deception/issues/4) (isolation/evidence/termination/reset harness), [#5](https://github.com/01rabbit/Azazel-Deception/issues/5) (Edge shadow/replay integration). Closing them did **not** close the hardware-in-the-loop gates; those remain open in [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
+
+The remaining order is **#3 → live Phase 1 gate → #6**, with #28/#30/#31 running alongside. Live exposure must not be enabled merely because a runtime adapter can start containers, and Phase 2 must not begin merely because CI is green.
 
 ## Phase order
 
