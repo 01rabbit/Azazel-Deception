@@ -28,8 +28,12 @@ stdlib (``urllib``) so it adds no dependency to the package or the lab.
   produces a spurious empty request.
 
 Being a script under ``scripts/dev/`` (like ``virtual_phase1_lab.py``) rather
-than a module under ``src/azazel_deception/`` keeps this v0.6.0's stance that
-AZ-06 exports facts but does not itself perform network relay -- the same
+than a module under ``src/azazel_deception/`` keeps the repository's standing
+stance that AZ-06 exports facts but does not itself perform network relay. That
+stance is not tied to any Fabric wave: the earlier text cited ``v0.6.0``, which
+the current pin supersedes, so a reader could not tell whether the reasoning had
+expired with the pin. It has not -- it follows from the responsibility boundary,
+not from a contract version. This is the same
 reasoning that keeps ``_simulated_verifier`` out of the shippable
 ``azazel_deception.runtime.verifier`` module. If a future wave decides AZ-06
 should ship a real relay client, that is a deliberate package-level decision

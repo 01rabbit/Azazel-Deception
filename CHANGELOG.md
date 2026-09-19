@@ -162,9 +162,16 @@ are not proven (see `docs/live-gate-checklist.md`).
   (Edge owns decisions, Fabric owns wire contracts, AZ-06 only verifies). Phase 2
   and physical/HIL certification are explicitly out of scope for this cycle.
 
-## [0.1.0] - 2026-08-13
+## [0.1.0] — development milestone, **NEVER RELEASED**
 
-### Added
+No `v0.1.0` tag and no GitHub Release exist, and none will be created after the
+fact: a tag dated to a milestone nobody cut would be exactly the kind of
+unearned claim `docs/live-gate-checklist.md` exists to prevent. The section is
+retained as the record of what that development cycle delivered, following the
+same convention Azazel-Fabric uses for its own never-released `[0.7.0]`. The
+preamble above stands: no stable version has been released.
+
+### Added (in that cycle)
 
 - Initial AZ-06 Azazel-Deception repository and ratified responsibility boundary.
 - Bootstrap control plane: host capability discovery, fail-closed package

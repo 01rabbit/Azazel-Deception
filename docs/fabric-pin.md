@@ -19,12 +19,12 @@ and the repository carries no release tag; work in progress is recorded under
 `[Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md), which describes it as
 development toward `0.2.0`.
 
-> **Known defect.** `azazel_deception.__version__` (`src/azazel_deception/__init__.py`)
-> still reports `0.1.0.dev0`. `pyproject.toml` is the fact and the module
-> constant is the stale copy — a second machine-readable version that has
-> already drifted, which is precisely what the single-source rule above exists
-> to prevent. Reconciling it is a code change tracked by `Azazel-Deception#35`;
-> until it lands, do not quote `__version__` as the product version.
+`azazel_deception.__version__` reports the same value because it is **derived**,
+not written down a second time: `src/azazel_deception/__init__.py` reads it from
+the installed distribution metadata. It previously carried its own literal and
+drifted to `0.1.0.dev0` while `pyproject.toml` said `0.2.0.dev0`
+(`Azazel-Deception#38` item 1); removing the second copy makes that class of
+drift structurally impossible rather than merely noticed.
 
 ## Fabric pin
 

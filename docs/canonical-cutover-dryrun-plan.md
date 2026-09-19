@@ -107,11 +107,16 @@ session. Summarizing the open set at the time of writing:
 - **HIL** — end-to-end operator control (kill switch) proven against a **live,
   attacker-modified** container. Now its own `[ ]` box in the checklist; do not
   treat the software kill-switch as fully certified.
-- **Unexecuted software proof** — the real-container lifecycle, the
+- **Unexecuted software proof — resolved.** The real-container lifecycle, the
   attacker-modified termination/reset, and the networked heartbeat/reconciliation
-  E2E all have tests that no job runs (opt-in env gate, or a cross-repo
-  `importorskip`). Until a job executes them they are open, and they have no
-  `LIVE_GATES` id.
+  E2E all had tests that no job ran (opt-in env gate, or a cross-repo
+  `importorskip`). `.github/workflows/executed-evidence.yml` runs all three and
+  rejects a green-but-skipped result; each carries a `LIVE_GATES` id
+  (`software_real_container_lifecycle_executed`,
+  `software_attacker_modified_reset_executed`,
+  `software_networked_heartbeat_e2e_executed`) and all three closed on green run
+  [35455625101](https://github.com/01rabbit/Azazel-Deception/actions/runs/35455625101). These are software claims only; the *combined* networked
+  lifecycle and the host-restart/route-drift injection remain HIL.
 - Deployment — continuous key distribution/rotation for the mutually-authenticated transport.
 - Portability — full package signing with `ImageManifest.verified=true` justified by provenance + SBOM policy; equivalent end-to-end lifecycle demonstrated on both ARM64 and AMD64.
 

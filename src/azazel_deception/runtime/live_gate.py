@@ -26,11 +26,18 @@ from typing import Any, Iterable, Mapping
 
 from pydantic import BaseModel, ConfigDict
 
-# The mandatory gates that block the live flip, distilled from the still-open
-# items in docs/live-gate-checklist.md. Each is (id, category, summary). HIL
-# gates require hardware/lab certification and cannot be closed from a cloud
-# session; the software gate is closed by the merged canonical-cutover work but
-# is still recorded here so a flip must positively assert it.
+# The mandatory gates that block the live flip, distilled from
+# docs/live-gate-checklist.md. Each is (id, category, summary). HIL gates
+# require hardware/lab certification and cannot be closed from a cloud session.
+# Some software gates are already closed by merged work; they stay recorded here
+# so a flip must positively assert them rather than inherit them silently.
+#
+# This tuple and the checklist are kept in step mechanically, not by habit:
+# tests/test_live_gate_checklist_sync.py fails when a checklist item is open
+# with no gate id here (which would let readiness report ready=True while a
+# human-readable gate is still open — Azazel-Deception#38 item 2) or when a gate
+# here has no line in the checklist (which would hide a mandatory gate from the
+# operators who read the document — #38 item 3).
 LIVE_GATES: tuple[tuple[str, str, str], ...] = (
     ("hil_no_route_decoy_to_production", "hil",
      "No route from a decoy workload to the protected production network."),
@@ -58,6 +65,20 @@ LIVE_GATES: tuple[tuple[str, str, str], ...] = (
     ("software_transition_executor_strict_for_live_code_enforced", "software",
      "TransitionExecutor strict-for-live is code-enforced (not .strict() "
      "convention) — delivered by the canonical-cutover Steps 1-3."),
+    ("software_evidence_chain_complete", "software",
+     "Every request and lifecycle step is recorded into a hash-linked evidence "
+     "chain that verifies intact and fails closed when tampered with."),
+    ("software_real_container_lifecycle_executed", "software",
+     "A real container completes the full activation/evidence/termination/reset "
+     "lifecycle in an executed, recorded run."),
+    ("software_attacker_modified_reset_executed", "software",
+     "Real container termination/reset after attacker modification is "
+     "demonstrated in an executed, recorded run, with the evidence chain "
+     "finalized and verified."),
+    ("software_networked_heartbeat_e2e_executed", "software",
+     "The networked, mutually-authenticated Edge<->AZ-06 heartbeat and "
+     "state-reconciliation loop is proven end-to-end in an executed, recorded "
+     "run."),
 )
 
 REQUIRED_LIVE_GATE_IDS: tuple[str, ...] = tuple(g[0] for g in LIVE_GATES)
