@@ -125,10 +125,16 @@ evidence export.
 A strict live posture makes the injected security gates mandatory:
 `require_sbom_verification` and `require_authenticated_decisions` reject a live
 activation when the corresponding SBOM verifier or decision authenticator is not
-configured (a trusted package verifier is always mandatory). Both default off,
-preserving the optional-gate behavior; `health()` reports the posture and which
-gates are configured. Making the strict posture the enforced default for the
-reference live deployment remains a live-gate step.
+configured (a trusted package verifier is always mandatory). `health()` reports
+the posture and which gates are configured.
+
+The strict posture is the **enforced default for the reference deployment**:
+`build_reference_adapter()` (`runtime/posture.py`) sets both flags, and every
+reference entry point — `runtime-status`, `runtime-reconcile`, and the virtual
+lab — is constructed through it. The only relaxation is an explicit dev opt-out
+(`--dev-relaxed-posture` / `AZAZEL_DECEPTION_RELAXED_POSTURE=1`). The library
+`DockerComposeAdapter` keeps permissive explicit defaults for unit callers only,
+so a direct constructor call is not a reference deployment.
 
 An operator kill switch (`DockerComposeAdapter.emergency_stop`) halts an
 environment on operator authority alone — no Edge decision required or consumed.
@@ -141,10 +147,16 @@ adapter configuration and local runtime state; it authorizes nothing.
 A Virtual Phase-1 Lab (`make virtual-lab`, `scripts/dev/virtual_phase1_lab.py`)
 drives the complete software lifecycle — package, placement, preflight,
 controlled activation, evidence, termination, reset — against a real container
-with the real GitHub attestation verifier. It proves the deterministic software
-lifecycle, gate ordering, evidence emission, one-shot decision consumption, and
-deterministic reset on an internal-only network with no published host ports. It
-explicitly is **not** a physical/HIL isolation proof.
+with the real GitHub attestation verifier, on an internal-only network with no
+published host ports.
+
+The lab is a **manual developer command**, not recorded evidence: no workflow
+invokes it, and its report is written to `artifacts/lab/virtual-phase1-lab.json`,
+which `.gitignore` excludes. `tests/test_virtual_lab.py` covers the driver's
+logic with the compose invocation monkeypatched and starts no container. So the
+real-container lifecycle gate is **open**, not checked — see
+[`live-gate-checklist.md`](live-gate-checklist.md). The lab is also explicitly
+**not** a physical/HIL isolation proof.
 
 Live activation has multiple independent gates:
 
@@ -161,11 +173,13 @@ Live activation has multiple independent gates:
 11. The selected Package component set must exactly match the Compose service set, and every Compose `image:` must match the package manifest.
 12. The Edge decision ID is consumed atomically and cannot be reused.
 
-Current `main` does **not** provide an activatable reference decoy: although the
-reference image now carries attached SPDX SBOMs and build provenance and a
-canonical package-attestation verifier exists, an executed end-to-end attestation
-run and reviewed SBOM-policy verification are still pending, and live activation
-stays default-off behind the trusted `PackageVerifier` gate.
+Current `main` does **not** provide an activatable reference decoy. The
+reference image carries attached SPDX SBOMs and build provenance, the canonical
+package-attestation verifier exists, and its end-to-end attestation run has been
+executed green (run `31660034975`, below). What is still pending is reviewed
+SBOM-*content* policy verification; live activation stays default-off behind the
+trusted `PackageVerifier` gate and the open items in
+[`live-gate-checklist.md`](live-gate-checklist.md).
 
 ### Authenticated Edge-decision transport
 
@@ -174,13 +188,16 @@ verify, before acting, that an incoming Edge decision is authentic and
 untampered. `HmacDecisionAuthenticator` checks an HMAC-SHA256 signature over the
 canonical decision bytes (the decision minus its signature field), fail-closed,
 using an operator-supplied key that is never stored in the repository. It is
-wired as an optional injected gate on both activation and termination, runs
+wired as an injected gate on both activation and termination, runs
 before the decision is consumed, and combines with the one-shot decision ledger
 (anti-replay) and decision expiry (freshness) to protect the decision transport.
 `sign_decision` is the symmetric Edge-side helper used by tests and the lab.
-A full networked, mutually-authenticated transport with heartbeat/state
-reconciliation — and making the authenticator mandatory for every live decision
-— remain open live-gate items.
+The authenticator is **mandatory** for the reference deployment
+(`require_authenticated_decisions=True` in `build_reference_adapter`); it stays
+optional only for direct library callers. What remains open is the *proof* of a
+full networked, mutually-authenticated Edge↔AZ-06 transport in a lab, and
+continuous key distribution/rotation — see
+[`live-gate-checklist.md`](live-gate-checklist.md).
 
 ### Edge heartbeat freshness and state reconciliation
 
@@ -191,8 +208,15 @@ CLI) reports divergence between local runtime state and Edge's authoritative
 active set — `local_only_active` (running locally but unauthorized; kill-switch
 candidates) and `edge_only_active` (Edge expects active but missing locally). It
 is descriptive-only: acting on a divergence still requires an Edge decision or
-the operator kill switch. A full authenticated networked heartbeat and automatic
-reconciliation loop remain open live-gate items.
+the operator kill switch.
+
+The authenticated `heartbeat` / `reconcile` actions on the AZ-06 shadow/replay
+service are implemented and covered by `tests/test_shadow_heartbeat.py`, and the
+polling `HeartbeatLoop` exists on the Edge side. The **end-to-end proof is
+open**: `Azazel-Edge/tests/test_deception_shadow_heartbeat_e2e.py` begins with
+`pytest.importorskip("azazel_deception")` and Edge CI never installs this
+package, so that test skips in every recorded run. See
+[`live-gate-checklist.md`](live-gate-checklist.md).
 
 ### Static runtime isolation policy
 
@@ -230,10 +254,12 @@ attacker-flow channeling/routing.
 - `OciAttachedSbomVerifier` retrieves the OCI-attached SPDX SBOM for every
   verified image at its immutable `@sha256:` digest and requires a well-formed
   per-platform SPDX document, fail-closed. It is wired as an optional injected
-  live gate (`sbom_verifier`) and proven end-to-end against the real reference
-  image (`make virtual-lab --sbom-verify`). `GitHubSbomVerifier` provides the
-  stronger Sigstore-attestation variant for when the image publishes a GitHub
-  SPDX attestation. Making the SBOM gate mandatory is a remaining live-gate step.
+  live gate (`sbom_verifier`) and required by the reference deployment's strict
+  posture. `GitHubSbomVerifier` provides the stronger Sigstore-attestation
+  variant for when the image publishes a GitHub SPDX attestation. The
+  `make virtual-lab --sbom-verify` run against the real image is a manual
+  developer run, not recorded evidence. What remains is reviewed SBOM-*content*
+  policy (license/component allow-lists).
 - `GitHubAttestationPackageVerifier` verifies the reconstructed canonical
   payload bytes (not YAML) against a GitHub artifact attestation. It pins the
   repository, signer-workflow identity, and source git ref (`--source-ref`,
@@ -267,9 +293,12 @@ attacker-flow channeling/routing.
 - Runtime state is deleted on reset while required evidence is retained.
 - Evidence is a tamper-evident hash chain: each record embeds its sequence
   number, the previous record's hash, and its own hash, so any in-place edit,
-  reordering, duplication, or middle deletion/truncation of a record breaks
-  `verify_evidence_chain` (`DockerComposeAdapter.verify_evidence`). The virtual
-  lab asserts the chain is intact end-to-end. Two cases are out of local scope:
+  reordering, or middle deletion/truncation of a record breaks
+  `verify_evidence_chain` (`DockerComposeAdapter.verify_evidence`), as
+  `tests/test_evidence_chain.py` and
+  `tests/test_shadow_server.py::test_every_request_is_audited_with_intact_evidence_chain`
+  prove. The virtual lab asserts the same end-to-end, but is a manual run (see
+  above). Two cases are out of local scope:
   a full-file rewrite (unkeyed chain) and tail truncation (dropping only the
   last records leaves a valid prefix). Both are covered by exporting
   `evidence_head_hash` to an external append-only anchor, whose value changes
@@ -292,9 +321,10 @@ The following are still open gates:
 - reviewed SBOM-*content* policy (e.g. license/component allow-lists) in the trusted verifier; SBOM *attestation* verification itself is implemented (`OciAttachedSbomVerifier` / `GitHubSbomVerifier`) and required by the reference deployment's default strict posture
 - HIL proof of protected-network isolation and denied decoy egress
 - physical NIC/VLAN and management-plane separation validation
-- host-restart and route-drift failure injection in an appropriate Linux lab (runtime-daemon restart and resource exhaustion are now covered by the opt-in Docker integration tests)
-- the combined networked Edge→AZ-06 live flow and HMAC key distribution/rotation (the authenticated bi-directional transport, heartbeat loop, and state reconciliation are implemented and covered by a networked E2E)
-- the same attacker-modified termination/reset and evidence finalization on production hardware (it is demonstrated at the container level in the opt-in Docker integration tests)
+- host-restart and route-drift failure injection in an appropriate Linux lab. Runtime-daemon restart and resource exhaustion are *written* in `tests/test_docker_integration.py`, but that module is opt-in behind `AZAZEL_DECEPTION_DOCKER_TESTS=1` and no workflow sets it, so it has never been executed in a recorded run
+- any real-container proof: the full activation/evidence/termination/reset lifecycle and the attacker-modified termination/reset with evidence finalization are asserted only by the same opt-in, never-executed `tests/test_docker_integration.py`, and by the manual `make virtual-lab` whose report is git-ignored
+- the combined networked Edge→AZ-06 live flow and HMAC key distribution/rotation. The authenticated bi-directional transport, heartbeat loop and state reconciliation are implemented on both sides, but the cross-repo E2E (`Azazel-Edge/tests/test_deception_shadow_heartbeat_e2e.py`) `importorskip`s `azazel_deception` and Edge CI does not install it, so it skips in every recorded run
+- end-to-end operator kill-switch control against a live, attacker-modified container (HIL)
 - live routing/channeling integration from Edge
 - Knowledge outcome ingest/effectiveness loop
 - dynamic narrative, honey artifacts, credential lures, personas, or finite-state transitions

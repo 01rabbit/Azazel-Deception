@@ -33,4 +33,4 @@ AZ-06 must not infer authority from a Fabric payload, Knowledge advisory, packag
 
 Runtime adaptation is a finite-state process. Free-form autonomous planning is prohibited. Live package mutation by LLM is prohibited.
 
-The bootstrap implementation intentionally stops at deterministic placement planning and does not start containers.
+The CLI remains non-executing: it stops at deterministic placement planning plus read-only status/reconcile surfaces, and exposes no activation command. Container materialization exists only in `DockerComposeAdapter`, is default-off (`AZAZEL_DECEPTION_LIVE`), and is reachable only behind the full activation gate set. Enabling it for a live deployment is blocked by the open items in [`live-gate-checklist.md`](live-gate-checklist.md).

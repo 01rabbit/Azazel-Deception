@@ -19,7 +19,7 @@ AZ-06 hosts attacker-facing workloads. Its security boundary therefore assumes d
 
 Knowledge is advisory-only. Fabric is descriptive-only. A package is declarative-only. Capabilities are descriptive-only. None can activate or expand an environment.
 
-Live activation requires a valid, expiring Edge decision once Edge#325 and Fabric#9 are implemented.
+Live activation requires a valid, expiring, one-shot Edge decision. This is enforced today, not pending: the canonical Fabric contracts of `Azazel-Fabric#9` are landed and pinned, and `DockerComposeAdapter.activate_environment` / `.terminate_environment` reject an absent, expired, not-yet-effective, mis-bound, or already-consumed decision before any runtime action. What is still open is the *networked* Edge→AZ-06 flow tracked in `Azazel-Edge#325` — see [`live-gate-checklist.md`](live-gate-checklist.md).
 
 ## LLM boundary
 

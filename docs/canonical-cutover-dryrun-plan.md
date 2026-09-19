@@ -41,20 +41,18 @@ this plan must not conflate them:
   only relaxation is the explicit dev opt-out (`--dev-relaxed-posture` /
   `AZAZEL_DECEPTION_RELAXED_POSTURE=1`). The library `DockerComposeAdapter` keeps
   permissive explicit defaults for unit callers only.
-- **Transition-decision consumer** — `TransitionExecutor` is the component that
-  carries the interim (`_authorize`) dict fallback alongside the canonical model,
-  and the `require_canonical_decision` flag that rejects the interim shape.
-  **It is not yet instantiated by any live/reference entry point** — a repo-wide
-  search finds it only in `transitions.py` and tests, never in
-  `build_reference_adapter`, the CLI, or `virtual_phase1_lab`. Its constructor
-  currently couples `live_enabled=True` to `require_authenticated_decisions`
-  **only** (`transitions.py:147`) — **not** to `require_canonical_decision`,
-  `require_replay_protection`, or `require_decision_expiry`. `TransitionExecutor.
-  strict(...)` turns on all four gates, but it is **opt-in convention, not a code
-  invariant** for `live_enabled=True`: `TransitionExecutor(catalog,
-  live_enabled=True, require_authenticated_decisions=True, decision_authenticator=…)`
-  is a valid construction and would emit `would_execute` for an interim,
-  non-expiring, replay-unprotected (but authenticated) decision. `live_enabled`
+- **Transition-decision consumer** — `TransitionExecutor`. **Steps 1–3 of the
+  staged cutover below have since been delivered** (commits `480b51c`,
+  `02c63ca`), so the description of this path as carrying an interim fallback is
+  historical: the legacy interim dict shape is retired and unconditionally
+  rejected (`tests/test_transition_executor.py::test_interim_dict_is_always_rejected`,
+  `::test_signed_interim_dict_is_rejected_under_strict`), and strict-for-live is
+  **code-enforced** — the constructor raises unless `live_enabled=True` is
+  accompanied by `require_authenticated_decisions` **and**
+  `require_replay_protection` **and** `require_decision_expiry` **and**
+  `require_canonical_decision`. `build_reference_transition_executor()`
+  (`runtime/posture.py`) is the strict-by-default reference constructor and
+  forces `live_enabled=False` under a relaxed posture. `live_enabled` still
   defaults `False` → `shadow_simulated`; even `live_enabled=True` performs **no
   container action** (materialization is a runtime adapter's job).
 
@@ -70,6 +68,10 @@ this plan must not conflate them:
 
 > The activation/termination path is already canonical-only (see Current state),
 > so these steps concern the **transition-decision consumer** (`TransitionExecutor`).
+
+Steps 1–3 are **done** (commits `480b51c`, `02c63ca`); Step 4 is the only one
+still outstanding. The rows are kept as the record of what each step was and how
+it was approved.
 
 | Step | Action | Reversal | Approval |
 |---|---|---|---|
@@ -90,11 +92,12 @@ container is started at any point during the dry run.
 
 ## Preconditions that BLOCK the live flip (Step 4)
 
-From [`live-gate-checklist.md`](live-gate-checklist.md), the following mandatory
-items are still open. Those marked **HIL** require hardware/lab or human
-certification and cannot be closed from a cloud session. **Note:** the checklist
-records some open HIL residuals inside prose on otherwise-checked lines, so this
-list is *not* just the unchecked `[ ]` boxes — read the prose too.
+[`live-gate-checklist.md`](live-gate-checklist.md) is the authority for which
+gates are open. Every gate there is now in exactly one state — checked, open, or
+profile-not-applicable — with no open residual hidden in the prose of a checked
+line, so the unchecked `[ ]` boxes are the whole list. Those marked **HIL**
+require hardware/lab or human certification and cannot be closed from a cloud
+session. Summarizing the open set at the time of writing:
 
 - **HIL** — no route from decoy workload to the protected production network.
 - **HIL** — decoy egress denied under runtime/route failure.
@@ -102,14 +105,20 @@ list is *not* just the unchecked `[ ]` boxes — read the prose too.
 - **HIL** — combined networked Edge→AZ-06 activation→evidence→termination→reset in a lab.
 - **HIL** — host restart / route-drift failure injection in a Linux lab.
 - **HIL** — end-to-end operator control (kill switch) proven against a **live,
-  attacker-modified** container. (Recorded in `live-gate-checklist.md`'s prose on
-  the otherwise-checked kill-switch line, not as its own `[ ]` box — do not treat
-  the software kill-switch as fully certified.)
-- **Software** — `TransitionExecutor` strict-for-live must be **code-enforced**
-  (Step 1 above), not left to `.strict()` convention, before the transition path
-  is live-enabled.
+  attacker-modified** container. Now its own `[ ]` box in the checklist; do not
+  treat the software kill-switch as fully certified.
+- **Unexecuted software proof** — the real-container lifecycle, the
+  attacker-modified termination/reset, and the networked heartbeat/reconciliation
+  E2E all have tests that no job runs (opt-in env gate, or a cross-repo
+  `importorskip`). Until a job executes them they are open, and they have no
+  `LIVE_GATES` id.
 - Deployment — continuous key distribution/rotation for the mutually-authenticated transport.
 - Portability — full package signing with `ImageManifest.verified=true` justified by provenance + SBOM policy; equivalent end-to-end lifecycle demonstrated on both ARM64 and AMD64.
+
+The **software** precondition that `TransitionExecutor` strict-for-live be
+code-enforced (Step 1) is **satisfied** — see Current state above. It remains in
+`LIVE_GATES` as `software_transition_executor_strict_for_live_code_enforced` so a
+flip must positively assert it.
 
 The Phase-2 gate (dynamic narrative artifacts, credential lures, personas,
 finite-state transitions per `Azazel-Deception#6`) stays closed until all
