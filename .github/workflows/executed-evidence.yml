@@ -1,0 +1,119 @@
+name: Executed Evidence
+
+# Evidence that live-gate items are *executed*, not merely written.
+#
+# docs/live-gate-checklist.md allows a `[x]` only when a named green workflow
+# run actually executed the evidence. Three gates were checked on tests that no
+# job ran (Azazel-Deception#38 item 4): the opt-in Docker suite, the manual
+# Virtual Phase-1 Lab whose report lands in the git-ignored artifacts/, and the
+# cross-repository heartbeat end-to-end that `importorskip`s away. This workflow
+# runs all three and archives what they produce.
+#
+# Every job asserts its tests actually ran (scripts/ci/assert_executed.py). A
+# pytest run that skipped everything also exits 0, so without that step a green
+# badge would mean nothing — which is the exact failure this workflow exists to
+# stop repeating.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-lifecycle:
+    name: Real-container lifecycle (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e '.[dev]'
+      - name: Confirm a Docker daemon is reachable before claiming evidence
+        run: docker info
+      - name: Run the gated real-container lifecycle suite
+        env:
+          AZAZEL_DECEPTION_DOCKER_TESTS: '1'
+        run: pytest tests/test_docker_integration.py -q --junitxml=artifacts/ci/docker-integration.xml
+      - name: Assert the suite executed rather than skipping
+        if: always()
+        run: python scripts/ci/assert_executed.py artifacts/ci/docker-integration.xml --min-tests 8
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: az06-docker-integration-report
+          path: artifacts/ci/docker-integration.xml
+          if-no-files-found: error
+
+  virtual-lab:
+    name: Virtual Phase-1 Lab report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e '.[dev]'
+      - run: docker info
+      - name: Drive the lab against a real container
+        env:
+          # The lab uses the real GitHubAttestationPackageVerifier, which shells
+          # out to `gh attestation verify` against the published attestation.
+          GH_TOKEN: ${{ github.token }}
+        run: make virtual-lab
+      - name: Archive the evidence report
+        # The report is written under the git-ignored artifacts/ directory, so
+        # this upload is the only durable record a gate can point at.
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: az06-virtual-phase1-lab-report
+          path: artifacts/lab/virtual-phase1-lab.json
+          if-no-files-found: error
+
+  cross-repo-heartbeat-e2e:
+    name: Networked Edge->AZ-06 heartbeat E2E
+    runs-on: ubuntu-latest
+    steps:
+      # The evidence lives in Azazel-Edge but is gated on AZ-06 being
+      # importable, so it runs here, where AZ-06 is the thing under test.
+      # Installing azazel-deception into Edge's own CI instead would invert the
+      # dependency direction: an AZ-06 regression would redden Edge's baseline,
+      # and Edge must stay fully functional with no AZ-06 present.
+      - uses: actions/checkout@v4
+        with:
+          path: deception
+      - uses: actions/checkout@v4
+        with:
+          repository: 01rabbit/Azazel-Edge
+          ref: main
+          path: edge
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - name: Install AZ-06 (which brings the pinned Fabric release with it)
+        run: pip install -e './deception[dev]'
+      - name: Run the Edge-side heartbeat and reconciliation end-to-end
+        env:
+          # The test imports azazel_edge.deception_shadow_client; Edge's own
+          # runtime requirements are not needed for this surface.
+          PYTHONPATH: ${{ github.workspace }}/edge/py
+        run: |
+          pytest edge/tests/test_deception_shadow_heartbeat_e2e.py -q \
+            --junitxml=artifacts/ci/heartbeat-e2e.xml
+      - name: Assert the end-to-end actually ran rather than importorskipping
+        if: always()
+        run: python deception/scripts/ci/assert_executed.py artifacts/ci/heartbeat-e2e.xml --min-tests 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: az06-edge-heartbeat-e2e-report
+          path: artifacts/ci/heartbeat-e2e.xml
+          if-no-files-found: error

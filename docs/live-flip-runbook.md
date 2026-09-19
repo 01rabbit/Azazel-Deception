@@ -42,7 +42,9 @@ when every required gate is `certified=True` with a non-empty `evidence_ref`. It
 **authorizes nothing** — a `ready` result is a *necessary* precondition, never
 sufficient.
 
-The required gates (categories in parentheses):
+The required gates (categories in parentheses). This table is checked against
+`LIVE_GATES` by `tests/test_live_gate_checklist_sync.py`, so it cannot fall
+behind the code it documents:
 
 | Gate id | Category |
 |---|---|
@@ -56,6 +58,10 @@ The required gates (categories in parentheses):
 | `portability_equivalent_e2e_on_arm64_and_amd64` | portability |
 | `deployment_continuous_transport_key_distribution_rotation` | deployment |
 | `software_transition_executor_strict_for_live_code_enforced` | software (done) |
+| `software_evidence_chain_complete` | software (done) |
+| `software_real_container_lifecycle_executed` | software |
+| `software_attacker_modified_reset_executed` | software |
+| `software_networked_heartbeat_e2e_executed` | software |
 
 ## Flip procedure (only when authorized)
 
