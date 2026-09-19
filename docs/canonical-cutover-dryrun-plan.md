@@ -24,8 +24,9 @@ and `security/` enforcement code. Those remain separate gated surfaces.
 
 - **Producer** (Azazel-Edge `deception_transition`) and **consumer** (AZ-06
   `TransitionExecutor` / `DockerComposeAdapter`) are merged and pin
-  `azazel-fabric @ v0.8.0`; the canonical signing contract + golden vectors are
-  released, and the cross-repo interop / signature tests execute green (no
+  the same exact `azazel-fabric` release tag (stated once in `pyproject.toml`,
+  described in [`fabric-pin.md`](fabric-pin.md)); its canonical signing contract
+  and golden vectors are released, and the cross-repo interop / signature tests execute green (no
   longer version-skipped).
 There are **two distinct consumer paths**, and they are in different states —
 this plan must not conflate them:
