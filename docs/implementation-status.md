@@ -312,6 +312,26 @@ attacker-flow channeling/routing.
   `evidence_head_hash` to an external append-only anchor, whose value changes
   under either.
 
+### Bounded Lite profiles (`nexus-embedded-lite`, `boot-emergency-lite`)
+
+A Lite profile is a **reduction of one signed package** — it removes
+components, surfaces and credentials and lowers resource ceilings, and it can
+do nothing else. `ProfileOverlay` carries no field capable of naming something
+the base package lacks, and a ceiling above the base's is clamped rather than
+honoured, so widening is unrepresentable before it is rejected.
+
+`assert_is_reduction` then checks a rendered manifest independently of how it
+was produced. Four of the ten dimensions Deception#35 names — routes, DNS,
+mounts, commands — have no field in `deception-package/v0.1`; rather than
+invent schema, the check proves that every string in the rendering already
+appeared in the signed package, so none of the four can be introduced whatever
+the schema models.
+
+Both profiles declare finite evidence budgets (events, bytes, retention).
+Neither profile is signed, deployed, or measured, and the ceilings are
+conservative config rather than a hardware claim. Full reference:
+[lite profiles](lite-profiles.md).
+
 ### Edge shadow/replay
 
 Azazel-Edge has a Fabric-backed AZ-06 shadow evaluator that validates package,
