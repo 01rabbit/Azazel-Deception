@@ -294,12 +294,17 @@ def test_the_fabric_pin_does_not_yet_carry_the_canonical_vocabulary():
     becomes actionable, and a louder signal than a comment nobody re-reads.
     """
 
-    import tomllib
-
-    manifest = tomllib.loads(
-        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
-    )
-    pins = [d for d in manifest["project"]["dependencies"] if "azazel-fabric" in d]
+    # Scanned as text rather than parsed with `tomllib`: this package supports
+    # Python 3.10 (`requires-python = ">=3.10"`), where `tomllib` is not in the
+    # standard library, and adding a TOML dependency to read one pin would be a
+    # worse trade than reading the line. The claim under test is exactly that
+    # one line, so a line scan is precise enough for it.
+    manifest = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
+    pins = [
+        line.strip().strip('",\'')
+        for line in manifest.splitlines()
+        if "azazel-fabric" in line and not line.lstrip().startswith("#")
+    ]
     assert len(pins) == 1, f"expected exactly one Fabric pin, got {pins}"
     assert "@v" in pins[0], f"Fabric must be pinned to an exact tag, got {pins[0]!r}"
 
