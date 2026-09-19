@@ -67,6 +67,11 @@ jobs:
           # out to `gh attestation verify` against the published attestation.
           GH_TOKEN: ${{ github.token }}
         run: make virtual-lab
+      - name: Assert the report shows a completed lifecycle
+        # The lab is not a pytest run, so the executed-evidence check has to read
+        # what it produced: an exit code alone would let a green badge stand for
+        # a run that never materialized an environment.
+        run: python scripts/ci/assert_lab_report.py artifacts/lab/virtual-phase1-lab.json
       - name: Archive the evidence report
         # The report is written under the git-ignored artifacts/ directory, so
         # this upload is the only durable record a gate can point at.

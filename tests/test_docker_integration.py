@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import signal
 import subprocess
 import time
 import uuid
@@ -199,20 +198,73 @@ def _wait_until(predicate, *, timeout: float, description: str, interval: float 
     raise AssertionError(f"timed out after {timeout}s waiting for {description}")
 
 
+def _dockerd_privilege() -> list[str] | None:
+    """Return the command prefix needed to manage the host daemon, or None.
+
+    The drill signals and restarts the *host* ``dockerd``, which belongs to
+    root. A CI runner is normally an unprivileged user in the ``docker`` group:
+    it can talk to the socket but cannot signal the daemon, so the drill has to
+    go through passwordless ``sudo``. ``None`` means neither route is available
+    and the drill cannot run here at all.
+    """
+
+    if os.geteuid() == 0:
+        return []
+    probe = subprocess.run(
+        ["sudo", "-n", "true"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    return ["sudo", "-n"] if probe.returncode == 0 else None
+
+
+def _systemd_manages_docker(privilege: list[str]) -> bool:
+    """True when the daemon is a systemd unit that would restart itself.
+
+    Signalling a unit that declares ``Restart=always`` (Ubuntu's
+    ``docker.service``) brings it straight back, so the outage half of the
+    drill would never happen. Where systemd owns the daemon, stop and start the
+    unit instead of signalling the process.
+    """
+
+    if shutil.which("systemctl") is None:
+        return False
+    probe = subprocess.run(
+        [*privilege, "systemctl", "cat", "docker.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
 def _process_gone(pid: int) -> bool:
+    # /proc is authoritative and needs no privilege, which ``os.kill(pid, 0)``
+    # does when the target belongs to another user: it raises PermissionError
+    # for a process that is very much alive. Reading that as "gone" would let
+    # the drill proceed against a daemon that is still running.
+    proc_entry = Path(f"/proc/{pid}")
+    if proc_entry.parent.is_dir():
+        if not proc_entry.exists():
+            return True
+        try:
+            # A reaped-but-not-yet-removed zombie is gone for our purposes.
+            after_comm = (proc_entry / "stat").read_text(encoding="utf-8").rsplit(") ", 1)
+            return len(after_comm) == 2 and after_comm[1].split(" ", 1)[0] == "Z"
+        except OSError:
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    except PermissionError:
-        # Still alive but no longer signalable as us; treat as gone for
-        # waiting purposes, matching os.kill's own error semantics.
-        return True
     return False
 
 
-def _stop_dockerd(pid: int) -> None:
-    """SIGTERM dockerd and wait for the *process* to fully exit.
+def _stop_dockerd(pid: int, privilege: list[str]) -> None:
+    """Take dockerd down and wait for the *process* to fully exit.
 
     `docker info` can start failing (socket torn down) before the dockerd
     process itself has finished its graceful shutdown and released
@@ -222,11 +274,18 @@ def _stop_dockerd(pid: int) -> None:
     fresh dockerd is never blocked by "process with PID N is still running".
     """
 
-    os.kill(pid, signal.SIGTERM)
+    if _systemd_manages_docker(privilege):
+        subprocess.run(
+            [*privilege, "systemctl", "stop", "docker.service", "docker.socket"],
+            timeout=60,
+            check=True,
+        )
+    else:
+        subprocess.run([*privilege, "kill", "-TERM", str(pid)], timeout=30, check=True)
     if not _wait_until_bool(lambda: _process_gone(pid), timeout=30.0):
-        os.kill(pid, signal.SIGKILL)
+        subprocess.run([*privilege, "kill", "-KILL", str(pid)], timeout=30, check=False)
         _wait_until_bool(lambda: _process_gone(pid), timeout=10.0)
-    Path("/var/run/docker.pid").unlink(missing_ok=True)
+    subprocess.run([*privilege, "rm", "-f", "/var/run/docker.pid"], timeout=30, check=False)
 
 
 def _wait_until_bool(predicate, *, timeout: float, interval: float = 0.5) -> bool:
@@ -238,24 +297,34 @@ def _wait_until_bool(predicate, *, timeout: float, interval: float = 0.5) -> boo
     return False
 
 
-def _restart_dockerd() -> None:
+def _restart_dockerd(privilege: list[str]) -> None:
     """Start a fresh dockerd and block until `docker info` succeeds again.
 
     Retries a few times: a dockerd that starts immediately after the prior
     one exited can still lose a race against a not-yet-released pidfile.
     """
 
+    use_systemd = _systemd_manages_docker(privilege)
     last_error: AssertionError | None = None
     for attempt in range(3):
-        Path("/var/run/docker.pid").unlink(missing_ok=True)
-        with open(_DOCKERD_RESTART_LOG, "a", encoding="utf-8") as log_handle:
-            subprocess.Popen(
-                ["dockerd"],
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
+        if use_systemd:
+            subprocess.run(
+                [*privilege, "systemctl", "start", "docker.socket", "docker.service"],
+                timeout=60,
+                check=False,
             )
+        else:
+            subprocess.run(
+                [*privilege, "rm", "-f", "/var/run/docker.pid"], timeout=30, check=False
+            )
+            with open(_DOCKERD_RESTART_LOG, "a", encoding="utf-8") as log_handle:
+                subprocess.Popen(
+                    [*privilege, "dockerd"],
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
         try:
             _wait_until(
                 _docker_daemon_up,
@@ -503,6 +572,12 @@ def test_daemon_restart_preserves_state_and_recovers(tmp_path, cleanup_environme
             "no host dockerd process (VM-backed runtime such as OrbStack or "
             "Docker Desktop for Mac); daemon-restart drill runs on Linux"
         )
+    privilege = _dockerd_privilege()
+    if privilege is None:
+        pytest.skip(
+            "taking the host dockerd down needs root or passwordless sudo; "
+            "this account has neither"
+        )
 
     adapter = _adapter(tmp_path)
     environment_id = _environment_id()
@@ -513,7 +588,7 @@ def test_daemon_restart_preserves_state_and_recovers(tmp_path, cleanup_environme
 
     daemon_pid = _dockerd_pid()
     try:
-        _stop_dockerd(daemon_pid)
+        _stop_dockerd(daemon_pid, privilege)
         assert not _docker_daemon_up()
 
         # Fail closed while the daemon is unreachable: termination must not
@@ -534,7 +609,7 @@ def test_daemon_restart_preserves_state_and_recovers(tmp_path, cleanup_environme
         assert event_types_during_outage == ["activated", "failure"]
         assert adapter.verify_evidence(environment_id) is True
     finally:
-        _restart_dockerd()
+        _restart_dockerd(privilege)
 
     # The daemon is back up; the state store and evidence chain must have
     # come through the outage intact.
