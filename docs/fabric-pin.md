@@ -111,12 +111,25 @@ else, but this record has no trace slot), and `synthetic_identity_refs` /
 `synthetic_credential_refs`, which Fabric#15's own field list names and the
 shipped model does not carry.
 
-Two records in the family have **no possible producer yet**, for a reason
-outside this repository. `EffectObservation` and `OutcomeObservationEnvelope`
-are keyed on an `effect:`-typed id minted by whoever constructed the effect;
-AZ-06 receives an `EnvironmentActivationDecision`, which carries none, and no
-Azazel repository mints one. AZ-06 is the materializer, so those observations
-are its records to make — it has nothing to make them against.
+AZ-06 is also this family's **first consumer**. `runtime/effect_projection.py`
+accepts a `DefensiveEffectRef` produced by Azazel-Edge and emits an
+`EffectObservation` against it, which closes a gap this document previously
+recorded as open: the observation is keyed on an `effect:`-typed id that
+nothing in the series minted, so it had no possible producer anywhere.
+Azazel-Edge#419 mints it.
+
+What AZ-06 refuses is doctrine rather than taste. It materializes an
+Edge-approved environment, so it declines an effect carrying
+`advisory_inference` or `planned_shadow` — advised or considered is not
+approved, and materializing one would make AZ-06 the step that turns a
+suggestion into an environment. It also declines any effect class other than
+`redirect_to_presented_terrain`, because Presented Terrain has no meaning
+behind isolation or a notification, and any effect naming AZ-06 itself as
+producer.
+
+`OutcomeObservationEnvelope` remains unproduced here. It correlates
+`outcome_contracts` records across a window, which is a different job from
+observing one materialization, and AZ-06 has no window to speak for.
 
 At `v0.9.0rc2` the hierarchical references AZ-06 actually mints
 (`surface:http:8080` and the like) were refused by every slot requiring a typed
