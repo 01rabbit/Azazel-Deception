@@ -78,6 +78,41 @@ sides now go through Fabric's models, with AZ-06's own narrowing kept on top
 (stricter, never looser); `tests/test_outcome_contracts_adoption.py` holds the
 direction.
 
+`v0.9.0rc2` further carries `azazel_fabric.effect_contracts` (Fabric#15), the
+cross-series effect / outcome / presented-terrain family. AZ-06 is its **first
+producer anywhere in the series**: `runtime/effect_projection.py` renders the
+local `PresentedTerrainSnapshotV0` as `PresentedTerrainRef`.
+
+The projection refuses rather than fills gaps. Fabric's record requires facts
+AZ-06 does not always hold — a declared expiry above all — and each plausible
+default would make the contract look adopted while reporting something AZ-06
+never observed. A refusal names the missing fact; an invented bound would have
+told a consumer that AZ-06 time-boxed a presentation it did not.
+
+Every projection also returns the list of local fields that reach no Fabric
+slot, because a lossy projection that reports nothing is how a consumer comes
+to read the Fabric record as the whole of what AZ-06 observed. Three entries
+are worth naming here: `trace_id` (the family correlates by trace everywhere
+else, but this record has no trace slot), and `synthetic_identity_refs` /
+`synthetic_credential_refs`, which Fabric#15's own field list names and the
+shipped model does not carry.
+
+Two records in the family have **no possible producer yet**, for a reason
+outside this repository. `EffectObservation` and `OutcomeObservationEnvelope`
+are keyed on an `effect:`-typed id minted by whoever constructed the effect;
+AZ-06 receives an `EnvironmentActivationDecision`, which carries none, and no
+Azazel repository mints one. AZ-06 is the materializer, so those observations
+are its records to make — it has nothing to make them against.
+
+At this pin, the hierarchical references AZ-06 actually mints
+(`surface:http:8080` and the like) are refused by every slot that requires a
+typed ref, because the pinned grammar splits on a colon and then forbids the
+body from containing one. That measurement is what produced
+[Azazel-Fabric#48](https://github.com/01rabbit/Azazel-Fabric/pull/48).
+`tests/test_effect_contracts_producer.py` pins it and **turns red when the pin
+moves**, which is the signal to put the references back into their natural
+form rather than leave the workaround standing.
+
 It carries everything in `v0.8.0` below, additively.
 
 `v0.8.0` adds `azazel_fabric.deception_contracts.decision_signing` — the single
