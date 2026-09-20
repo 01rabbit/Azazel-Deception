@@ -2,6 +2,23 @@
 
 The exported record says what Deception presented/observed. It does not claim
 DIVERT, deception success, attacker belief, causality, or execution authority.
+
+**The exported record is built by Azazel-Fabric's `OutcomeObservationV0`, not
+assembled here.** It used to be a hand-built dict that happened to match the
+contract exactly -- verified: Fabric accepted it and re-dumped it byte for
+byte -- which is agreement by coincidence of maintenance rather than by
+construction (Azazel-Edge#413 removed the same arrangement on its own producer
+side). There is deliberately no fallback: a record Fabric did not validate
+must not travel as one that it did.
+
+`_validate_bounded` below is **not** made redundant by that. It is AZ-06's own
+refusal set, and at two points it is stricter than the contract: it caps
+nesting at 5 where Fabric allows 6, and it refuses `attacker_intent`, which
+Fabric does not name. Running both means the effective limit at every point is
+whichever of the two is tighter. Where Fabric is the tighter one -- its
+64-item map cap against this module's 96 -- adopting the contract's number is
+the correct direction: the payload has always called itself
+`outcome-observation/v0.1`.
 """
 
 from __future__ import annotations
@@ -11,9 +28,15 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
+from azazel_fabric.outcome_contracts import OutcomeObservationV0
+
 from azazel_deception.runtime.presented_terrain import PresentedTerrainSnapshotV0
 
 
+#: AZ-06's own refusals, kept alongside the contract's rather than replaced by
+#: them. Fabric refuses every name here except `attacker_intent` -- and what
+#: an adversary *intended* is the claim this whole lane exists to not make, so
+#: AZ-06 keeps refusing it whether or not the shared contract ever names it.
 _FORBIDDEN = {
     "success", "successful", "effect_class", "tactical_effect", "attacker_belief",
     "attacker_intent", "model_recommendation", "execute", "approve", "override",
@@ -146,7 +169,11 @@ def presented_terrain_lifecycle_outcome(
         "authority_class": "producer_outcome_fact",
     }
     _validate_bounded(payload)
-    return payload
+    # Fabric decides what this record is. Its own validators re-walk the fact
+    # maps for runtime directives and tactical claims, so a caller-supplied
+    # `telemetry_coverage` or `resource_impact` is checked by the contract as
+    # well as by the refusals above.
+    return OutcomeObservationV0(**payload).model_dump(mode="json")
 
 
 def canonical_outcome_json(payload: Mapping[str, Any]) -> str:

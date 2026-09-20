@@ -394,7 +394,10 @@ and are listed only as history — do not route work to them.
   presented_terrain.py` with `tests/test_presented_terrain_evidence.py`,
   `tests/test_presented_terrain_producer_evidence.py` and
   `tests/test_presented_terrain_outcome_export.py` (21 tests), merged as PR #32
-  / #34, CI and Portability green on `main`. Every acceptance box in the issue
+  / #34, CI and Portability green on `main`. Both ends of the slice now go
+  through Azazel-Fabric's `outcome_contracts` models rather than restating
+  them — see [`fabric-pin.md`](fabric-pin.md) and
+  `tests/test_outcome_contracts_adoption.py`. Every acceptance box in the issue
   body is checked. It remains open as the tracker for the follow-on work its
   body explicitly excludes: adaptive transitions, live dynamic route control,
   static-vs-adaptive fingerprint experiments, the full
