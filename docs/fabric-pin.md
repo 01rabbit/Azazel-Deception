@@ -59,6 +59,25 @@ input was recognised. AZ-06 uses only the recognition flag; see
 [`safety-model.md`](safety-model.md) for why the fail-safe value is discarded
 here.
 
+`v0.9.0rc2` also carries `azazel_fabric.outcome_contracts`, which AZ-06 both
+consumes and produces:
+
+- `runtime/producer_evidence.py` **consumes** `MechanismObservationV0` — the
+  already-observed REDIRECTION mechanism fact that Presented Terrain linkage
+  is built on;
+- `runtime/outcome_export.py` **produces** `OutcomeObservationV0` — the
+  Presented Terrain lifecycle observation that joins that producer's evidence
+  chain.
+
+Both used to agree with the contract by coincidence of maintenance rather than
+by construction: the consumer restated the contract's field list, banned-key
+set and bound constants, and the producer assembled the wire shape by hand.
+That copy had already drifted — Fabric had added `effectiveness` and
+`initiative_score` to its tactical-claim refusals and AZ-06 had not. Both
+sides now go through Fabric's models, with AZ-06's own narrowing kept on top
+(stricter, never looser); `tests/test_outcome_contracts_adoption.py` holds the
+direction.
+
 It carries everything in `v0.8.0` below, additively.
 
 `v0.8.0` adds `azazel_fabric.deception_contracts.decision_signing` — the single
