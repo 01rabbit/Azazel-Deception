@@ -13,6 +13,13 @@ from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Fabric#14's canonical vocabulary, consumed as a *validator* (Deception#28
+# AC-7). AZ-06 never enumerates the five values -- it asks Fabric whether a
+# producer's report is one of them, and records the answer. A copy of the list
+# here would be a second definition free to drift, and
+# `tests/test_defensive_state_boundary.py` fails if one ever appears.
+from azazel_fabric.schema.defensive_state import coerce_defensive_state
+
 
 class _StrictFact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -25,6 +32,33 @@ def _require_reference(label: str, value: str, *, prefix: str | None = None) -> 
         raise ValueError(f"{label} must be an opaque reference, not secret material")
     if prefix is not None and not value.startswith(prefix):
         raise ValueError(f"{label} must use {prefix} reference namespace")
+
+
+def _classify_producer_defensive_state(state: str | None, claimed_canonical: bool) -> bool:
+    """Return whether `state` is canonical, refusing a claim made without one.
+
+    Shared by every model that carries a producer-reported Defensive State so
+    that the flag is computed identically wherever it appears. A model that
+    merely copies the pair from another model is not exempt: the snapshot is
+    the artifact an auditor reads, so a snapshot built directly must not be
+    able to claim canonical for a word Fabric does not know.
+
+    The coercion *value* is deliberately discarded. Fabric lands an
+    unrecognized state on the weakest one so a consumer deciding what to do
+    fails safe; AZ-06 is not that consumer. Substituting it would turn "the
+    producer said something we do not know" into "the producer said OBSERVE"
+    -- AZ-06 asserting another product's posture, which is the one thing this
+    boundary exists to prevent.
+    """
+
+    if state is None:
+        if claimed_canonical:
+            raise ValueError(
+                "producer_defensive_state_is_canonical cannot be true with no state"
+            )
+        return False
+    _, recognized = coerce_defensive_state(state)
+    return recognized
 
 
 class ProducerRedirectionEvidence(_StrictFact):
@@ -42,6 +76,39 @@ class ProducerRedirectionEvidence(_StrictFact):
     mechanism_kind: Literal["redirection"] = "redirection"
     status: Literal["observed"] = "observed"
     evidence_refs: tuple[str, ...] = Field(min_length=1, max_length=64)
+
+    #: The Defensive State the **producer** reported for itself, if it said.
+    #:
+    #: Named for its owner on purpose. An unqualified `defensive_state` field
+    #: would be ambiguous about whose state it is, and that ambiguity is what
+    #: lets two namespaces merge. This one is unmistakably the producer's, and
+    #: it sits beside AZ-06's own `lifecycle_state` on the snapshot without
+    #: either becoming the other (Deception#28 AC-5).
+    #:
+    #: Recording it does not let AZ-06 act on it. There is no parameter
+    #: anywhere in the runtime through which a reported state reaches
+    #: activation, transition, or termination -- that is asserted structurally
+    #: in `tests/test_defensive_state_boundary.py`, and this field changes
+    #: nothing about it. This is audit correlation, not an input.
+    producer_defensive_state: str | None = Field(default=None, max_length=64)
+    #: Whether `producer_defensive_state` is in Fabric's canonical vocabulary.
+    #:
+    #: Computed, never supplied: a producer cannot assert that its own word is
+    #: canonical. `False` with a value present means the producer spoke a
+    #: vocabulary AZ-06's pinned Fabric does not know, which is a fact worth
+    #: keeping rather than a reason to drop the report.
+    producer_defensive_state_is_canonical: bool = False
+
+    @model_validator(mode="after")
+    def _classify_producer_state(self) -> "ProducerRedirectionEvidence":
+        object.__setattr__(
+            self,
+            "producer_defensive_state_is_canonical",
+            _classify_producer_defensive_state(
+                self.producer_defensive_state, self.producer_defensive_state_is_canonical
+            ),
+        )
+        return self
 
 
 class PresentedTerrainSnapshotV0(_StrictFact):
@@ -64,6 +131,10 @@ class PresentedTerrainSnapshotV0(_StrictFact):
     producer_execution_ref: str = Field(min_length=1, max_length=256)
     producer_mechanism_ref: str = Field(min_length=1, max_length=256)
     producer_mechanism_kind: Literal["redirection"] = "redirection"
+    #: Carried through from the producer's evidence for audit correlation.
+    #: Distinct from `lifecycle_state` below, which is AZ-06's own namespace.
+    producer_defensive_state: str | None = Field(default=None, max_length=64)
+    producer_defensive_state_is_canonical: bool = False
 
     package_id: str = Field(min_length=1, max_length=256)
     package_version: str = Field(min_length=1, max_length=128)
@@ -86,6 +157,21 @@ class PresentedTerrainSnapshotV0(_StrictFact):
     observed_at: str = Field(min_length=1, max_length=64)
     authority_class: Literal["deception_presentation_fact"] = "deception_presentation_fact"
     executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _classify_producer_state(self) -> "PresentedTerrainSnapshotV0":
+        # Recomputed rather than trusted. The snapshot is the artifact an
+        # auditor reads, and it can be constructed directly -- not only by
+        # copying a validated `ProducerRedirectionEvidence`. Accepting the
+        # flag here would let a caller mark any word canonical by asserting it.
+        object.__setattr__(
+            self,
+            "producer_defensive_state_is_canonical",
+            _classify_producer_defensive_state(
+                self.producer_defensive_state, self.producer_defensive_state_is_canonical
+            ),
+        )
+        return self
 
     @model_validator(mode="after")
     def _lifecycle_invariants(self) -> "PresentedTerrainSnapshotV0":
@@ -209,6 +295,8 @@ def build_presented_terrain_snapshot(
         producer_decision_ref=producer.decision_ref,
         producer_execution_ref=producer.execution_ref,
         producer_mechanism_ref=producer.mechanism_observation_ref,
+        producer_defensive_state=producer.producer_defensive_state,
+        producer_defensive_state_is_canonical=producer.producer_defensive_state_is_canonical,
         package_id=package_id,
         package_version=package_version,
         package_digest=package_digest,

@@ -63,10 +63,41 @@ a parameter fails there rather than in a review nobody runs.
 is derived from the other. An auditor can line up "which Edge decision" with
 "what AZ-06 did" without the two becoming one state machine.
 
-**Status: AC-7 open.** Adopting the Fabric#14 contract for status/audit
-correlation waits on a Fabric release that carries it. This repository pins
-`v0.8.0`; `DefensiveState` has shipped to no tag. A test fails the moment a pin
-carrying the vocabulary lands, which is when that work becomes actionable.
+**A producer's reported state is recorded, never spoken.** Since AC-7 the
+snapshot carries what the producer said about itself, beside AZ-06's own
+lifecycle state:
+
+| Field | Meaning |
+| --- | --- |
+| `producer_defensive_state` | verbatim, exactly as the producer said it, or absent |
+| `producer_defensive_state_is_canonical` | whether the pinned Fabric knows that word |
+| `lifecycle_state` | AZ-06's own namespace, unchanged |
+
+Three properties make this correlation rather than adoption.
+
+*The field names its owner.* An unqualified `defensive_state` on an AZ-06 model
+would be ambiguous about whose state it is, and that ambiguity is how two
+namespaces merge. This one is unmistakably the producer's; the boundary test
+refuses an unqualified spelling.
+
+*The flag is computed, never accepted.* Both the evidence model and the
+snapshot recompute it — the snapshot is the artifact an auditor reads and can
+be built directly, so inheriting the claim would let anything that writes a
+snapshot mark any word canonical by asserting it.
+
+*The coercion fallback is discarded.* Fabric lands an unrecognized state on the
+weakest one so a consumer *deciding what to do* fails safe. AZ-06 is not that
+consumer: it is recording what a producer said. Substituting would turn "the
+producer said something we do not know" into "the producer said `OBSERVE`" —
+AZ-06 asserting another product's posture, which is the one thing this boundary
+exists to prevent. An unrecognized word is kept verbatim with the flag `false`.
+
+Adoption is a *validator* import (`coerce_defensive_state`), not a copy of the
+vocabulary: the five values still appear in no AZ-06 string literal, and
+recording a reported state still gives it no path to activation. Both
+properties are re-asserted after adoption, because an adoption commit is
+exactly what would erode them. This repository pins Fabric `v0.9.0rc2`; a test
+fails if the pin stops being an exact tag or stops carrying the contract.
 
 ## Deployment guidance
 

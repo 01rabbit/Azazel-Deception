@@ -87,6 +87,21 @@ def _all_models() -> list[type[BaseModel]]:
 
 
 @pytest.fixture
+def producer_fields() -> dict:
+    """A minimal valid `ProducerRedirectionEvidence` payload."""
+
+    return {
+        "producer_product": "azazel-edge",
+        "producer_node": "edge-1",
+        "trace_id": "trace-1",
+        "decision_ref": "decision-1",
+        "execution_ref": "execution-1",
+        "mechanism_observation_ref": "mechanism-1",
+        "evidence_refs": ("edge:nft:1",),
+    }
+
+
+@pytest.fixture
 def terrain_fields() -> dict:
     """A minimal valid `PresentedTerrainSnapshotV0` payload.
 
@@ -175,17 +190,89 @@ def test_the_lifecycle_namespace_is_what_this_test_thinks_it_is():
 # -- AC-3: AZ-06 cannot set the producer's Defensive State ------------------
 
 
+#: Field names that hold a producer's Defensive State. Writing one of these
+#: is AZ-06 deciding another product's posture. The `_is_canonical` companion
+#: is deliberately absent: it is AZ-06's own classification of what it was
+#: told, not a state, and computing it is the whole of AC-7.
+_PRODUCER_STATE_TARGETS = frozenset(
+    {"producer_defensive_state", "defensive_state", "producer_state", "reported_state"}
+)
+
+
+def _written_names(node: ast.AST) -> list[str]:
+    """Names this statement writes, including reflective and setattr writes."""
+    written: list[str] = []
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        targets = [node.target]
+    else:
+        targets = []
+    for target in targets:
+        if isinstance(target, ast.Name):
+            written.append(target.id)
+        elif isinstance(target, ast.Attribute):
+            written.append(target.attr)
+    if isinstance(node, ast.Call):
+        # The last dotted component, dunders stripped, so that `setattr`,
+        # `object.__setattr__` and `super().__setattr__` are all recognised.
+        # `endswith("setattr")` misses the dunder form -- which is the form
+        # this module actually uses.
+        callee = ast.unparse(node.func).rsplit(".", 1)[-1].strip("_")
+        if callee == "setattr" and len(node.args) >= 2:
+            name = node.args[1]
+            if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                written.append(name.value)
+    return written
+
+
 def test_az06_exposes_no_function_that_sets_a_producer_state():
-    """Stated as a test because the invariant is an absence."""
+    """Stated as a test because the invariant is an absence.
+
+    Checked structurally rather than by name. A function *named* for the
+    producer's state is not itself a violation -- since AC-7, AZ-06 classifies
+    a reported state without ever producing one. The violation is writing one:
+    handing back a `DefensiveState`, or assigning to the field that holds it.
+    A name-only check would both fail that classifier and let a real setter
+    pass by calling itself something else.
+    """
+
     offenders: list[str] = []
     for path in _python_sources():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                low = node.name.lower()
-                if "defensive_state" in low or "set_producer_state" in low:
-                    offenders.append(f"{path.relative_to(SRC_ROOT)}: {node.name}")
-    assert offenders == [], f"AZ-06 grew a producer-state function: {offenders}"
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            where = f"{path.relative_to(SRC_ROOT)}: {node.name}"
+            returns = ast.unparse(node.returns) if node.returns is not None else ""
+            if "DefensiveState" in returns:
+                offenders.append(f"{where} returns {returns}")
+            for inner in ast.walk(node):
+                for name in _written_names(inner):
+                    if name in _PRODUCER_STATE_TARGETS:
+                        offenders.append(f"{where} writes {name}")
+    assert offenders == [], f"AZ-06 grew a producer-state setter: {offenders}"
+
+
+def test_the_setter_guard_actually_catches_a_setter():
+    """The guard above asserts an absence, so prove it is not vacuous.
+
+    Both shapes a real setter would take are exercised against the same
+    helpers the guard uses. Without this, narrowing the guard to nothing --
+    an empty target set, a broken unparse -- would still read green.
+    """
+
+    reflective = ast.parse(
+        'def touch(self):\n    object.__setattr__(self, "producer_defensive_state", "ISOLATE")\n'
+    )
+    direct = ast.parse("def touch(self):\n    self.producer_defensive_state = 'ISOLATE'\n")
+    for tree in (reflective, direct):
+        written = [n for node in ast.walk(tree) for n in _written_names(node)]
+        assert set(written) & _PRODUCER_STATE_TARGETS, f"guard blind to {ast.dump(tree)}"
+
+    returning = ast.parse("def hand_back(self) -> DefensiveState:\n    ...\n")
+    fn = returning.body[0]
+    assert "DefensiveState" in ast.unparse(fn.returns)
 
 
 def test_the_presentation_fact_is_not_executable_and_says_whose_claim_it_is(terrain_fields):
@@ -216,15 +303,29 @@ def test_the_producers_decision_and_az06s_lifecycle_are_separate_fields(terrain_
     assert "lifecycle_state" in exported
 
 
-def test_no_model_carries_a_field_that_merges_the_two_namespaces():
-    """A single field naming both concepts is how they get conflated."""
+def test_no_model_carries_an_unqualified_defensive_state_field():
+    """A field that does not say *whose* state it is, is how they get conflated.
+
+    AZ-06 may record the producer's reported state for audit correlation
+    (AC-5/AC-7) -- that is `producer_defensive_state`, unmistakably owned. What
+    it may never carry is a bare `defensive_state`, because a reader cannot
+    tell whether that is the producer's report or something AZ-06 decided, and
+    that ambiguity is the merge.
+    """
+
     offenders: list[str] = []
     for model in _all_models():
         for field in model.model_fields:
             low = field.lower()
-            if "defensive_state" in low:
-                offenders.append(f"{model.__module__}.{model.__name__}.{field}")
-    assert offenders == [], f"a Defensive State field appeared on an AZ-06 model: {offenders}"
+            if "defensive_state" not in low:
+                continue
+            if low.startswith("producer_defensive_state"):
+                continue
+            offenders.append(f"{model.__module__}.{model.__name__}.{field}")
+    assert offenders == [], (
+        f"an unqualified Defensive State field appeared on an AZ-06 model: {offenders}. "
+        "Name its owner, or do not carry it"
+    )
 
 
 # -- AC-6: no ambiguous generic `mode` --------------------------------------
@@ -283,37 +384,196 @@ def test_a_reported_producer_state_is_not_an_input_to_activation():
     )
 
 
-# -- AC-7 is open, and says so ----------------------------------------------
+# -- AC-7: the canonical contract is adopted, now that a tag carries it -----
+#
+# The test that used to sit here failed the moment a pin carrying
+# `DefensiveState` landed. It has done its job and is replaced by what it
+# pointed at: adoption for status/audit correlation, with the lifecycle
+# namespace still separate.
 
 
-def test_the_fabric_pin_does_not_yet_carry_the_canonical_vocabulary():
-    """AC-7 is "adopt Fabric#14 **when compatible**". It is not yet.
+def test_the_pinned_fabric_carries_the_canonical_vocabulary():
+    """The precondition AC-7 waited on. Pinned so a re-pin backwards is loud."""
+    from azazel_fabric.schema.defensive_state import DefensiveState
 
-    This repository pins `v0.8.0`; `DefensiveState` shipped to no tag. Written
-    so it fails once a pin that carries the vocabulary lands -- the moment AC-7
-    becomes actionable, and a louder signal than a comment nobody re-reads.
-    """
-
-    # Scanned as text rather than parsed with `tomllib`: this package supports
-    # Python 3.10 (`requires-python = ">=3.10"`), where `tomllib` is not in the
-    # standard library, and adding a TOML dependency to read one pin would be a
-    # worse trade than reading the line. The claim under test is exactly that
-    # one line, so a line scan is precise enough for it.
     manifest = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
     pins = [
         line.strip().strip('",\'')
         for line in manifest.splitlines()
         if "azazel-fabric" in line and not line.lstrip().startswith("#")
     ]
-    assert len(pins) == 1, f"expected exactly one Fabric pin, got {pins}"
-    assert "@v" in pins[0], f"Fabric must be pinned to an exact tag, got {pins[0]!r}"
+    assert len(pins) == 1 and "@v" in pins[0], f"Fabric must be pinned to an exact tag: {pins}"
+    assert {member.value for member in DefensiveState} == CANONICAL_DEFENSIVE_STATES
 
-    try:
-        from azazel_fabric.schema.defensive_state import DefensiveState  # noqa: F401
-    except ImportError:
-        return
-    pytest.fail(
-        f"the pinned Fabric ({pins[0]}) now carries DefensiveState; Deception#28 AC-7 is "
-        "actionable -- adopt it for status/audit correlation, keeping the lifecycle "
-        "namespace separate, and delete this test"
+
+@pytest.mark.parametrize("state", sorted(CANONICAL_DEFENSIVE_STATES))
+def test_a_canonical_producer_report_is_recorded_and_flagged(state, producer_fields):
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    evidence = ProducerRedirectionEvidence(**producer_fields, producer_defensive_state=state)
+
+    assert evidence.producer_defensive_state == state
+    assert evidence.producer_defensive_state_is_canonical is True
+
+
+@pytest.mark.parametrize("hostile", ["portal", "shield", "redirect", "REDIRECT ", "", "QUARANTINE"])
+def test_an_unrecognized_producer_report_is_kept_verbatim_and_not_promoted(
+    hostile, producer_fields
+):
+    """AZ-06 never substitutes the coercion fallback.
+
+    Fabric lands an unrecognized state on the weakest one so a consumer
+    *deciding what to do* fails safe. AZ-06 is not that consumer -- it is
+    recording what a producer said. Substituting would turn "the producer said
+    something we do not know" into "the producer said OBSERVE".
+    """
+
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    evidence = ProducerRedirectionEvidence(**producer_fields, producer_defensive_state=hostile)
+
+    assert evidence.producer_defensive_state == hostile, "AZ-06 rewrote what the producer said"
+    assert evidence.producer_defensive_state_is_canonical is False
+    assert evidence.producer_defensive_state not in CANONICAL_DEFENSIVE_STATES
+
+
+def test_a_producer_cannot_assert_that_its_own_word_is_canonical(producer_fields):
+    """The flag is computed, never accepted."""
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    evidence = ProducerRedirectionEvidence(
+        **producer_fields,
+        producer_defensive_state="portal",
+        producer_defensive_state_is_canonical=True,
+    )
+
+    assert evidence.producer_defensive_state_is_canonical is False
+
+
+def test_a_canonical_flag_without_a_state_is_refused(producer_fields):
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    with pytest.raises(ValidationError):
+        ProducerRedirectionEvidence(
+            **producer_fields, producer_defensive_state_is_canonical=True
+        )
+
+
+@pytest.mark.parametrize("hostile", ["portal", "shield", "redirect", "QUARANTINE"])
+def test_a_snapshot_cannot_be_built_claiming_an_unknown_word_is_canonical(
+    hostile, terrain_fields
+):
+    """The snapshot recomputes the flag; it does not inherit a claim.
+
+    The snapshot is the artifact an auditor reads, and it can be constructed
+    directly rather than only by copying validated producer evidence. If it
+    accepted the flag, anything that can write a snapshot could mark any word
+    canonical by asserting it -- AZ-06 vouching for a vocabulary its pinned
+    Fabric does not know.
+    """
+
+    snapshot = PresentedTerrainSnapshotV0(
+        **terrain_fields,
+        producer_defensive_state=hostile,
+        producer_defensive_state_is_canonical=True,
+    )
+
+    assert snapshot.producer_defensive_state == hostile
+    assert snapshot.producer_defensive_state_is_canonical is False
+
+
+def test_a_snapshot_canonical_flag_without_a_state_is_refused(terrain_fields):
+    with pytest.raises(ValidationError):
+        PresentedTerrainSnapshotV0(
+            **terrain_fields, producer_defensive_state_is_canonical=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("reported", "canonical"), [("REDIRECT", True), ("portal", False), (None, False)]
+)
+def test_the_builder_carries_the_producer_report_through_unchanged(reported, canonical):
+    """A report that reaches evidence but not the snapshot is a silent loss.
+
+    Asserted against the real builder rather than by constructing the snapshot
+    directly, because the drop this guards against happens in the projection.
+    """
+
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+    from test_presented_terrain_evidence import build
+
+    snapshot = build(
+        producer=ProducerRedirectionEvidence(
+            producer_product="azazel-edge",
+            producer_node="edge-1",
+            trace_id="trace-1",
+            decision_ref="decision-1",
+            execution_ref="execution-1",
+            mechanism_observation_ref="mechanism-1",
+            evidence_refs=("edge:nft:1",),
+            producer_defensive_state=reported,
+        )
+    )
+
+    assert snapshot.producer_defensive_state == reported
+    assert snapshot.producer_defensive_state_is_canonical is canonical
+
+
+def test_the_producer_state_sits_beside_the_lifecycle_without_merging(terrain_fields):
+    """AC-5: audit correlates the two without either becoming the other."""
+    snapshot = PresentedTerrainSnapshotV0(
+        **terrain_fields, producer_defensive_state="REDIRECT",
+        producer_defensive_state_is_canonical=True,
+    )
+
+    assert snapshot.producer_defensive_state == "REDIRECT"
+    assert snapshot.lifecycle_state == "active"
+    assert snapshot.producer_defensive_state != snapshot.lifecycle_state
+
+    exported = snapshot.model_dump(mode="json")
+    assert exported["producer_defensive_state"] == "REDIRECT"
+    assert exported["lifecycle_state"] == "active"
+
+
+def test_az06_still_enumerates_nothing_after_adoption():
+    """Adoption is a *validator* import, not a copy of the vocabulary.
+
+    This is the same sweep as the test at the top of the file; asserted again
+    here because it is the property most at risk from an adoption commit.
+    """
+
+    offenders: list[str] = []
+    for path in _python_sources():
+        for literal in _code_string_literals(path):
+            if literal in CANONICAL_DEFENSIVE_STATES:
+                offenders.append(f"{path.relative_to(SRC_ROOT)}: {literal!r}")
+    assert offenders == [], f"adoption copied the vocabulary into AZ-06: {offenders}"
+
+
+def test_a_reported_producer_state_is_still_not_an_input_to_activation():
+    """Recording it changed nothing about what AZ-06 acts on.
+
+    Re-asserted after adoption because "we now carry the producer's state" is
+    exactly the change that would tempt someone to let it drive something.
+    """
+
+    from azazel_deception.runtime import compose
+
+    offenders: list[str] = []
+    for name, obj in vars(compose).items():
+        if not inspect.isclass(obj):
+            continue
+        for method_name, method in vars(obj).items():
+            if method_name.startswith("_") or not callable(method):
+                continue
+            try:
+                signature = inspect.signature(method)
+            except (TypeError, ValueError):
+                continue
+            for parameter in signature.parameters:
+                low = parameter.lower()
+                if "defensive_state" in low or low in {"producer_state", "reported_state"}:
+                    offenders.append(f"{name}.{method_name}({parameter})")
+    assert offenders == [], (
+        f"a producer state became an input to the AZ-06 runtime: {offenders}"
     )
