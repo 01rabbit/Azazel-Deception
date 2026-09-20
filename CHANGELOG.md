@@ -19,6 +19,43 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Added
 
+- **Producer Defensive State recorded without adopting it** (Deception#28 AC-7)
+  — `ProducerRedirectionEvidence` and `PresentedTerrainSnapshotV0` carry
+  `producer_defensive_state` (verbatim, or absent) beside
+  `producer_defensive_state_is_canonical` (computed, never accepted), so an
+  auditor can line up an Edge posture with what AZ-06 did without the two
+  namespaces merging. The field names its owner; the canonical vocabulary is
+  still copied into no AZ-06 string literal; a reported state still reaches no
+  activation path. Fabric's fail-safe coercion *value* is deliberately
+  discarded — AZ-06 records what a producer said rather than deciding what to
+  do, and substituting would turn "said something unknown" into "said
+  `OBSERVE`". See `docs/safety-model.md`.
+
+  Both fields are optional with defaults, so `presented-terrain-snapshot/v0.1`
+  grows additively rather than taking a version bump: the repository is
+  pre-stable (`0.2.0.dev0`, no release tag) and carries no frozen snapshot
+  golden, so no stored bytes change meaning. A strict consumer outside this
+  repository would see two new keys; none is known, but a search cannot prove
+  absence across repositories it does not index, so the schema string is left
+  unchanged deliberately rather than by oversight.
+- **Fabric pin documentation guard** — `tests/test_fabric_pin_documentation.py`
+  enforces what `docs/fabric-pin.md` had only asserted: the document names the
+  tag `pyproject.toml` actually pins, the pin is an exact tag, a candidate pin
+  carries a recorded reason, the history marks exactly one row current, and the
+  installed distribution matches the declared pin.
+
+### Changed
+
+- **Azazel-Fabric pin `v0.8.0` → `v0.9.0rc2`** — the first tag carrying
+  `azazel_fabric.schema.defensive_state`, imported as a validator for AC-7. A
+  recorded, bounded deviation from the stable-tag policy; revisited when
+  `v0.9.0` is cut. See `docs/fabric-pin.md`.
+- **AC-3 setter guard is structural, not name-based** — a function *named* for
+  the producer's state is no longer an offender (AZ-06 now classifies one); a
+  function that writes a producer-state field or hands back a `DefensiveState`
+  is, whatever it calls itself. The guard's own self-check exposed that the
+  previous detection missed `object.__setattr__`, the form this module uses.
+
 - **Incremental attacker-interaction emitter** — `runtime/observation.py`
   (`InteractionObserver`, `build_runtime_context`, and
   `DockerComposeAdapter.make_observer`) records fact-only interaction/reaction/
