@@ -30,7 +30,7 @@ drift structurally impossible rather than merely noticed.
 
 AZ-06 pins the Azazel-Fabric release tag:
 
-`v0.9.0rc3`
+`v0.9.0rc4`
 
 ### Why a release candidate
 
@@ -58,6 +58,27 @@ meant every hierarchical reference AZ-06 mints — `surface:http:8080`,
 ref, and `runtime/effect_projection.py` had to refuse them rather than flatten
 them. Rewriting a producer's identifier is not an option: `surface:http-8080`
 is a well-formed reference to a surface that does not exist.
+
+`v0.9.0rc4` is the pin now. It narrows `EffectObservation` to the two
+authority classes an observation can have observed — `observed_fact` and
+`active_materialized` (Azazel-Fabric#52) — and refuses the four others that
+`rc3` accepted. **It is the first non-additive candidate in the series**, and
+the reason this repository moves to it is not that the grammar changed
+somewhere: AZ-06 is a *producer* of `EffectObservation`, so this is the
+contract it emits under.
+
+The move costs nothing here because `runtime/effect_projection.py` already
+derives the class from the observation's status and can emit only those two —
+`observe_effect` has no parameter for it. What changes is that this became a
+guarantee of the contract instead of a habit of one function. A future edit
+introducing a third class would now be refused at the boundary rather than
+accepted and carried downstream.
+
+The pin was verified before the move rather than after: the `v0.9.0rc4` tag's
+own checkout reproduces `release/v0.9.0rc4.digest.json`, whose signature
+verifies under the release owner's key, and this repository's full suite runs
+green against it. **What is signed is that digest; the git tag itself is
+unsigned** and is not a trust boundary (Azazel-Fabric#56).
 
 That refusal was recorded as a test designed to fail when the pin moved, and it
 did. The stand-in values are gone from
@@ -208,4 +229,5 @@ updates `pyproject.toml`, this document, and the CHANGELOG together.
 | `c3154de` (2026-08-15) | `v0.5.0` → `v0.6.0` |
 | `77ad0cd` (2026-08-22) | `v0.6.0` → `v0.8.0` |
 | Deception#28 AC-7 (2026-09-20) | `v0.8.0` → `v0.9.0rc2` |
-| `effect_contracts` producer (2026-09-20) | `v0.9.0rc2` → `v0.9.0rc3` (current) — the reference grammar; see above |
+| `effect_contracts` producer (2026-09-20) | `v0.9.0rc2` → `v0.9.0rc3` — the reference grammar; see above |
+| `EffectObservation` authority narrowing (2026-09-20) | `v0.9.0rc3` → `v0.9.0rc4` (current) — AZ-06 emits this record, so it moves with the contract it emits under; see above |
