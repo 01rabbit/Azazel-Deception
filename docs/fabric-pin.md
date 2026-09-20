@@ -30,7 +30,7 @@ drift structurally impossible rather than merely noticed.
 
 AZ-06 pins the Azazel-Fabric release tag:
 
-`v0.9.0rc2`
+`v0.9.0rc3`
 
 ### Why a release candidate
 
@@ -49,6 +49,20 @@ the boundary forbids.
 The risk is bounded by what AZ-06 uses it for: one function, on a field that no
 runtime path reads. A candidate promises no stability, so this pin is revisited
 when `v0.9.0` is cut — `git+...@v0.9.0` and nothing else changes.
+
+`v0.9.0rc3` is the pin now, and the move was **not** optional for this
+repository. It widens the `effect_contracts` reference grammar so that a typed
+reference's body may contain further colons. Under `rc2` it could not, which
+meant every hierarchical reference AZ-06 mints — `surface:http:8080`,
+`artifact:honey:invoice-2026` — was refused by every slot requiring a typed
+ref, and `runtime/effect_projection.py` had to refuse them rather than flatten
+them. Rewriting a producer's identifier is not an option: `surface:http-8080`
+is a well-formed reference to a surface that does not exist.
+
+That refusal was recorded as a test designed to fail when the pin moved, and it
+did. The stand-in values are gone from
+`tests/test_effect_contracts_producer.py`; AZ-06's own references now go into
+`PresentedTerrainRef` unchanged.
 
 ## What this release provides
 
@@ -104,14 +118,20 @@ AZ-06 receives an `EnvironmentActivationDecision`, which carries none, and no
 Azazel repository mints one. AZ-06 is the materializer, so those observations
 are its records to make — it has nothing to make them against.
 
-At this pin, the hierarchical references AZ-06 actually mints
-(`surface:http:8080` and the like) are refused by every slot that requires a
-typed ref, because the pinned grammar splits on a colon and then forbids the
-body from containing one. That measurement is what produced
-[Azazel-Fabric#48](https://github.com/01rabbit/Azazel-Fabric/pull/48).
-`tests/test_effect_contracts_producer.py` pins it and **turns red when the pin
-moves**, which is the signal to put the references back into their natural
-form rather than leave the workaround standing.
+At `v0.9.0rc2` the hierarchical references AZ-06 actually mints
+(`surface:http:8080` and the like) were refused by every slot requiring a typed
+ref, because that grammar split on a colon and then forbade the body from
+containing one. That measurement is what produced
+[Azazel-Fabric#48](https://github.com/01rabbit/Azazel-Fabric/pull/48) and,
+through it, `v0.9.0rc3`.
+
+`tests/test_effect_contracts_producer.py` recorded the refusal in a form
+designed to **turn red when the pin moved**, and it did. The stand-in values
+are gone; AZ-06's references reach the record unchanged. What the file records
+now is the distinction that survived: `deception:surface:http-8080` is still
+untyped, because Fabric has no `deception` kind. Widening the body did not stop
+the grammar discriminating — a value is untyped when Fabric does not know its
+kind, never because of how it was punctuated.
 
 It carries everything in `v0.8.0` below, additively.
 
@@ -174,4 +194,5 @@ updates `pyproject.toml`, this document, and the CHANGELOG together.
 | `dba1400` (2026-08-14) | reviewed development commit → `v0.5.0` |
 | `c3154de` (2026-08-15) | `v0.5.0` → `v0.6.0` |
 | `77ad0cd` (2026-08-22) | `v0.6.0` → `v0.8.0` |
-| Deception#28 AC-7 (2026-09-20) | `v0.8.0` → `v0.9.0rc2` (current) |
+| Deception#28 AC-7 (2026-09-20) | `v0.8.0` → `v0.9.0rc2` |
+| `effect_contracts` producer (2026-09-20) | `v0.9.0rc2` → `v0.9.0rc3` (current) — the reference grammar; see above |
