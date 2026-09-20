@@ -43,11 +43,16 @@ from azazel_deception.runtime.presented_terrain import (
     build_presented_terrain_snapshot,
 )
 
-#: References that satisfy the grammar of the *pinned* Fabric. See
-#: `test_the_references_az06_mints_today_are_not_projectable` for the ones it
-#: actually mints, and why that is the finding rather than a fixture problem.
-CONFORMING_SURFACE = "surface:http-8080"
-CONFORMING_ARTIFACT = "artifact:honey-invoice-2026"
+#: The references AZ-06 actually mints, used unchanged.
+#:
+#: They were not usable here until `v0.9.0rc3`. Under the previous grammar a
+#: typed ref's body could not contain a colon, so `surface:http:8080` was
+#: refused by every slot requiring a typed ref and this file had to carry
+#: flattened stand-ins (`surface:http-8080`). The pin bump turned the test
+#: that recorded that into a failure, which was its whole purpose, and the
+#: stand-ins are gone.
+CONFORMING_SURFACE = "surface:http:8080"
+CONFORMING_ARTIFACT = "artifact:honey:invoice-2026"
 
 
 def _producer(**overrides) -> ProducerRedirectionEvidence:
@@ -259,38 +264,68 @@ def test_a_non_snapshot_is_refused_rather_than_duck_typed():
 # --------------------------------------------------------------------------
 
 
-#: Values AZ-06's own suite mints today, copied literally from the files named.
-#: A derived list would stop saying anything the moment a producer changed.
+#: Values AZ-06's own suite mints today, copied literally from the files named,
+#: with what the pinned Fabric makes of each.
+#:
+#: This list used to record that **none** of them was projectable. That was the
+#: measurement behind Azazel-Fabric#48, and moving the pin to `v0.9.0rc3` is
+#: what turned it from a finding into history.
 REFS_AZ06_MINTS_TODAY = (
-    ("surface:http:8080", "tests/test_presented_terrain_evidence.py"),
-    ("surface:http:8080", "tests/test_cross_product_golden_outcome.py"),
-    ("deception:surface:http-8080", "tests/test_defensive_state_boundary.py"),
+    ("surface:http:8080", "surface", "tests/test_presented_terrain_evidence.py"),
+    ("surface:http:8080", "surface", "tests/test_cross_product_golden_outcome.py"),
+    ("artifact:honey:invoice-2026", "artifact", "tests/test_honey_artifacts.py"),
+    # Still untyped, and for a different reason: `deception` is not a RefKind.
+    # Fabric does not know the kind, rather than the value being punctuated in
+    # a way the grammar happened to exclude. That distinction is the point.
+    ("deception:surface:http-8080", None, "tests/test_defensive_state_boundary.py"),
 )
 
 
-@pytest.mark.parametrize("value,minted_in", REFS_AZ06_MINTS_TODAY)
-def test_the_references_az06_mints_today_are_not_projectable(value, minted_in):
-    """The measurement that produced Azazel-Fabric#48.
+@pytest.mark.parametrize("value,expected_kind,minted_in", REFS_AZ06_MINTS_TODAY)
+def test_the_references_az06_mints_are_what_fabric_says_they_are(
+    value, expected_kind, minted_in
+):
+    """The pin bump's result, pinned in turn.
 
-    Under the pinned Fabric the typed-ref body may not contain a colon, so
-    every hierarchical reference in this repository is refused by every slot
-    that requires a typed ref -- which is why `effect_contracts` shipped with
-    no possible producer anywhere in the series.
-
-    Rewriting them was considered and refused: `surface:http:8080` rewritten to
-    `surface:http-8080` is a well-formed reference to a surface that does not
-    exist. The projector says so instead.
-
-    **This test flips when the pin moves.** Azazel-Fabric#48 widens the body to
-    admit further colons; at that pin these values become projectable and this
-    test fails, which is the signal to move the repository's references back to
-    their natural form rather than leaving the workaround in place.
+    A hierarchical reference is now a reference. The one that still is not
+    fails for a reason that has nothing to do with punctuation -- Fabric has no
+    `deception` kind -- and a test that could not tell those two apart would
+    have called the grammar fixed when it was not.
     """
 
-    assert parse_ref(value)[0] is None, f"{value!r} (from {minted_in})"
+    kind, _ = parse_ref(value)
+    assert (kind.value if kind is not None else None) == expected_kind, (
+        f"{value!r} (from {minted_in})"
+    )
+
+
+def test_a_hierarchical_surface_reference_now_reaches_the_record():
+    """End to end: the value from AZ-06's own fixtures, projected unchanged.
+
+    Nothing rewrote it. `surface:http:8080` goes into the readout and comes out
+    of `PresentedTerrainRef` byte-identical, which is the whole reason the
+    projector refused to flatten it rather than making it fit.
+    """
+
+    projected = _project(
+        snapshot_overrides={"active_surface_refs": ("surface:http:8080",)}
+    )
+
+    assert projected.ref.active_surface_refs == ("surface:http:8080",)
+
+
+def test_a_reference_of_a_kind_fabric_does_not_know_is_still_refused():
+    """The grammar widened; it did not stop discriminating.
+
+    `deception:surface:http-8080` announces a kind Fabric has no name for, so
+    it cannot stand in a slot that requires `surface`. Widening the body must
+    not have made every colon-bearing string acceptable anywhere.
+    """
 
     with pytest.raises(EffectProjectionRefused, match="will not rewrite"):
-        _project(snapshot_overrides={"active_surface_refs": (value,)})
+        _project(
+            snapshot_overrides={"active_surface_refs": ("deception:surface:http-8080",)}
+        )
 
 
 def test_nothing_in_the_series_mints_an_effect_id_so_observations_are_blocked():
