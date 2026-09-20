@@ -31,8 +31,12 @@ from azazel_fabric.effect_contracts import (
 from pydantic import ValidationError
 
 from azazel_deception.runtime.effect_projection import (
+    MATERIALIZABLE_EFFECT_CLASSES,
     NOT_CARRIED_INTO_FABRIC,
     EffectProjectionRefused,
+    EffectRefRejected,
+    accept_defensive_effect_ref,
+    observe_effect,
     fabric_lifecycle_state_ref,
     fabric_presentation_id,
     project_presented_terrain,
@@ -328,30 +332,24 @@ def test_a_reference_of_a_kind_fabric_does_not_know_is_still_refused():
         )
 
 
-def test_nothing_in_the_series_mints_an_effect_id_so_observations_are_blocked():
-    """Why this module produces no `EffectObservation`.
+def test_az06_now_observes_against_an_effect_edge_minted():
+    """The successor to a guard that has fired.
 
-    `EffectObservation.effect_ref` and `OutcomeObservationEnvelope.effect_ref`
-    are keyed on an `effect:`-typed id minted by whoever constructed the
-    effect. AZ-06 receives an `EnvironmentActivationDecision`, which carries no
-    such id, and no Azazel repository mints one. AZ-06 is the materializer, so
-    the observation is its record to make -- it simply has nothing to make it
-    against.
-
-    Pinned as a fact rather than left as an absence: if AZ-06 ever receives an
-    effect id, this is where the blocker is recorded as lifted.
+    This file used to assert that **no** repository minted an `effect:` id, so
+    `EffectObservation` had no possible producer anywhere in the series. That
+    was the measurement; Azazel-Edge#419 answered it. A guard whose event has
+    happened is replaced by one for the invariant that matters next -- that the
+    observation AZ-06 makes really does chain to the effect it names.
     """
 
-    snapshot = _snapshot()
-    payload = snapshot.model_dump(mode="json")
-    typed = {
-        key: value
-        for key, value in payload.items()
-        if isinstance(value, str) and parse_ref(value)[0] is not None
-    }
-    assert not any(
-        parse_ref(value)[0].value == "effect" for value in typed.values()
-    ), f"an effect reference appeared in AZ-06's record: {typed}"
+    effect = accept_defensive_effect_ref(an_edge_effect())
+    observation = observe_effect(
+        effect, status="active", observed_at="2026-09-20T12:05:00+00:00"
+    )
+
+    assert observation.effect_ref == effect.effect_id
+    assert observation.materialization_producer == "azazel-deception"
+    assert_effect_chain_consistent(effect, observations=[observation])
 
 
 def test_a_shadow_run_presentation_cannot_be_chained_to_its_effect():
@@ -469,3 +467,208 @@ def test_the_projected_record_carries_no_directive_or_authority_field():
 
     with pytest.raises(ValidationError):
         PresentedTerrainRef(**{**payload, "directive": True})
+
+
+# --------------------------------------------------------------------------
+# AZ-06 as a consumer: what it accepts, and what it refuses on doctrine
+# --------------------------------------------------------------------------
+
+
+def an_edge_effect(**overrides) -> dict:
+    """A `DefensiveEffectRef` shaped as Azazel-Edge's exporter emits one."""
+
+    data = {
+        "effect_id": "effect:cff74a8556ff401bc72249812018afcc",
+        "effect_class": "redirect_to_presented_terrain",
+        "producer_product": "azazel-edge",
+        "producer_node": "edge-1",
+        "trace_id": "trace-1",
+        "decision_ref": "decision-1",
+        "target_scope_ref": "scope:6617f9307d832d50e04395e5604619cd",
+        "policy_ref": "policy:soc-default",
+        "created_at": "2026-09-20T12:00:00+00:00",
+        "expires_at": "2026-09-20T13:00:00+00:00",
+        "authority_class": "producer_decision_ref",
+    }
+    data.update(overrides)
+    return data
+
+
+def test_an_edge_effect_reference_is_accepted():
+    effect = accept_defensive_effect_ref(an_edge_effect())
+
+    assert effect.producer_product == "azazel-edge"
+    assert effect.decision_ref == "decision-1"
+    assert effect.directive is False
+
+
+def test_az06_refuses_to_materialize_advice_or_a_shadow_run():
+    """Doctrine, not taste.
+
+    Deception materializes an Edge-approved environment. `advisory_inference`
+    was advised and `planned_shadow` was considered; materializing either would
+    make AZ-06 the step that turns a suggestion into an environment, which is
+    exactly the authority it does not hold.
+    """
+
+    for authority, extra in (
+        ("planned_shadow", {"decision_ref": None}),
+        ("advisory_inference", {"decision_ref": None, "advisory_ref": "advisory:a1"}),
+        ("stale_or_unknown", {"decision_ref": None}),
+    ):
+        with pytest.raises(EffectRefRejected, match="Edge-approved"):
+            accept_defensive_effect_ref(
+                an_edge_effect(authority_class=authority, **extra)
+            )
+
+
+def test_only_redirection_can_become_presented_terrain():
+    """There is nothing for AZ-06 to present behind isolation or a notification."""
+
+    for effect_class in ("network_isolation", "rate_limit", "notify_only", "observe_only"):
+        with pytest.raises(EffectRefRejected, match="no meaning behind"):
+            accept_defensive_effect_ref(an_edge_effect(effect_class=effect_class))
+
+    assert MATERIALIZABLE_EFFECT_CLASSES == {EffectClass.REDIRECT_TO_PRESENTED_TERRAIN}
+
+
+def test_az06_refuses_an_effect_it_produced_itself():
+    """An effect returning to its own producer as an instruction is that
+    producer deciding, whatever authority class it carries."""
+
+    with pytest.raises(EffectRefRejected, match="produced itself"):
+        accept_defensive_effect_ref(an_edge_effect(producer_product="azazel-deception"))
+
+
+def test_the_contract_is_fabrics_statement_and_is_not_restated_here():
+    """A malformed payload is refused by the model, not by a local check."""
+
+    with pytest.raises(ValidationError):
+        accept_defensive_effect_ref(an_edge_effect(effect_id="not-a-typed-ref"))
+    with pytest.raises(ValidationError):
+        accept_defensive_effect_ref(an_edge_effect(expires_at="2026-09-20T11:00:00+00:00"))
+    with pytest.raises(ValidationError):
+        accept_defensive_effect_ref(an_edge_effect(directive=True))
+
+
+def test_a_non_mapping_payload_is_refused_rather_than_duck_typed():
+    with pytest.raises(EffectRefRejected):
+        accept_defensive_effect_ref("effect:e1")
+
+
+# --------------------------------------------------------------------------
+# AZ-06 as the materializer: the observation it may make
+# --------------------------------------------------------------------------
+
+
+def test_the_observation_takes_its_trace_from_the_effect():
+    """A caller-supplied trace could attach an observation to an unrelated
+    incident, and the chain check would pass because both halves would agree
+    with each other and with nothing else."""
+
+    effect = accept_defensive_effect_ref(an_edge_effect(trace_id="trace-77"))
+    observation = observe_effect(
+        effect, status="active", observed_at="2026-09-20T12:05:00+00:00"
+    )
+
+    assert observation.trace_id == "trace-77"
+    import inspect
+
+    assert "trace_id" not in inspect.signature(observe_effect).parameters
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("started", "active_materialized"),
+        ("active", "active_materialized"),
+        ("completed", "observed_fact"),
+        ("eligible", "observed_fact"),
+    ],
+)
+def test_the_authority_class_is_derived_from_the_status(status, expected):
+    """Fabric requires `active_materialized` for a live status and forbids it
+    otherwise, so a caller-supplied class could only agree or be rejected."""
+
+    effect = accept_defensive_effect_ref(an_edge_effect())
+    observation = observe_effect(
+        effect, status=status, observed_at="2026-09-20T12:05:00+00:00"
+    )
+
+    assert observation.authority_class.value == expected
+
+
+def test_a_terminal_status_must_say_why_it_ended():
+    """Fabric's rule: an unexplained termination is indistinguishable from a
+    lost observation."""
+
+    effect = accept_defensive_effect_ref(an_edge_effect())
+
+    with pytest.raises(ValidationError):
+        observe_effect(effect, status="terminated", observed_at="2026-09-20T12:30:00+00:00")
+
+    assert observe_effect(
+        effect,
+        status="terminated",
+        observed_at="2026-09-20T12:30:00+00:00",
+        termination_reason="lease expired",
+    )
+
+
+def test_a_stale_live_observation_cannot_prolong_a_bounded_effect():
+    """Fabric's rule, applied by calling it rather than re-deciding it.
+
+    A replayed `active` arriving after the effect expired is how a time-boxed
+    environment silently becomes an unbounded one.
+    """
+
+    effect = accept_defensive_effect_ref(an_edge_effect())
+
+    with pytest.raises(ValueError, match="cannot prolong"):
+        observe_effect(effect, status="active", observed_at="2026-09-20T14:00:00+00:00")
+
+    # ...while reporting that it *ended* after expiry is exactly what should
+    # still be possible.
+    assert observe_effect(
+        effect,
+        status="completed",
+        observed_at="2026-09-20T14:00:00+00:00",
+    )
+
+
+def test_two_observations_of_one_effect_are_two_records():
+    """An id that collapsed them would make the later one look like a
+    correction of the earlier."""
+
+    effect = accept_defensive_effect_ref(an_edge_effect())
+    first = observe_effect(effect, status="started", observed_at="2026-09-20T12:01:00+00:00")
+    second = observe_effect(effect, status="active", observed_at="2026-09-20T12:05:00+00:00")
+
+    assert first.observation_id != second.observation_id
+    assert first.effect_ref == second.effect_ref
+
+
+def test_replaying_one_observation_gives_the_same_record():
+    effect = accept_defensive_effect_ref(an_edge_effect())
+    args = {"status": "active", "observed_at": "2026-09-20T12:05:00+00:00"}
+
+    assert (
+        observe_effect(effect, **args).observation_id
+        == observe_effect(effect, **args).observation_id
+    )
+
+
+def test_an_observation_of_a_different_effect_does_not_chain():
+    """The guard against a cross-trace identifier collision producing a chain
+    that validates field-by-field while describing two unrelated events."""
+
+    effect = accept_defensive_effect_ref(an_edge_effect())
+    other = accept_defensive_effect_ref(
+        an_edge_effect(effect_id="effect:0000000000000000000000000000000a")
+    )
+    observation = observe_effect(
+        other, status="active", observed_at="2026-09-20T12:05:00+00:00"
+    )
+
+    with pytest.raises(ValueError, match="different effect"):
+        assert_effect_chain_consistent(effect, observations=[observation])
