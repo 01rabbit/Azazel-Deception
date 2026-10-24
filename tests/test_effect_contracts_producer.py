@@ -31,6 +31,7 @@ from azazel_fabric.effect_contracts import (
 from pydantic import ValidationError
 
 from azazel_deception.runtime.effect_projection import (
+    MAPPED_INTO_FABRIC,
     MATERIALIZABLE_EFFECT_CLASSES,
     NOT_CARRIED_INTO_FABRIC,
     EffectProjectionRefused,
@@ -352,20 +353,10 @@ def test_az06_now_observes_against_an_effect_edge_minted():
     assert_effect_chain_consistent(effect, observations=[observation])
 
 
-def test_a_shadow_run_presentation_cannot_be_chained_to_its_effect():
-    """Measured: `assert_effect_chain_consistent` admits one authority class.
+def _shadow_effect(**overrides) -> DefensiveEffectRef:
+    """An Edge effect with no decision behind it: AZ-06's default mode."""
 
-    A terrain is compared to `effect_ref.decision_ref`, which is `None` for
-    every class except `producer_decision_ref`, while the terrain's own
-    `activation_decision_ref` is required and non-empty. So the comparison can
-    never hold for a `planned_shadow` effect -- and AZ-06's default mode is
-    exactly that (`TransitionExecutor` reports `shadow_simulated` unless
-    `live_enabled`). The error even says the terrain "was activated by a
-    different decision", when in fact the effect named none.
-    """
-
-    terrain = _project().ref
-    base = dict(
+    data = dict(
         effect_id="effect:e1",
         effect_class=EffectClass.REDIRECT_TO_PRESENTED_TERRAIN,
         producer_product="azazel-edge",
@@ -375,40 +366,348 @@ def test_a_shadow_run_presentation_cannot_be_chained_to_its_effect():
         policy_ref="policy-1",
         created_at="2026-08-26T00:00:00+00:00",
         expires_at="2026-08-26T01:00:00+00:00",
+        authority_class=AuthorityClass.PLANNED_SHADOW,
+    )
+    data.update(overrides)
+    return DefensiveEffectRef(**data)
+
+
+def _decided_effect(**overrides) -> DefensiveEffectRef:
+    return _shadow_effect(
+        **{
+            "authority_class": AuthorityClass.PRODUCER_DECISION_REF,
+            "decision_ref": "decision-1",
+            **overrides,
+        }
     )
 
-    decided = DefensiveEffectRef(
-        **base,
-        authority_class=AuthorityClass.PRODUCER_DECISION_REF,
-        decision_ref="decision-1",
-    )
-    assert_effect_chain_consistent(decided, terrain=terrain)
 
-    shadow = DefensiveEffectRef(**base, authority_class=AuthorityClass.PLANNED_SHADOW)
-    with pytest.raises(ValueError, match="a different decision"):
-        assert_effect_chain_consistent(shadow, terrain=terrain)
+#: A presentation AZ-06 rehearsed rather than verified live. `stale` is what
+#: the local rule produces for it, and a shadow-bound terrain may not claim
+#: more.
+_SHADOW_SNAPSHOT = {"runtime_verified_active": False, "active_surface_refs": ()}
+
+
+def test_a_shadow_run_presentation_now_chains_to_its_effect():
+    """The successor to a measurement that has done its job.
+
+    This test used to record that a `planned_shadow` terrain could **not** be
+    chained to its effect: `assert_effect_chain_consistent` compared the
+    terrain's required `activation_decision_ref` to the effect's `None`, so
+    the comparison could never hold -- for exactly the mode AZ-06 runs in by
+    default. `v0.9.0rc5` (Fabric#51) added a binding of its own, by effect and
+    trace, and the gap it recorded is closed. What it now pins is that the
+    binding is real: the decision is absent rather than invented, and the
+    terrain claims a shadow run rather than a materialization.
+    """
+
+    shadow = _shadow_effect()
+    terrain = _project(
+        snapshot_overrides=_SHADOW_SNAPSHOT, source_effect=shadow
+    ).ref
+
+    assert terrain.activation_decision_ref is None
+    assert terrain.source_effect_ref == shadow.effect_id
+    assert terrain.trace_id == shadow.trace_id
+    assert terrain.authority_class is AuthorityClass.PLANNED_SHADOW
+    assert_effect_chain_consistent(shadow, terrain=terrain)
+
+
+def test_a_decided_effect_still_chains_through_its_decision():
+    decided = _decided_effect()
+
+    plain = _project().ref
+    assert_effect_chain_consistent(decided, terrain=plain)
+
+    bound = _project(source_effect=decided).ref
+    assert bound.activation_decision_ref == "decision-1"
+    assert bound.source_effect_ref == decided.effect_id
+    assert bound.authority_class is AuthorityClass.ACTIVE_MATERIALIZED
+    assert_effect_chain_consistent(decided, terrain=bound)
+
+
+def test_a_decision_terrain_does_not_chain_to_a_shadow_effect():
+    """The terrain names a decision the shadow effect never made."""
+
+    terrain = _project().ref
+    with pytest.raises(ValueError, match="effect has none"):
+        assert_effect_chain_consistent(_shadow_effect(), terrain=terrain)
+
+
+def test_a_shadow_terrain_does_not_chain_to_a_different_effect():
+    terrain = _project(
+        snapshot_overrides=_SHADOW_SNAPSHOT, source_effect=_shadow_effect()
+    ).ref
+    other = _shadow_effect(effect_id="effect:e2")
+
+    with pytest.raises(ValueError, match="different effect"):
+        assert_effect_chain_consistent(other, terrain=terrain)
+
+
+def test_a_terrain_does_not_chain_to_an_effect_of_another_trace():
+    """Checked in both bindings: the trace now travels with every terrain."""
+
+    shadow_terrain = _project(
+        snapshot_overrides=_SHADOW_SNAPSHOT, source_effect=_shadow_effect()
+    ).ref
+    with pytest.raises(ValueError, match="different trace"):
+        assert_effect_chain_consistent(
+            _shadow_effect(trace_id="trace-2"), terrain=shadow_terrain
+        )
+
+    decided_terrain = _project().ref
+    with pytest.raises(ValueError, match="different trace"):
+        assert_effect_chain_consistent(
+            _decided_effect(trace_id="trace-2"), terrain=decided_terrain
+        )
+
+
+def test_the_projector_refuses_to_bind_an_effect_of_another_trace():
+    """Refused before a record exists, not left to a consumer's chain check."""
+
+    with pytest.raises(EffectRefRejected, match="different trace"):
+        _project(
+            snapshot_overrides=_SHADOW_SNAPSHOT,
+            source_effect=_shadow_effect(trace_id="trace-2"),
+        )
+    with pytest.raises(EffectRefRejected, match="different trace"):
+        _project(source_effect=_decided_effect(trace_id="trace-2"))
+
+
+def test_the_projector_refuses_a_decision_that_is_not_the_effects():
+    with pytest.raises(EffectRefRejected, match="different decision"):
+        _project(source_effect=_decided_effect(decision_ref="decision-9"))
+
+
+def test_a_shadow_effect_cannot_be_bound_to_a_live_presentation():
+    """A live terrain for an effect nobody decided is AZ-06 materializing a
+    shadow run -- what `accept_defensive_effect_ref` declines. Binding must
+    not become the side door."""
+
+    with pytest.raises(EffectRefRejected, match="nobody approved"):
+        _project(source_effect=_shadow_effect())
+
+
+def test_a_failed_run_cannot_be_recorded_as_a_shadow_run():
+    """`failed` says a run was attempted. Binding it to a shadow effect would
+    turn a failed live attempt into a rehearsal."""
+
+    failed = _snapshot(
+        runtime_state={
+            "environment_id": "env-1",
+            "state": "failed",
+            "package_id": "municipal-linux-v1",
+            "package_digest": "sha256:abc123",
+            "node_id": "deception-node-1",
+            "activated_at": "2026-08-26T00:00:00+00:00",
+        },
+        active_surface_refs=(),
+    )
+    assert failed.lifecycle_state == "failed"
+
+    with pytest.raises(EffectRefRejected, match="only a 'stale' presentation"):
+        project_presented_terrain(
+            failed, presentation_version=0, source_effect=_shadow_effect()
+        )
+
+
+def test_a_stale_snapshot_with_active_surfaces_cannot_be_a_shadow_run():
+    """The builder never produces this, but the snapshot model accepts it.
+
+    So it is reachable, and a `planned_shadow` terrain presenting live surfaces
+    would be a materialization under a shadow label.
+    """
+
+    stale = _snapshot(**_SHADOW_SNAPSHOT)
+    with_surfaces = PresentedTerrainSnapshotV0(
+        **{**stale.model_dump(), "active_surface_refs": (CONFORMING_SURFACE,)}
+    )
+    assert with_surfaces.lifecycle_state == "stale"
+
+    with pytest.raises(EffectRefRejected, match="carries active surfaces"):
+        project_presented_terrain(
+            with_surfaces, presentation_version=0, source_effect=_shadow_effect()
+        )
+
+
+def test_only_a_shadow_run_binds_without_a_decision():
+    for authority, extra in (
+        (AuthorityClass.STALE_OR_UNKNOWN, {}),
+        (AuthorityClass.ADVISORY_INFERENCE, {"advisory_ref": "advisory:a1"}),
+    ):
+        effect = _shadow_effect(authority_class=authority, **extra)
+        with pytest.raises(EffectRefRejected, match="only to a shadow run"):
+            _project(snapshot_overrides=_SHADOW_SNAPSHOT, source_effect=effect)
+
+
+def test_binding_refuses_what_accepting_refuses():
+    with pytest.raises(EffectRefRejected, match="no meaning behind"):
+        _project(
+            source_effect=_decided_effect(effect_class=EffectClass.NETWORK_ISOLATION)
+        )
+    with pytest.raises(EffectRefRejected, match="produced itself"):
+        _project(source_effect=_decided_effect(producer_product="azazel-deception"))
+    with pytest.raises(EffectProjectionRefused, match="DefensiveEffectRef"):
+        _project(source_effect={"effect_id": "effect:e1", "trace_id": "trace-1"})
+
+
+# --------------------------------------------------------------------------
+# trace_id, synthetic identities and credentials (Fabric#51, `v0.9.0rc5`)
+# --------------------------------------------------------------------------
+
+
+def test_the_trace_reaches_the_record():
+    assert _project().ref.trace_id == "trace-1"
+
+
+def test_typed_identity_and_credential_refs_reach_the_record_unchanged():
+    projected = _project(
+        snapshot_overrides={
+            "synthetic_identity_refs": ("identity:finance:clerk-1",),
+            "synthetic_credential_refs": ("credential:smb:clerk-1",),
+        }
+    )
+
+    assert projected.ref.synthetic_identity_refs == ("identity:finance:clerk-1",)
+    assert projected.ref.synthetic_credential_refs == ("credential:smb:clerk-1",)
+
+
+def test_an_untyped_identity_is_refused_not_prefixed():
+    """`finance-clerk` given an `identity:` prefix is a reference to an
+    identity record nobody wrote. The refusal says which value and why."""
+
+    with pytest.raises(EffectProjectionRefused, match="'identity' reference") as exc:
+        _project(snapshot_overrides={"synthetic_identity_refs": ("finance-clerk",)})
+    assert "finance-clerk" in str(exc.value)
+    assert "will not rewrite" in str(exc.value)
+
+
+def test_a_credential_of_a_kind_fabric_does_not_know_is_refused():
+    """AZ-06's own rule asks for a `credential:` prefix; Fabric's asks for the
+    kind. A prefix-shaped value the grammar does not parse fails the second."""
+
+    with pytest.raises(EffectProjectionRefused, match="'credential' reference"):
+        _project(snapshot_overrides={"synthetic_credential_refs": ("credential:",)})
+
+
+@pytest.mark.parametrize(
+    "material",
+    [
+        "credential:-----BEGIN-OPENSSH-PRIVATE-KEY-----",
+        "credential:ssh-ed25519:AAAAC3NzaC1lZDI1NTE5",
+        "credential:ssh-rsa:AAAAB3NzaC1yc2E",
+    ],
+)
+def test_credential_material_never_reaches_the_contract(material):
+    """AZ-06's refusal, ahead of Fabric's.
+
+    Each of these passes the local snapshot rule (no whitespace, no `=`) and
+    the reference grammar. What stops it is recognizable secret material, and
+    the projector stops it before any Fabric record is constructed.
+    """
+
+    snapshot = _snapshot(synthetic_credential_refs=(material,))
+
+    with pytest.raises(EffectProjectionRefused, match="secret material"):
+        project_presented_terrain(snapshot, presentation_version=0)
+
+    # Fabric would refuse it too; the two checks are independent.
+    payload = _project().ref.model_dump(mode="python")
+    with pytest.raises(ValidationError, match="secret material"):
+        PresentedTerrainRef(**{**payload, "synthetic_credential_refs": (material,)})
+
+
+#: Every reference `PresentedTerrainRef` receives from the projector, by where
+#: it comes from: the snapshot, the caller, or the effect a terrain is bound to.
+_NEWLINE_CASES = [
+    ("snapshot", "synthetic_credential_refs", ("credential:smb-1\n",)),
+    ("snapshot", "synthetic_identity_refs", ("identity:clerk-1\n",)),
+    ("snapshot", "synthetic_artifact_refs", ("artifact:memo-1\n",)),
+    ("snapshot", "active_surface_refs", ("surface:http:8080\n",)),
+    ("snapshot", "trace_id", "trace-1\n"),
+    ("snapshot", "producer_decision_ref", "decision-1\n"),
+    ("snapshot", "evidence_refs", ("runtime-inspect-1\n",)),
+    ("snapshot", "isolation_assertion_refs", ("isolation-net-none\n",)),
+    ("caller", "isolation_result_ref", "evidence:isolation-result-1\n"),
+    ("effect", "effect_id", "effect:e1\n"),
+    ("effect", "decision_ref", "decision-1\n"),
+    ("effect", "trace_id", "trace-1\n"),
+]
+
+
+@pytest.mark.parametrize("source,field,value", _NEWLINE_CASES)
+def test_a_trailing_newline_reference_is_never_emitted(source, field, value):
+    """Azazel-Fabric#65: the pinned grammar accepts `kind:body\\n`.
+
+    `OPAQUE_REF_PATTERN` ends in `$` and is applied with `.match`, and `$`
+    matches before one trailing newline. AZ-06 does not rely on that. Where a
+    local model already refuses the value, the record is copied without
+    validation to reach the projector with it anyway: the projector's own
+    refusal is what this checks, independent of every layer upstream.
+    """
+
+    kind, _ = parse_ref("credential:smb-1\n")
+    assert kind is not None, (
+        "Fabric#65 is fixed in the pinned release: keep the refusal below, "
+        "drop this precondition and the note that explains it"
+    )
+
+    snapshot = _snapshot()
+    kwargs = {}
+    if source == "snapshot":
+        snapshot = snapshot.model_copy(update={field: value})
+    elif source == "caller":
+        kwargs[field] = value
+    else:
+        kwargs["source_effect"] = _decided_effect().model_copy(update={field: value})
+
+    with pytest.raises(EffectProjectionRefused, match="whitespace or a control"):
+        project_presented_terrain(snapshot, presentation_version=0, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "field", ["trace_id", "decision_ref", "execution_ref", "mechanism_observation_ref"]
+)
+def test_a_producer_reference_with_a_newline_is_refused_where_it_enters(field):
+    """Length was the only check, so `decision-1\\n` from a producer went through
+    the ordinary builder and out as the terrain's activation decision."""
+
+    with pytest.raises(ValidationError, match="whitespace or control"):
+        _producer(**{field: "ref-1\n"})
+    with pytest.raises(ValidationError, match="whitespace or control"):
+        _producer(evidence_refs=["edge-nft-1\n"])
+
+
+def test_a_snapshot_reference_with_a_newline_is_refused_where_it_enters():
+    payload = _snapshot().model_dump()
+    for field in ("trace_id", "producer_decision_ref", "producer_execution_ref"):
+        with pytest.raises(ValidationError, match="whitespace or control"):
+            PresentedTerrainSnapshotV0(**{**payload, field: "ref-1\n"})
+
+
+@pytest.mark.parametrize(
+    "overrides,kwargs,field",
+    [
+        ({"evidence_refs": ("evidence:ssh-ed25519:AAAAC3Nza",)}, {}, "evidence_refs"),
+        (
+            {"isolation_assertion_refs": ("isolation:-----BEGIN-PRIVATE",)},
+            {},
+            "isolation_assertion_ref",
+        ),
+        ({}, {"isolation_result_ref": "evidence:ssh-rsa:AAAAB3Nza"}, "isolation_result_ref"),
+    ],
+)
+def test_secret_material_is_refused_in_every_reference_field(overrides, kwargs, field):
+    """Not only the credential slot: evidence and isolation references are
+    published too, and secret material in them travels just as far."""
+
+    with pytest.raises(EffectProjectionRefused, match=f"{field} carries secret material"):
+        _project(snapshot_overrides=overrides, **kwargs)
 
 
 # --------------------------------------------------------------------------
 # The loss list
 # --------------------------------------------------------------------------
-
-
-#: Local field -> the `PresentedTerrainRef` slot it reaches.
-MAPPED_INTO_FABRIC = {
-    "schema_version": "schema_version",
-    "presentation_id": "presentation_id",
-    "producer_product": "producer_product",
-    "producer_decision_ref": "activation_decision_ref",
-    "lifecycle_state": "lifecycle_state_ref",
-    "active_surface_refs": "active_surface_refs",
-    "synthetic_artifact_refs": "synthetic_artifact_refs",
-    "isolation_assertion_refs": "isolation_assertion_ref",
-    "started_at": "created_at",
-    "expires_at": "expires_at",
-    "evidence_refs": "evidence_refs",
-    "authority_class": "authority_class",
-}
 
 
 def test_every_local_field_is_either_mapped_or_declared_unmapped():
@@ -417,6 +716,9 @@ def test_every_local_field_is_either_mapped_or_declared_unmapped():
     local = set(PresentedTerrainSnapshotV0.model_fields)
     classified = set(MAPPED_INTO_FABRIC) | NOT_CARRIED_INTO_FABRIC
 
+    assert not set(MAPPED_INTO_FABRIC) & NOT_CARRIED_INTO_FABRIC, (
+        "a field cannot be both carried and declared unmapped"
+    )
     assert local == classified, (
         "unclassified local fields: "
         f"{sorted(local - classified)}; stale entries: {sorted(classified - local)}"
@@ -453,8 +755,11 @@ def test_the_loss_list_travels_with_every_projection():
     """
 
     assert _project().not_carried == NOT_CARRIED_INTO_FABRIC
-    assert "trace_id" in NOT_CARRIED_INTO_FABRIC
-    assert "synthetic_credential_refs" in NOT_CARRIED_INTO_FABRIC
+    # Carried since `v0.9.0rc5` (Fabric#51); the loss list no longer claims
+    # there is nowhere to put them.
+    for carried in ("trace_id", "synthetic_identity_refs", "synthetic_credential_refs"):
+        assert carried not in NOT_CARRIED_INTO_FABRIC
+        assert MAPPED_INTO_FABRIC[carried] == carried
 
 
 def test_the_projected_record_carries_no_directive_or_authority_field():

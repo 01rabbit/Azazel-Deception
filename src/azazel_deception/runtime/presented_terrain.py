@@ -11,7 +11,7 @@ import hashlib
 import json
 from typing import Any, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Fabric#14's canonical vocabulary, consumed as a *validator* (Deception#28
 # AC-7). AZ-06 never enumerates the five values -- it asks Fabric whether a
@@ -32,6 +32,27 @@ def _require_reference(label: str, value: str, *, prefix: str | None = None) -> 
         raise ValueError(f"{label} must be an opaque reference, not secret material")
     if prefix is not None and not value.startswith(prefix):
         raise ValueError(f"{label} must use {prefix} reference namespace")
+
+
+def _refuse_whitespace_or_control(value: Any, info: Any) -> Any:
+    """Refuse a producer reference carrying whitespace or a control character.
+
+    Length was the only check on these, so `decision-1\n` from a producer was
+    recorded as-is and later published by the effect projection as the
+    terrain's activation decision. A reference is opaque; a trailing newline is
+    structure. Refused where it enters, rather than only where it leaves.
+    """
+
+    values = value if isinstance(value, tuple) else (value,)
+    for item in values:
+        if isinstance(item, str) and any(
+            ch.isspace() or not ch.isprintable() for ch in item
+        ):
+            raise ValueError(
+                f"{info.field_name} must be an opaque reference without "
+                "whitespace or control characters"
+            )
+    return value
 
 
 def _classify_producer_defensive_state(state: str | None, claimed_canonical: bool) -> bool:
@@ -99,6 +120,14 @@ class ProducerRedirectionEvidence(_StrictFact):
     #: keeping rather than a reason to drop the report.
     producer_defensive_state_is_canonical: bool = False
 
+    _opaque_refs = field_validator(
+        "trace_id",
+        "decision_ref",
+        "execution_ref",
+        "mechanism_observation_ref",
+        "evidence_refs",
+    )(_refuse_whitespace_or_control)
+
     @model_validator(mode="after")
     def _classify_producer_state(self) -> "ProducerRedirectionEvidence":
         object.__setattr__(
@@ -157,6 +186,13 @@ class PresentedTerrainSnapshotV0(_StrictFact):
     observed_at: str = Field(min_length=1, max_length=64)
     authority_class: Literal["deception_presentation_fact"] = "deception_presentation_fact"
     executable: Literal[False] = False
+
+    _opaque_refs = field_validator(
+        "trace_id",
+        "producer_decision_ref",
+        "producer_execution_ref",
+        "producer_mechanism_ref",
+    )(_refuse_whitespace_or_control)
 
     @model_validator(mode="after")
     def _classify_producer_state(self) -> "PresentedTerrainSnapshotV0":

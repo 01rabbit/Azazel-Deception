@@ -54,6 +54,16 @@ expired is refused by Fabric's own
 re-deciding: a stale `active` observation is how a time-boxed environment
 silently becomes an unbounded one.
 
+*Binding a terrain to an effect.* Since `v0.9.0rc5` (Fabric#51) a terrain can
+name the effect it was presented for (`source_effect_ref` + `trace_id`), which
+is the only binding an effect with no decision has. AZ-06's default mode is a
+shadow run, and until then its terrain could not be chained to its effect at
+all. `project_presented_terrain(..., source_effect=...)` makes that binding and
+refuses the ones that would be untrue: another trace, a decision that is not
+the effect's, or a decision-less effect presented as live. Binding is not
+accepting -- it widens nothing about what AZ-06 will materialize, and
+`accept_defensive_effect_ref` still declines a shadow run.
+
 `OutcomeObservationEnvelope` remains unproduced here. It correlates
 `outcome_contracts` records across a window, which is a different job from
 observing one materialization, and AZ-06 has no window to speak for.
@@ -64,6 +74,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from azazel_fabric.effect_contracts import (
@@ -74,6 +85,7 @@ from azazel_fabric.effect_contracts import (
     PresentedTerrainRef,
     RefKind,
     assert_effect_chain_consistent,
+    assert_no_secret_material,
     assert_observation_within_effect_window,
     is_authoritative_decision_reference,
     parse_ref,
@@ -82,6 +94,7 @@ from azazel_fabric.effect_contracts import (
 from azazel_deception.runtime.presented_terrain import PresentedTerrainSnapshotV0
 
 __all__ = [
+    "MAPPED_INTO_FABRIC",
     "MATERIALIZABLE_EFFECT_CLASSES",
     "NOT_CARRIED_INTO_FABRIC",
     "EffectProjectionRefused",
@@ -144,19 +157,10 @@ _AUTHORITY_BY_LIFECYCLE: dict[str, AuthorityClass] = {
 #: cannot be left unclassified and a Fabric field arriving under one of these
 #: names turns the list red instead of leaving the value dropped.
 #:
-#: Three of these are worth naming out loud rather than merely listing:
-#:
-#: `trace_id`
-#:     `effect_contracts` correlates by trace everywhere else --
-#:     `DefensiveEffectRef`, `EffectObservation` and `OutcomeObservationEnvelope`
-#:     all carry one and `assert_effect_chain_consistent` compares them --
-#:     but `PresentedTerrainRef` has no trace slot. A presented terrain is
-#:     therefore correlatable only through `activation_decision_ref`.
-#:
-#: `synthetic_identity_refs`, `synthetic_credential_refs`
-#:     Named in Fabric#15's own candidate field list ("synthetic
-#:     artifact/identity/credential refs"), absent from the shipped model,
-#:     which kept `synthetic_artifact_refs` alone.
+#: `trace_id`, `synthetic_identity_refs` and `synthetic_credential_refs` used
+#: to be listed here: `PresentedTerrainRef` had no slot for them until
+#: `v0.9.0rc5` (Fabric#51). The guard above turned red when the pin moved,
+#: which was its purpose, and they now live in `MAPPED_INTO_FABRIC`.
 NOT_CARRIED_INTO_FABRIC = frozenset(
     {
         "ended_at",
@@ -175,11 +179,48 @@ NOT_CARRIED_INTO_FABRIC = frozenset(
         "producer_node",
         "reset_ref",
         "runtime_node_id",
-        "synthetic_credential_refs",
-        "synthetic_identity_refs",
-        "trace_id",
     }
 )
+
+#: Local snapshot field -> the `PresentedTerrainRef` slot it reaches.
+#:
+#: Pinned literally for the same reason as `NOT_CARRIED_INTO_FABRIC`, and
+#: checked against both models by `tests/test_effect_contracts_producer.py`.
+#: The two together must classify every local field exactly once.
+#:
+#: The three `v0.9.0rc5` additions are carried unchanged and typed-checked
+#: rather than typed here: `synthetic_identity_refs` must already be
+#: `identity:` references and `synthetic_credential_refs` `credential:` ones,
+#: and a value that is not is refused. Prefixing it would mint a well-formed
+#: reference to a record nobody wrote.
+MAPPED_INTO_FABRIC: Mapping[str, str] = MappingProxyType(
+    {
+        "schema_version": "schema_version",
+        "presentation_id": "presentation_id",
+        "producer_product": "producer_product",
+        "producer_decision_ref": "activation_decision_ref",
+        "trace_id": "trace_id",
+        "lifecycle_state": "lifecycle_state_ref",
+        "active_surface_refs": "active_surface_refs",
+        "synthetic_artifact_refs": "synthetic_artifact_refs",
+        "synthetic_identity_refs": "synthetic_identity_refs",
+        "synthetic_credential_refs": "synthetic_credential_refs",
+        "isolation_assertion_refs": "isolation_assertion_ref",
+        "started_at": "created_at",
+        "expires_at": "expires_at",
+        "evidence_refs": "evidence_refs",
+        "authority_class": "authority_class",
+    }
+)
+
+#: The only lifecycle a terrain bound to an effect nobody decided may carry.
+#:
+#: An allowlist, not a list of the states that say an environment ran.
+#: `active`, `terminated` and `reset` say so outright; `failed` says a run was
+#: attempted, and a failed live run recorded as a shadow run would erase the
+#: attempt. `stale` is AZ-06 saying it could not verify a runtime, which is the
+#: one local state compatible with "nothing was materialized".
+_SHADOW_BINDABLE_LIFECYCLES = frozenset({"stale"})
 
 
 @dataclass(frozen=True)
@@ -233,6 +274,50 @@ def fabric_lifecycle_state_ref(local_id: str, lifecycle_state: str) -> str:
     return f"lifecycle:{match.group('body')}.{lifecycle_state}"
 
 
+def _require_opaque(value: object, *, field: str) -> None:
+    """Refuse a value carrying whitespace or a control character.
+
+    Applied to **every** reference the projector emits -- typed or untyped,
+    from the snapshot, from the caller or from a bound effect -- by
+    `_require_emitted_refs_opaque`. Checked here rather than left to Fabric,
+    because the pinned grammar does not check it: `OPAQUE_REF_PATTERN` ends in `$` and is applied with
+    `.match`, so `credential:x\n` parses as a typed reference
+    (Azazel-Fabric#65). AZ-06 does not rely on that. A reference is opaque
+    because it has no structure a reader could act on, and a trailing newline
+    is structure -- a value that ends a line in a log or a header.
+    """
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(ch.isspace() or not ch.isprintable() for ch in value)
+    ):
+        raise EffectProjectionRefused(
+            f"{field} value {value!r} contains whitespace or a control character; "
+            "a reference AZ-06 publishes is opaque, and AZ-06 will not strip it "
+            "to make it fit"
+        )
+
+
+def _refuse_secret_material(values: tuple[str, ...], *, field: str) -> None:
+    """Refuse a value that carries recognizable secret material.
+
+    Fabric's record runs the same check and would raise too. It is called here
+    first so the refusal is AZ-06's, named in AZ-06's terms, and so that no
+    path exists on which the projector hands the material to a constructor at
+    all. A credential that reached a contract would be a real credential
+    wherever the contract went.
+    """
+
+    try:
+        assert_no_secret_material(values, field=field)
+    except ValueError as exc:
+        raise EffectProjectionRefused(
+            f"{field} carries secret material; AZ-06 publishes a reference to a "
+            f"synthetic credential, never the credential ({exc})"
+        ) from None
+
+
 def _require_projectable_refs(
     values: tuple[str, ...], kind: RefKind, *, field: str
 ) -> None:
@@ -243,9 +328,14 @@ def _require_projectable_refs(
     to `surface:http-8080` is a well-formed reference to a surface that does
     not exist. Refusing tells the truth; rewriting produces a record that
     validates and misleads.
+
+    The same holds for typing. An untyped `finance-clerk` in
+    `synthetic_identity_refs` is not given an `identity:` prefix: the result
+    would be a well-formed reference to an identity record nobody wrote.
     """
 
     for value in values:
+        _require_opaque(value, field=field)
         parsed, _ = parse_ref(value)
         if parsed is not kind:
             raise EffectProjectionRefused(
@@ -261,6 +351,7 @@ def project_presented_terrain(
     presentation_version: int,
     expires_at: str | None = None,
     isolation_result_ref: str | None = None,
+    source_effect: Any | None = None,
 ) -> ProjectedPresentedTerrain:
     """Render `snapshot` as a `PresentedTerrainRef`, or refuse and say why.
 
@@ -268,6 +359,12 @@ def project_presented_terrain(
     AZ-06 holds neither. They must come from something real -- a declared
     package bound, a caller-maintained revision -- and never from this module,
     which has no basis for either.
+
+    `source_effect` is the `DefensiveEffectRef` this terrain was presented for,
+    when there is one. Without it the terrain binds through its activation
+    decision, as it always has. With it the terrain also names the effect,
+    and that is the only binding an effect with no decision has -- a
+    `planned_shadow` effect, AZ-06's default mode. See `_effect_binding`.
     """
 
     if not isinstance(snapshot, PresentedTerrainSnapshotV0):
@@ -315,17 +412,52 @@ def project_presented_terrain(
         RefKind.ARTIFACT,
         field="synthetic_artifact_refs",
     )
+    _require_projectable_refs(
+        snapshot.synthetic_identity_refs,
+        RefKind.IDENTITY,
+        field="synthetic_identity_refs",
+    )
+    _require_projectable_refs(
+        snapshot.synthetic_credential_refs,
+        RefKind.CREDENTIAL,
+        field="synthetic_credential_refs",
+    )
+
+    activation_decision_ref, source_effect_ref, authority = _effect_binding(
+        snapshot, source_effect, authority
+    )
+
+    emitted: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("activation_decision_ref", _present(activation_decision_ref)),
+        ("source_effect_ref", _present(source_effect_ref)),
+        ("trace_id", (snapshot.trace_id,)),
+        ("active_surface_refs", snapshot.active_surface_refs),
+        ("synthetic_artifact_refs", snapshot.synthetic_artifact_refs),
+        ("synthetic_identity_refs", snapshot.synthetic_identity_refs),
+        ("synthetic_credential_refs", snapshot.synthetic_credential_refs),
+        ("isolation_assertion_ref", (assertions[0],)),
+        ("isolation_result_ref", _present(isolation_result_ref)),
+        ("evidence_refs", snapshot.evidence_refs),
+    )
+    for field_name, values in emitted:
+        for value in values:
+            _require_opaque(value, field=field_name)
+        _refuse_secret_material(values, field=field_name)
 
     ref = PresentedTerrainRef(
         presentation_id=fabric_presentation_id(snapshot.presentation_id),
         presentation_version=presentation_version,
         producer_product="azazel-deception",
-        activation_decision_ref=snapshot.producer_decision_ref,
+        activation_decision_ref=activation_decision_ref,
+        source_effect_ref=source_effect_ref,
+        trace_id=snapshot.trace_id,
         lifecycle_state_ref=fabric_lifecycle_state_ref(
             snapshot.presentation_id, snapshot.lifecycle_state
         ),
         active_surface_refs=snapshot.active_surface_refs,
         synthetic_artifact_refs=snapshot.synthetic_artifact_refs,
+        synthetic_identity_refs=snapshot.synthetic_identity_refs,
+        synthetic_credential_refs=snapshot.synthetic_credential_refs,
         isolation_assertion_ref=assertions[0],
         isolation_result_ref=isolation_result_ref,
         created_at=created_at,
@@ -334,6 +466,104 @@ def project_presented_terrain(
         authority_class=authority,
     )
     return ProjectedPresentedTerrain(ref=ref, not_carried=NOT_CARRIED_INTO_FABRIC)
+
+
+def _present(value: str | None) -> tuple[str, ...]:
+    return () if value is None else (value,)
+
+
+def _effect_binding(
+    snapshot: PresentedTerrainSnapshotV0,
+    source_effect: Any | None,
+    authority: AuthorityClass,
+) -> tuple[str | None, str | None, AuthorityClass]:
+    """How the terrain names what put it there: `(decision, effect, authority)`.
+
+    *No effect given.* The terrain names AZ-06's recorded decision, as before
+    `v0.9.0rc5`. Nothing changes for a caller that does not ask.
+
+    *An effect that names a decision.* It must be the decision AZ-06 recorded.
+    The terrain then names both, so the chain check compares the effect too.
+
+    *An effect that names none.* Only `planned_shadow`, the mode AZ-06 runs in
+    by default. The terrain omits the decision -- whatever it named would not
+    be the decision that activated it, because there was none -- and binds by
+    effect and trace. Its authority is `planned_shadow`, not the lifecycle's.
+    Only a `stale` presentation without active surfaces may be bound this
+    way (`_SHADOW_BINDABLE_LIFECYCLES`): anything else says AZ-06 ran, or
+    tried to run, an environment, and recording that as a shadow run would be
+    the record of AZ-06 materializing one -- or would erase a failed attempt.
+
+    In every case the trace must be the effect's. A terrain bound to an effect
+    of another incident is the cross-trace collision typed references exist to
+    stop, so it is refused here rather than left for a consumer's chain check.
+
+    Each refusal states what was wrong. They are all `EffectRefRejected` --
+    the effect is well-formed and AZ-06 declines to tie this terrain to it --
+    except a non-effect, which is not a fact AZ-06 can bind to at all.
+    """
+
+    if source_effect is None:
+        return snapshot.producer_decision_ref, None, authority
+
+    if not isinstance(source_effect, DefensiveEffectRef):
+        raise EffectProjectionRefused(
+            "source_effect must be a validated DefensiveEffectRef; a terrain "
+            "cannot be bound to a value whose shape is unknown"
+        )
+    effect = source_effect
+    # Before any comparison: a reference with a trailing newline must not be
+    # emitted, and must not be what two records are found to agree on either.
+    _require_opaque(effect.effect_id, field="source_effect.effect_id")
+    _require_opaque(effect.trace_id, field="source_effect.trace_id")
+    if effect.decision_ref is not None:
+        _require_opaque(effect.decision_ref, field="source_effect.decision_ref")
+    if effect.trace_id != snapshot.trace_id:
+        raise EffectRefRejected(
+            f"effect {effect.effect_id} belongs to a different trace than this "
+            "presentation; binding them would chain two unrelated incidents"
+        )
+    if effect.effect_class not in MATERIALIZABLE_EFFECT_CLASSES:
+        raise EffectRefRejected(
+            f"effect {effect.effect_id} is {effect.effect_class.value!r}; "
+            "Presented Terrain has no meaning behind it"
+        )
+    if effect.producer_product == "azazel-deception":
+        raise EffectRefRejected(
+            "AZ-06 will not bind a terrain to an effect it produced itself"
+        )
+
+    if effect.decision_ref is not None:
+        if effect.decision_ref != snapshot.producer_decision_ref:
+            raise EffectRefRejected(
+                f"effect {effect.effect_id} names a different decision than the "
+                "one this presentation records"
+            )
+        return snapshot.producer_decision_ref, effect.effect_id, authority
+
+    if effect.authority_class is not AuthorityClass.PLANNED_SHADOW:
+        raise EffectRefRejected(
+            f"effect {effect.effect_id} names no decision and claims "
+            f"{effect.authority_class.value!r}; a decision-less terrain is "
+            "bound only to a shadow run"
+        )
+    if snapshot.active_surface_refs:
+        # The builder never produces this (surfaces are kept only when the
+        # runtime was verified active), but the snapshot model does not forbid
+        # it. A shadow terrain presenting live surfaces is a materialization.
+        raise EffectRefRejected(
+            f"effect {effect.effect_id} is a shadow run and this presentation "
+            "carries active surfaces; that would record AZ-06 presenting a "
+            "surface for an environment nobody approved"
+        )
+    if snapshot.lifecycle_state not in _SHADOW_BINDABLE_LIFECYCLES:
+        raise EffectRefRejected(
+            f"effect {effect.effect_id} is a shadow run and this presentation is "
+            f"{snapshot.lifecycle_state!r}; only a 'stale' presentation can be a "
+            "shadow run, and anything else would record AZ-06 having run, or "
+            "tried to run, an environment nobody approved"
+        )
+    return None, effect.effect_id, AuthorityClass.PLANNED_SHADOW
 
 
 def accept_defensive_effect_ref(payload: Mapping[str, Any]) -> Any:
