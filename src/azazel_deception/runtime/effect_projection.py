@@ -213,10 +213,14 @@ MAPPED_INTO_FABRIC: Mapping[str, str] = MappingProxyType(
     }
 )
 
-#: Lifecycle states that say AZ-06 had an environment running. A terrain bound
-#: to an effect nobody decided may not be in one: that would be the record of
-#: AZ-06 materializing a shadow run, which is what it declines to do.
-_MATERIALIZED_LIFECYCLES = frozenset({"active", "terminated", "reset"})
+#: The only lifecycle a terrain bound to an effect nobody decided may carry.
+#:
+#: An allowlist, not a list of the states that say an environment ran.
+#: `active`, `terminated` and `reset` say so outright; `failed` says a run was
+#: attempted, and a failed live run recorded as a shadow run would erase the
+#: attempt. `stale` is AZ-06 saying it could not verify a runtime, which is the
+#: one local state compatible with "nothing was materialized".
+_SHADOW_BINDABLE_LIFECYCLES = frozenset({"stale"})
 
 
 @dataclass(frozen=True)
@@ -273,8 +277,10 @@ def fabric_lifecycle_state_ref(local_id: str, lifecycle_state: str) -> str:
 def _require_opaque(value: object, *, field: str) -> None:
     """Refuse a value carrying whitespace or a control character.
 
-    Checked here rather than left to Fabric, because the pinned grammar does
-    not check it: `OPAQUE_REF_PATTERN` ends in `$` and is applied with
+    Applied to **every** reference the projector emits -- typed or untyped,
+    from the snapshot, from the caller or from a bound effect -- by
+    `_require_emitted_refs_opaque`. Checked here rather than left to Fabric,
+    because the pinned grammar does not check it: `OPAQUE_REF_PATTERN` ends in `$` and is applied with
     `.match`, so `credential:x\n` parses as a typed reference
     (Azazel-Fabric#65). AZ-06 does not rely on that. A reference is opaque
     because it has no structure a reader could act on, and a trailing newline
@@ -416,18 +422,27 @@ def project_presented_terrain(
         RefKind.CREDENTIAL,
         field="synthetic_credential_refs",
     )
-    for field_name, values in (
-        ("active_surface_refs", snapshot.active_surface_refs),
-        ("synthetic_artifact_refs", snapshot.synthetic_artifact_refs),
-        ("synthetic_identity_refs", snapshot.synthetic_identity_refs),
-        ("synthetic_credential_refs", snapshot.synthetic_credential_refs),
-    ):
-        _refuse_secret_material(values, field=field_name)
-    _require_opaque(snapshot.trace_id, field="trace_id")
 
     activation_decision_ref, source_effect_ref, authority = _effect_binding(
         snapshot, source_effect, authority
     )
+
+    emitted: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("activation_decision_ref", _present(activation_decision_ref)),
+        ("source_effect_ref", _present(source_effect_ref)),
+        ("trace_id", (snapshot.trace_id,)),
+        ("active_surface_refs", snapshot.active_surface_refs),
+        ("synthetic_artifact_refs", snapshot.synthetic_artifact_refs),
+        ("synthetic_identity_refs", snapshot.synthetic_identity_refs),
+        ("synthetic_credential_refs", snapshot.synthetic_credential_refs),
+        ("isolation_assertion_ref", (assertions[0],)),
+        ("isolation_result_ref", _present(isolation_result_ref)),
+        ("evidence_refs", snapshot.evidence_refs),
+    )
+    for field_name, values in emitted:
+        for value in values:
+            _require_opaque(value, field=field_name)
+        _refuse_secret_material(values, field=field_name)
 
     ref = PresentedTerrainRef(
         presentation_id=fabric_presentation_id(snapshot.presentation_id),
@@ -453,6 +468,10 @@ def project_presented_terrain(
     return ProjectedPresentedTerrain(ref=ref, not_carried=NOT_CARRIED_INTO_FABRIC)
 
 
+def _present(value: str | None) -> tuple[str, ...]:
+    return () if value is None else (value,)
+
+
 def _effect_binding(
     snapshot: PresentedTerrainSnapshotV0,
     source_effect: Any | None,
@@ -469,9 +488,11 @@ def _effect_binding(
     *An effect that names none.* Only `planned_shadow`, the mode AZ-06 runs in
     by default. The terrain omits the decision -- whatever it named would not
     be the decision that activated it, because there was none -- and binds by
-    effect and trace. Its authority is `planned_shadow`, not the lifecycle's,
-    and a lifecycle that says AZ-06 ran an environment is refused: that would
-    be the record of AZ-06 materializing a shadow run.
+    effect and trace. Its authority is `planned_shadow`, not the lifecycle's.
+    Only a `stale` presentation without active surfaces may be bound this
+    way (`_SHADOW_BINDABLE_LIFECYCLES`): anything else says AZ-06 ran, or
+    tried to run, an environment, and recording that as a shadow run would be
+    the record of AZ-06 materializing one -- or would erase a failed attempt.
 
     In every case the trace must be the effect's. A terrain bound to an effect
     of another incident is the cross-trace collision typed references exist to
@@ -491,6 +512,12 @@ def _effect_binding(
             "cannot be bound to a value whose shape is unknown"
         )
     effect = source_effect
+    # Before any comparison: a reference with a trailing newline must not be
+    # emitted, and must not be what two records are found to agree on either.
+    _require_opaque(effect.effect_id, field="source_effect.effect_id")
+    _require_opaque(effect.trace_id, field="source_effect.trace_id")
+    if effect.decision_ref is not None:
+        _require_opaque(effect.decision_ref, field="source_effect.decision_ref")
     if effect.trace_id != snapshot.trace_id:
         raise EffectRefRejected(
             f"effect {effect.effect_id} belongs to a different trace than this "
@@ -520,11 +547,21 @@ def _effect_binding(
             f"{effect.authority_class.value!r}; a decision-less terrain is "
             "bound only to a shadow run"
         )
-    if snapshot.lifecycle_state in _MATERIALIZED_LIFECYCLES:
+    if snapshot.active_surface_refs:
+        # The builder never produces this (surfaces are kept only when the
+        # runtime was verified active), but the snapshot model does not forbid
+        # it. A shadow terrain presenting live surfaces is a materialization.
+        raise EffectRefRejected(
+            f"effect {effect.effect_id} is a shadow run and this presentation "
+            "carries active surfaces; that would record AZ-06 presenting a "
+            "surface for an environment nobody approved"
+        )
+    if snapshot.lifecycle_state not in _SHADOW_BINDABLE_LIFECYCLES:
         raise EffectRefRejected(
             f"effect {effect.effect_id} is a shadow run and this presentation is "
-            f"{snapshot.lifecycle_state!r}; that would record AZ-06 materializing "
-            "an environment nobody approved"
+            f"{snapshot.lifecycle_state!r}; only a 'stale' presentation can be a "
+            "shadow run, and anything else would record AZ-06 having run, or "
+            "tried to run, an environment nobody approved"
         )
     return None, effect.effect_id, AuthorityClass.PLANNED_SHADOW
 

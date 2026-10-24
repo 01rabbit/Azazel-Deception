@@ -488,6 +488,48 @@ def test_a_shadow_effect_cannot_be_bound_to_a_live_presentation():
         _project(source_effect=_shadow_effect())
 
 
+def test_a_failed_run_cannot_be_recorded_as_a_shadow_run():
+    """`failed` says a run was attempted. Binding it to a shadow effect would
+    turn a failed live attempt into a rehearsal."""
+
+    failed = _snapshot(
+        runtime_state={
+            "environment_id": "env-1",
+            "state": "failed",
+            "package_id": "municipal-linux-v1",
+            "package_digest": "sha256:abc123",
+            "node_id": "deception-node-1",
+            "activated_at": "2026-08-26T00:00:00+00:00",
+        },
+        active_surface_refs=(),
+    )
+    assert failed.lifecycle_state == "failed"
+
+    with pytest.raises(EffectRefRejected, match="only a 'stale' presentation"):
+        project_presented_terrain(
+            failed, presentation_version=0, source_effect=_shadow_effect()
+        )
+
+
+def test_a_stale_snapshot_with_active_surfaces_cannot_be_a_shadow_run():
+    """The builder never produces this, but the snapshot model accepts it.
+
+    So it is reachable, and a `planned_shadow` terrain presenting live surfaces
+    would be a materialization under a shadow label.
+    """
+
+    stale = _snapshot(**_SHADOW_SNAPSHOT)
+    with_surfaces = PresentedTerrainSnapshotV0(
+        **{**stale.model_dump(), "active_surface_refs": (CONFORMING_SURFACE,)}
+    )
+    assert with_surfaces.lifecycle_state == "stale"
+
+    with pytest.raises(EffectRefRejected, match="carries active surfaces"):
+        project_presented_terrain(
+            with_surfaces, presentation_version=0, source_effect=_shadow_effect()
+        )
+
+
 def test_only_a_shadow_run_binds_without_a_decision():
     for authority, extra in (
         (AuthorityClass.STALE_OR_UNKNOWN, {}),
@@ -575,24 +617,33 @@ def test_credential_material_never_reaches_the_contract(material):
         PresentedTerrainRef(**{**payload, "synthetic_credential_refs": (material,)})
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("synthetic_credential_refs", ("credential:smb-1\n",)),
-        ("synthetic_identity_refs", ("identity:clerk-1\n",)),
-        ("synthetic_artifact_refs", ("artifact:memo-1\n",)),
-        ("active_surface_refs", ("surface:http:8080\n",)),
-        ("trace_id", "trace-1\n"),
-    ],
-)
-def test_a_trailing_newline_reference_is_never_emitted(field, value):
+#: Every reference `PresentedTerrainRef` receives from the projector, by where
+#: it comes from: the snapshot, the caller, or the effect a terrain is bound to.
+_NEWLINE_CASES = [
+    ("snapshot", "synthetic_credential_refs", ("credential:smb-1\n",)),
+    ("snapshot", "synthetic_identity_refs", ("identity:clerk-1\n",)),
+    ("snapshot", "synthetic_artifact_refs", ("artifact:memo-1\n",)),
+    ("snapshot", "active_surface_refs", ("surface:http:8080\n",)),
+    ("snapshot", "trace_id", "trace-1\n"),
+    ("snapshot", "producer_decision_ref", "decision-1\n"),
+    ("snapshot", "evidence_refs", ("runtime-inspect-1\n",)),
+    ("snapshot", "isolation_assertion_refs", ("isolation-net-none\n",)),
+    ("caller", "isolation_result_ref", "evidence:isolation-result-1\n"),
+    ("effect", "effect_id", "effect:e1\n"),
+    ("effect", "decision_ref", "decision-1\n"),
+    ("effect", "trace_id", "trace-1\n"),
+]
+
+
+@pytest.mark.parametrize("source,field,value", _NEWLINE_CASES)
+def test_a_trailing_newline_reference_is_never_emitted(source, field, value):
     """Azazel-Fabric#65: the pinned grammar accepts `kind:body\\n`.
 
     `OPAQUE_REF_PATTERN` ends in `$` and is applied with `.match`, and `$`
-    matches before one trailing newline. AZ-06 does not rely on that. The
-    local snapshot rule already refuses the value, so the snapshot is
-    copied without validation to reach the projector with it: the projector's
-    own refusal is what this checks, independent of the record upstream.
+    matches before one trailing newline. AZ-06 does not rely on that. Where a
+    local model already refuses the value, the record is copied without
+    validation to reach the projector with it anyway: the projector's own
+    refusal is what this checks, independent of every layer upstream.
     """
 
     kind, _ = parse_ref("credential:smb-1\n")
@@ -601,9 +652,57 @@ def test_a_trailing_newline_reference_is_never_emitted(field, value):
         "drop this precondition and the note that explains it"
     )
 
-    snapshot = _snapshot().model_copy(update={field: value})
+    snapshot = _snapshot()
+    kwargs = {}
+    if source == "snapshot":
+        snapshot = snapshot.model_copy(update={field: value})
+    elif source == "caller":
+        kwargs[field] = value
+    else:
+        kwargs["source_effect"] = _decided_effect().model_copy(update={field: value})
+
     with pytest.raises(EffectProjectionRefused, match="whitespace or a control"):
-        project_presented_terrain(snapshot, presentation_version=0)
+        project_presented_terrain(snapshot, presentation_version=0, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "field", ["trace_id", "decision_ref", "execution_ref", "mechanism_observation_ref"]
+)
+def test_a_producer_reference_with_a_newline_is_refused_where_it_enters(field):
+    """Length was the only check, so `decision-1\\n` from a producer went through
+    the ordinary builder and out as the terrain's activation decision."""
+
+    with pytest.raises(ValidationError, match="whitespace or control"):
+        _producer(**{field: "ref-1\n"})
+    with pytest.raises(ValidationError, match="whitespace or control"):
+        _producer(evidence_refs=["edge-nft-1\n"])
+
+
+def test_a_snapshot_reference_with_a_newline_is_refused_where_it_enters():
+    payload = _snapshot().model_dump()
+    for field in ("trace_id", "producer_decision_ref", "producer_execution_ref"):
+        with pytest.raises(ValidationError, match="whitespace or control"):
+            PresentedTerrainSnapshotV0(**{**payload, field: "ref-1\n"})
+
+
+@pytest.mark.parametrize(
+    "overrides,kwargs,field",
+    [
+        ({"evidence_refs": ("evidence:ssh-ed25519:AAAAC3Nza",)}, {}, "evidence_refs"),
+        (
+            {"isolation_assertion_refs": ("isolation:-----BEGIN-PRIVATE",)},
+            {},
+            "isolation_assertion_ref",
+        ),
+        ({}, {"isolation_result_ref": "evidence:ssh-rsa:AAAAB3Nza"}, "isolation_result_ref"),
+    ],
+)
+def test_secret_material_is_refused_in_every_reference_field(overrides, kwargs, field):
+    """Not only the credential slot: evidence and isolation references are
+    published too, and secret material in them travels just as far."""
+
+    with pytest.raises(EffectProjectionRefused, match=f"{field} carries secret material"):
+        _project(snapshot_overrides=overrides, **kwargs)
 
 
 # --------------------------------------------------------------------------

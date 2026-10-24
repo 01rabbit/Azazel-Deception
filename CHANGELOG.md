@@ -52,13 +52,17 @@ are not proven (see `docs/live-gate-checklist.md`).
   `NOT_CARRIED_INTO_FABRIC` for the new public `MAPPED_INTO_FABRIC`. Identity
   and credential references are carried unchanged only when already typed
   `identity:` / `credential:`; anything else is refused with the value named,
-  never prefixed. Secret material is refused by the projector before a Fabric
-  record exists, and so is any reference carrying whitespace or a control
-  character, because the pinned grammar accepts a trailing newline
-  (Azazel-Fabric#65). `project_presented_terrain(..., source_effect=...)` binds
-  a `planned_shadow` terrain to its effect by effect and trace — AZ-06's
-  default mode, which could not be chained before — and refuses another
-  trace, another decision, or a shadow run recorded as live. `rc5` is
+  never prefixed. In every reference the projector emits — from the snapshot,
+  the caller or a bound effect — secret material is refused before a Fabric
+  record exists, and so is whitespace or a control character, because the
+  pinned grammar accepts a trailing newline (Azazel-Fabric#65).
+  `ProducerRedirectionEvidence` and `PresentedTerrainSnapshotV0` now refuse
+  whitespace and control characters in their trace, decision, execution and
+  mechanism references too, which had only a length check.
+  `project_presented_terrain(..., source_effect=...)` binds a `planned_shadow`
+  terrain to its effect by effect and trace — AZ-06's default mode, which
+  could not be chained before — and refuses another trace, another decision,
+  and any presentation other than a `stale` one without active surfaces. `rc5` is
   additive; the signed digest was reproduced from the tag and verified before
   the move. See `docs/fabric-pin.md`.
 - **Azazel-Fabric pin `v0.8.0` → `v0.9.0rc2`** — the first tag carrying

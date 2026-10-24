@@ -105,17 +105,26 @@ What AZ-06 adopts:
   rewritten no longer points at what it pointed at (the same reason as
   `surface:http-8080` above). Recognizable secret material is refused by the
   projector before any Fabric record is constructed, in addition to Fabric's
-  own check.
+  own check -- in every reference field it emits, not only the credential
+  slot: evidence and isolation references are published too.
 - **Binding a shadow run.** AZ-06's default mode is `planned_shadow`, and under
   `rc4` its terrain could not be chained to its effect at all.
   `project_presented_terrain(..., source_effect=...)` now binds one through
-  `source_effect_ref` + `trace_id`, names no decision, claims `planned_shadow`,
-  and refuses a lifecycle that says an environment ran. Binding is not
+  `source_effect_ref` + `trace_id`, names no decision and claims
+  `planned_shadow`. Only a `stale` presentation without active surfaces may be
+  bound this way: `active`, `terminated` and `reset` say an environment ran,
+  `failed` says a run was attempted, and live surfaces under a shadow label
+  would be a materialization. Binding is not
   accepting: `accept_defensive_effect_ref` still declines to materialize a
   shadow run.
 - **Trailing newlines.** The pinned grammar accepts `kind:body\n` as a typed
   reference (Azazel-Fabric#65). AZ-06 does not rely on that: the projector
-  refuses whitespace and control characters in every reference it emits.
+  refuses whitespace and control characters in every reference it emits --
+  typed or untyped, from the snapshot (including the activation decision,
+  evidence and isolation references), from the caller (`isolation_result_ref`)
+  and from a bound effect (`effect_id`, `decision_ref`, `trace_id`). The
+  producer evidence and the snapshot also refuse them where they enter, since
+  their trace and decision references were checked only for length.
 
 The pin was verified before the move, against the same four criteria as
 `rc4`:
