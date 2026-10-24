@@ -665,6 +665,38 @@ def test_a_trailing_newline_reference_is_never_emitted(source, field, value):
         project_presented_terrain(snapshot, presentation_version=0, **kwargs)
 
 
+_EMPTY_CASES = [
+    ("snapshot", "trace_id"),
+    ("snapshot", "producer_decision_ref"),
+    ("caller", "isolation_result_ref"),
+    ("effect", "effect_id"),
+    ("effect", "trace_id"),
+    ("effect", "decision_ref"),
+]
+
+
+@pytest.mark.parametrize("source,field", _EMPTY_CASES)
+def test_an_empty_reference_is_refused_as_empty(source, field):
+    """An empty reference is still refused, and the refusal says why.
+
+    It carries no whitespace or control character, so a message saying it
+    did would send whoever reads it looking for the wrong fault.
+    """
+
+    snapshot = _snapshot()
+    kwargs = {}
+    if source == "snapshot":
+        snapshot = snapshot.model_copy(update={field: ""})
+    elif source == "caller":
+        kwargs[field] = ""
+    else:
+        kwargs["source_effect"] = _decided_effect().model_copy(update={field: ""})
+
+    with pytest.raises(EffectProjectionRefused, match="value is empty") as exc:
+        project_presented_terrain(snapshot, presentation_version=0, **kwargs)
+    assert "whitespace" not in str(exc.value)
+
+
 @pytest.mark.parametrize(
     "field", ["trace_id", "decision_ref", "execution_ref", "mechanism_observation_ref"]
 )
