@@ -278,15 +278,16 @@ def _require_opaque(value: object, *, field: str) -> None:
     """Refuse an empty value, or one carrying whitespace or a control character.
 
     Applied to **every** reference the projector emits -- typed or untyped,
-    from the snapshot, from the caller or from a bound effect -- by
-    `_require_emitted_refs_opaque`. Checked here rather than left to Fabric,
-    because the pinned grammar does not check it: `OPAQUE_REF_PATTERN` ends
-    in `$` and is applied with `.match`, so `credential:x\n` parses as a
-    typed reference (Azazel-Fabric#65). AZ-06 does not rely on that. A
-    reference is opaque because it has no structure a reader could act on,
-    and a trailing newline is structure -- a value that ends a line in a log
-    or a header. An empty value is refused too, with its own message: it
-    names nothing, and saying it carries whitespace would misreport why.
+    from the snapshot, from the caller or from a bound effect -- by the
+    loop over emitted references in `project_presented_terrain`. Checked
+    here rather than left to Fabric, because the pinned grammar does not
+    check it: `OPAQUE_REF_PATTERN` ends in `$` and is applied with `.match`,
+    so `credential:x\n` parses as a typed reference (Azazel-Fabric#65).
+    AZ-06 does not rely on that. A reference is opaque because it has no
+    structure a reader could act on, and a trailing newline is structure --
+    a value that ends a line in a log or a header. An empty value is refused
+    too, with its own message: it names nothing, and saying it carries
+    whitespace would misreport why.
     """
 
     if isinstance(value, str) and not value:
