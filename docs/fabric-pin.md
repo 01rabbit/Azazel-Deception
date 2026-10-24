@@ -30,7 +30,7 @@ drift structurally impossible rather than merely noticed.
 
 AZ-06 pins the Azazel-Fabric release tag:
 
-`v0.9.0rc4`
+`v0.9.0rc5`
 
 ### Why a release candidate
 
@@ -59,7 +59,7 @@ ref, and `runtime/effect_projection.py` had to refuse them rather than flatten
 them. Rewriting a producer's identifier is not an option: `surface:http-8080`
 is a well-formed reference to a surface that does not exist.
 
-`v0.9.0rc4` is the pin now. It narrows `EffectObservation` to the two
+`v0.9.0rc4` narrows `EffectObservation` to the two
 authority classes an observation can have observed — `observed_fact` and
 `active_materialized` (Azazel-Fabric#52) — and refuses the four others that
 `rc3` accepted. **It is the first non-additive candidate in the series**, and
@@ -84,6 +84,57 @@ That refusal was recorded as a test designed to fail when the pin moved, and it
 did. The stand-in values are gone from
 `tests/test_effect_contracts_producer.py`; AZ-06's own references now go into
 `PresentedTerrainRef` unchanged.
+
+`v0.9.0rc5` is the pin now (Azazel-Deception#50). It is **additive** over
+`rc4` (Azazel-Fabric#51): `PresentedTerrainRef` gains `trace_id`,
+`synthetic_identity_refs`, `synthetic_credential_refs` and `source_effect_ref`,
+`activation_decision_ref` becomes optional, and a terrain may bind to its
+effect by effect and trace instead of by decision. Every `rc4` payload stays
+valid and chains as before. The pin was held at `rc4` until AZ-06 adopted the
+change, because moving it without carrying the values would gain nothing; the
+move and the adoption land together.
+
+What AZ-06 adopts:
+
+- **`trace_id`** is carried. Once a terrain carries it, the chain check
+  compares it, so a terrain cannot be chained to an effect of another
+  incident.
+- **`synthetic_identity_refs` / `synthetic_credential_refs`** are carried
+  unchanged when they are already typed `identity:` / `credential:` references,
+  and refused otherwise. They are never given a prefix: an identifier that was
+  rewritten no longer points at what it pointed at (the same reason as
+  `surface:http-8080` above). Recognizable secret material is refused by the
+  projector before any Fabric record is constructed, in addition to Fabric's
+  own check.
+- **Binding a shadow run.** AZ-06's default mode is `planned_shadow`, and under
+  `rc4` its terrain could not be chained to its effect at all.
+  `project_presented_terrain(..., source_effect=...)` now binds one through
+  `source_effect_ref` + `trace_id`, names no decision, claims `planned_shadow`,
+  and refuses a lifecycle that says an environment ran. Binding is not
+  accepting: `accept_defensive_effect_ref` still declines to materialize a
+  shadow run.
+- **Trailing newlines.** The pinned grammar accepts `kind:body\n` as a typed
+  reference (Azazel-Fabric#65). AZ-06 does not rely on that: the projector
+  refuses whitespace and control characters in every reference it emits.
+
+The pin was verified before the move, against the same four criteria as
+`rc4`:
+
+- **Signature.** The `v0.9.0rc5` tag's own checkout (`450d950`) reproduces
+  `release/v0.9.0rc5.digest.json`
+  (`sha256:c183eb92dfd706cc2bcf69bad37641588f440c488b0264564c7a8e044647cc9d`)
+  with `tools/rc_digest.py --check`, and `tools/rc_signature.py --check`
+  verifies its signature under `release-owner` — both with the tag's own key
+  file and with the key file as it stood at `v0.9.0rc4`, so the trust root is
+  not one the new tag supplied. As with `rc4`, what is signed is the digest;
+  the tag is unsigned. The signing-key incident (Azazel-Fabric#61) suspends new
+  signatures by that key; `rc5` was signed and published before it.
+- **Version.** The installed distribution equals the pin
+  (`tests/test_fabric_pin_documentation.py` checks it on every run).
+- **Compatibility.** This repository's full suite is green against it.
+- **Degradation.** `azazel-fabric` is a required dependency. There is no
+  degraded path in which AZ-06 runs without Fabric, so there is none to
+  verify.
 
 ## What this release provides
 
@@ -126,11 +177,11 @@ told a consumer that AZ-06 time-boxed a presentation it did not.
 
 Every projection also returns the list of local fields that reach no Fabric
 slot, because a lossy projection that reports nothing is how a consumer comes
-to read the Fabric record as the whole of what AZ-06 observed. Three entries
-are worth naming here: `trace_id` (the family correlates by trace everywhere
-else, but this record has no trace slot), and `synthetic_identity_refs` /
-`synthetic_credential_refs`, which Fabric#15's own field list names and the
-shipped model does not carry.
+to read the Fabric record as the whole of what AZ-06 observed. Until
+`v0.9.0rc5` three entries were worth naming there: `trace_id`, and
+`synthetic_identity_refs` / `synthetic_credential_refs`, which Fabric#15's own
+field list named and the shipped model did not carry. `rc5` gave all three a
+slot, and they are now carried (see above).
 
 AZ-06 is also this family's **first consumer**. `runtime/effect_projection.py`
 accepts a `DefensiveEffectRef` produced by Azazel-Edge and emits an
@@ -230,4 +281,5 @@ updates `pyproject.toml`, this document, and the CHANGELOG together.
 | `77ad0cd` (2026-08-22) | `v0.6.0` → `v0.8.0` |
 | Deception#28 AC-7 (2026-09-20) | `v0.8.0` → `v0.9.0rc2` |
 | `effect_contracts` producer (2026-09-20) | `v0.9.0rc2` → `v0.9.0rc3` — the reference grammar; see above |
-| `EffectObservation` authority narrowing (2026-09-20) | `v0.9.0rc3` → `v0.9.0rc4` (current) — AZ-06 emits this record, so it moves with the contract it emits under; see above |
+| `EffectObservation` authority narrowing (2026-09-20) | `v0.9.0rc3` → `v0.9.0rc4` — AZ-06 emits this record, so it moves with the contract it emits under; see above |
+| Deception#50 (2026-10-24) | `v0.9.0rc4` → `v0.9.0rc5` (current) — carries `trace_id` and the synthetic identity / credential references, and binds a shadow run to its effect; see above |

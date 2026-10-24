@@ -46,6 +46,21 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Changed
 
+- **Azazel-Fabric pin `v0.9.0rc4` → `v0.9.0rc5`; `trace_id` and the synthetic
+  identity / credential references reach `PresentedTerrainRef`**
+  (Deception#50, Azazel-Fabric#51) — the three fields leave
+  `NOT_CARRIED_INTO_FABRIC` for the new public `MAPPED_INTO_FABRIC`. Identity
+  and credential references are carried unchanged only when already typed
+  `identity:` / `credential:`; anything else is refused with the value named,
+  never prefixed. Secret material is refused by the projector before a Fabric
+  record exists, and so is any reference carrying whitespace or a control
+  character, because the pinned grammar accepts a trailing newline
+  (Azazel-Fabric#65). `project_presented_terrain(..., source_effect=...)` binds
+  a `planned_shadow` terrain to its effect by effect and trace — AZ-06's
+  default mode, which could not be chained before — and refuses another
+  trace, another decision, or a shadow run recorded as live. `rc5` is
+  additive; the signed digest was reproduced from the tag and verified before
+  the move. See `docs/fabric-pin.md`.
 - **Azazel-Fabric pin `v0.8.0` → `v0.9.0rc2`** — the first tag carrying
   `azazel_fabric.schema.defensive_state`, imported as a validator for AC-7. A
   recorded, bounded deviation from the stable-tag policy; revisited when
