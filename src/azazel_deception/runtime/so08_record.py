@@ -86,15 +86,18 @@ EDGE_WITHDRAWAL_PATH_DECLARED = False
 #: blacklist: ``eth0``, ``ETH0``, ``wwan0``, ``cni0`` … cannot match it, and
 #: ordinary site names such as ``lobby-3`` or ``enterprise-site-1`` can.
 COMMISSIONED_IDENTITY_PATTERN = re.compile(
-    r"^az06-commission:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
+    r"az06-commission:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
     r"/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
-    r"/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+    r"/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?",
+    re.ASCII,
 )
 
 #: How a HIL record names the Edge authority path and, per withdrawal sample,
 #: the Edge enforcement event that ended exposure.
-EDGE_REF_PATTERN = re.compile(r"^01rabbit/Azazel-Edge(?:#[0-9]+|@[0-9a-f]{40}:[^\s]+)$")
-EDGE_ENFORCEMENT_EVENT_PATTERN = re.compile(r"^edge-enforcement:[A-Za-z0-9._:/-]{1,200}$")
+#: All patterns here are applied with ``fullmatch`` and compiled ``re.ASCII``:
+#: ``$`` with ``match`` would accept a trailing newline.
+EDGE_REF_PATTERN = re.compile(r"01rabbit/Azazel-Edge(?:#[0-9]+|@[0-9a-f]{40}:[A-Za-z0-9._/-]+)", re.ASCII)
+EDGE_ENFORCEMENT_EVENT_PATTERN = re.compile(r"edge-enforcement:[A-Za-z0-9._:/-]{1,200}", re.ASCII)
 
 
 def edge_withdrawal_gap() -> dict[str, Any]:
@@ -113,11 +116,11 @@ def edge_withdrawal_gap() -> dict[str, Any]:
     }
 
 
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_COMMIT = re.compile(r"[0-9a-f]{40}", re.ASCII)
 
 
 def is_commissioned_identity(value: object) -> bool:
-    return isinstance(value, str) and bool(COMMISSIONED_IDENTITY_PATTERN.match(value))
+    return isinstance(value, str) and bool(COMMISSIONED_IDENTITY_PATTERN.fullmatch(value))
 
 
 def _is_int(value: object) -> bool:
@@ -261,7 +264,7 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
     else:
         if owner.get("repository") != OWNING_REPOSITORY:
             problems.append(f"owner.repository must be {OWNING_REPOSITORY!r}")
-        if not isinstance(owner.get("commit"), str) or not _COMMIT.match(owner["commit"]):
+        if not isinstance(owner.get("commit"), str) or not _COMMIT.fullmatch(owner["commit"]):
             problems.append("owner.commit must be a full 40-hex commit")
 
     config = record.get("product_configuration")
@@ -373,10 +376,10 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
             if isinstance(edge, Mapping):
                 if edge.get("repository") != "01rabbit/Azazel-Edge":
                     problems.append("field_exercise.edge.repository must be 01rabbit/Azazel-Edge")
-                if not isinstance(edge.get("commit"), str) or not _COMMIT.match(edge["commit"]):
+                if not isinstance(edge.get("commit"), str) or not _COMMIT.fullmatch(edge["commit"]):
                     problems.append("field_exercise.edge.commit must be a full 40-hex commit")
                 ref = edge.get("authority_path_ref")
-                if not isinstance(ref, str) or not EDGE_REF_PATTERN.match(ref):
+                if not isinstance(ref, str) or not EDGE_REF_PATTERN.fullmatch(ref):
                     problems.append(
                         "field_exercise.edge.authority_path_ref must name an Azazel-Edge "
                         "issue (01rabbit/Azazel-Edge#N) or file at a commit"
@@ -386,7 +389,7 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
         for sample in part_samples["withdrawal"]:
             if isinstance(sample, Mapping) and _is_int(sample.get("end_monotonic_ns")):
                 ref = sample.get("edge_enforcement_event_ref")
-                if not isinstance(ref, str) or not EDGE_ENFORCEMENT_EVENT_PATTERN.match(ref):
+                if not isinstance(ref, str) or not EDGE_ENFORCEMENT_EVENT_PATTERN.fullmatch(ref):
                     problems.append(
                         f"withdrawal sample {sample.get('sample_id')!r} has an end time but no "
                         "edge_enforcement_event_ref"

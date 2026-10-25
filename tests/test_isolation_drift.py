@@ -482,6 +482,8 @@ def test_the_edge_gap_must_name_edge_412(virtual_record):
         "az06-commission:site-a/node", "az06-commission:Site-A/node/seg",
         "az06-commission:site-a/node/seg/extra", "az06-commission:-a/node/seg",
         rec.VIRTUAL_LAB_NO_IDENTITY, 7,
+        IDENTITY + "\n", IDENTITY + "\r\n", " " + IDENTITY,
+        "az06-commission:sit\u00e9-a/node/seg",  # non-ASCII
     ],
 )
 def test_a_hil_record_refuses_anything_but_a_commissioned_identity(virtual_record, identity):
@@ -520,6 +522,11 @@ def test_a_hil_record_backend_is_a_positive_list(virtual_record, backend):
         (lambda e: e.__setitem__("repository", "someone/Azazel-Edge"), "edge.repository"),
         (lambda e: e.__setitem__("authority_path_ref", "anything"), "authority_path_ref"),
         (lambda e: e.__setitem__("authority_path_ref", "Azazel-Edge#412"), "authority_path_ref"),
+        (lambda e: e.__setitem__("authority_path_ref", "01rabbit/Azazel-Edge#412\n"),
+         "authority_path_ref"),
+        (lambda e: e.__setitem__("authority_path_ref", "01rabbit/Azazel-Edge#\u0664"),
+         "authority_path_ref"),
+        (lambda e: e.__setitem__("commit", "1" * 40 + "\n"), "edge.commit"),
     ],
 )
 def test_a_hil_record_edge_fields_are_validated(virtual_record, mutate, needle):
@@ -541,6 +548,22 @@ def test_the_record_format_doc_names_the_kinds_and_the_validator():
     assert "azazel_deception.runtime.so08_record.validate_record" in text
     assert rec.FIELD_EXERCISE_DIR in text
     assert "No green CI run satisfies the SO-08 HIL gate" in text
+
+
+@pytest.mark.parametrize(
+    "ref", ["edge-enforcement:evt-1\n", "edge-enforcement:evt-1\r\n", "edge-enforcement:",
+            "edge-enforcement:\u00e9vt"],
+)
+def test_edge_enforcement_event_ref_must_match_exactly(virtual_record, monkeypatch, ref):
+    monkeypatch.setattr(rec, "EDGE_WITHDRAWAL_PATH_DECLARED", True)
+    record = _measure_withdrawal(_hil_record(virtual_record))
+    record["parts"][1]["samples"][0]["edge_enforcement_event_ref"] = ref
+    assert any("edge_enforcement_event_ref" in p for p in rec.validate_record(record))
+
+
+def test_owner_commit_with_a_trailing_newline_is_refused(virtual_record):
+    virtual_record["owner"]["commit"] = virtual_record["owner"]["commit"] + "\n"
+    assert any("owner.commit" in p for p in rec.validate_record(virtual_record))
 
 
 def test_drift_stage_literal_is_pinned():

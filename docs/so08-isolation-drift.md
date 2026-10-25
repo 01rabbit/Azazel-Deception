@@ -148,11 +148,19 @@ differences:
 | `product_configuration.commissioned_identity` | `virtual-lab, no commissioned identity` | the **commissioned composite identifier** `az06-commission:<site>/<node>/<segment>` (each part lower-case alphanumerics and hyphens; `so08_record.COMMISSIONED_IDENTITY_PATTERN`). A positive shape, so no kernel interface name (`eth0`, `ETH0`, `wwan0`, `cni0` …) can satisfy it |
 | `product_configuration.lab_backend` | `linux-netns` | one of `so08_record.HIL_BACKENDS` (`field-segment`) |
 | `product_configuration.drift_kinds` | `DRIFT_KINDS` | same |
-| `field_exercise` | absent | required: `performed_at_utc`, `operator`, `site_ref`, `protected_network_ref`, `edge: {repository: "01rabbit/Azazel-Edge", commit <40-hex>, authority_path_ref: "01rabbit/Azazel-Edge#N" or "01rabbit/Azazel-Edge@<40-hex>:<path>"}` |
+| `field_exercise` | absent | required: `performed_at_utc`, `operator`, `site_ref`, `protected_network_ref`, `edge: {repository: "01rabbit/Azazel-Edge", commit <40-hex>, authority_path_ref: "01rabbit/Azazel-Edge#N" or "01rabbit/Azazel-Edge@<40-hex>:<path>" (ASCII, exact match)}` |
 | `executed` | bool | bool |
 | `parts[name=detection]` | per-sample `start_monotonic_ns`, `end_monotonic_ns`, `drift_kind`, evidence ref; `pass_rule.bound_ms: 2000.0`; `pass_rule.evaluated` | same |
 | `parts[name=withdrawal]` | per-sample start, `end_monotonic_ns: null`; gap `SO08-NO-EDGE-WITHDRAWAL-PATH` (mandatory, blocking) | per-sample start, probe-stops-reaching end, and `edge_enforcement_event_ref` (`edge-enforcement:<id>`) naming the Edge enforcement event; `pass_rule.bound_ms: 5000.0`; the same gap, mandatory and blocking, until Edge#412 |
 | `verdict` | `fail` or `not_measurable` — never `pass` | `pass` / `fail` / `not_measurable`, recomputed from the samples |
+
+**The identity check is shape-only.** `COMMISSIONED_IDENTITY_PATTERN` proves
+the field has the commissioned-identifier *form*; it cannot prove the
+identifier was commissioned, and a segment may still be spelled like an
+interface (`az06-commission:site-a/node-7/br0` is well-formed). A reviewer
+accepting a HIL record must check `commissioned_identity` against the
+committed commissioning record for that site and node; the validator does not
+and cannot do that for them.
 
 The validator recomputes every part's verdict from its samples and gaps (a gap
 with `blocks_verdict: true` forces `not_measurable`; every gap must carry a
