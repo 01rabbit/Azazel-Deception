@@ -114,6 +114,26 @@ class IsolationDriftObserver:
     later is recorded again. Its disappearance is *not* recorded: AZ-06 did
     not cause it, and a record of it would read as a withdrawal AZ-06 has no
     authority to perform.
+
+    **One observer per environment.** Event ids continue the environment's
+    existing isolation-drift sequence read from the chain at construction, so
+    a restarted observer never reuses an id. Two observers writing the same
+    environment at once are not supported.
+
+    **Restart re-records persistent drift, once.** The active set is not
+    persisted: an observer that starts while a drift is present records it
+    again. That is deliberate — a new observer cannot vouch that what it sees
+    is the same drift an earlier process saw, and a duplicate fact is safe
+    where a silently dropped one is not. Consumers deduplicate by
+    ``(drift_kind, finding)`` if they need to.
+
+    **Any environment state is accepted, including terminated or absent.**
+    SO-08 is "independent of runtime cleanup": a route that outlives the
+    decoy's termination is exactly the drift the row is about, so refusing to
+    record it after termination would hide the case that matters. The
+    environment's recorded state at observation time travels in
+    ``metadata.environment_state`` (``absent`` when there is none) so a reader
+    can tell the cases apart.
     """
 
     def __init__(
@@ -131,7 +151,7 @@ class IsolationDriftObserver:
         self.package_id = package_id
         self.node_id = node_id
         self._active: dict[str, frozenset[str]] = {kind: frozenset() for kind in DRIFT_KINDS}
-        self._seq = 0
+        self._seq = len(recorded_drift(state, environment_id))
 
     def active_findings(self) -> dict[str, frozenset[str]]:
         """The findings currently considered present, per kind (a copy)."""
@@ -153,9 +173,13 @@ class IsolationDriftObserver:
 
         findings = _require_snapshot(snapshot)
         recorded: list[EnvironmentEvent] = []
+        environment_state: str | None = None
         for kind in DRIFT_KINDS:
             current = findings[kind]
             for finding in sorted(current - self._active[kind]):
+                if environment_state is None:
+                    current_state = self.state.read(self.environment_id) or {}
+                    environment_state = str(current_state.get("state") or "absent")
                 self._seq += 1
                 event = EnvironmentEvent(
                     event_id=f"{self.environment_id}-isolation-drift-{self._seq:04d}",
@@ -171,6 +195,7 @@ class IsolationDriftObserver:
                         "policy_twin": DRIFT_KIND_POLICY_TWIN[kind],
                         "finding": finding,
                         "authority": "descriptive_only",
+                        "environment_state": environment_state,
                     },
                 )
                 self.state.append_evidence(self.environment_id, event.model_dump(mode="json"))

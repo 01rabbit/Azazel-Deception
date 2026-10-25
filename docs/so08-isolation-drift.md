@@ -33,6 +33,14 @@ withdrawal half **cannot be measured today**: every record carries gap
 `not_measurable`, and so is the overall verdict. Nothing in this repository
 stands in for Edge and withdraws a route.
 
+This is enforced in code, not left to the record: while
+`so08_record.EDGE_WITHDRAWAL_PATH_DECLARED` is `False`, the validator refuses
+any record — virtual-lab or HIL — whose withdrawal part lacks that gap, whose
+gap does not carry `blocks_verdict: true`, or whose gap does not reference
+Azazel-Edge#412. A blocking gap forces `not_measurable`, so **no SO-08 record
+can pass until a future, reviewed code change flips that constant** once Edge
+declares its path (`tests/test_isolation_drift.py::test_no_hil_record_can_pass_until_edge_declares_the_withdrawal_path`).
+
 ## Declared drift kinds
 
 Declared once, in `azazel_deception.runtime.isolation_drift.DRIFT_KINDS`. Each
@@ -48,6 +56,33 @@ is the runtime counterpart of an isolation invariant the static Compose policy
 The invariant is absolute — any finding of a declared kind is drift — because
 the policy tolerates zero of each. A sampler that does not report a kind is a
 refusal, never "no drift".
+
+## How drift appears in exported evidence
+
+`DockerComposeAdapter.export_evidence` (and anything else reading the raw
+chain) carries each drift as an `EnvironmentEvent` with
+`event_type: "failure"` and `metadata.stage: "isolation_drift"`, plus
+`drift_kind`, `policy_twin`, `finding`, `authority: "descriptive_only"` and
+`environment_state`. **An external reducer must not treat such a record as a
+lifecycle failure**: it does not mean activation, termination or reset failed,
+it does not change the environment's state, and AZ-06 does not move the
+environment to `failed` because of it. Filter on `metadata.stage` first.
+`export_observations` never returns it (it is not attacker interaction).
+
+The observer's own rules, as documented on `IsolationDriftObserver`:
+
+- **One observer per environment.** Event ids continue the environment's
+  isolation-drift sequence read from the chain at construction, so a restarted
+  observer never reuses an id.
+- **A restart re-records persistent drift once.** The active set is not
+  persisted; a new observer cannot vouch that a drift it sees is the one an
+  earlier process saw, and a duplicate fact is safe where a dropped one is
+  not. Deduplicate by `(drift_kind, finding)` if needed.
+- **Any environment state is accepted, including terminated or absent.** The
+  row is "independent of runtime cleanup": a route that outlives the decoy is
+  the case that matters. `metadata.environment_state` says which case it was.
+- A drift's disappearance is not recorded; it would read as a withdrawal AZ-06
+  has no authority to perform.
 
 ## Measurement definition
 
@@ -110,18 +145,23 @@ differences:
 | `class` | `virtual-lab-regression` | `hil-field-exercise` |
 | `gate` | `false` | `true` |
 | `owner` | `{repository: "01rabbit/Azazel-Deception", commit: <40-hex>, worktree_clean}` | same |
-| `product_configuration.commissioned_identity` | `virtual-lab, no commissioned identity` | the **commissioned composite identifier** of the configuration under test — never a kernel interface name (`eth0`, `br0`, `enp3s0` … are refused) |
-| `product_configuration.lab_backend` | `linux-netns` | anything but `linux-netns` |
+| `product_configuration.commissioned_identity` | `virtual-lab, no commissioned identity` | the **commissioned composite identifier** `az06-commission:<site>/<node>/<segment>` (each part lower-case alphanumerics and hyphens; `so08_record.COMMISSIONED_IDENTITY_PATTERN`). A positive shape, so no kernel interface name (`eth0`, `ETH0`, `wwan0`, `cni0` …) can satisfy it |
+| `product_configuration.lab_backend` | `linux-netns` | one of `so08_record.HIL_BACKENDS` (`field-segment`) |
 | `product_configuration.drift_kinds` | `DRIFT_KINDS` | same |
-| `field_exercise` | absent | required: `performed_at_utc`, `operator`, `site_ref`, `protected_network_ref`, `edge: {repository, commit <40-hex>, authority_path_ref}` |
+| `field_exercise` | absent | required: `performed_at_utc`, `operator`, `site_ref`, `protected_network_ref`, `edge: {repository: "01rabbit/Azazel-Edge", commit <40-hex>, authority_path_ref: "01rabbit/Azazel-Edge#N" or "01rabbit/Azazel-Edge@<40-hex>:<path>"}` |
 | `executed` | bool | bool |
 | `parts[name=detection]` | per-sample `start_monotonic_ns`, `end_monotonic_ns`, `drift_kind`, evidence ref; `pass_rule.bound_ms: 2000.0`; `pass_rule.evaluated` | same |
-| `parts[name=withdrawal]` | per-sample start, `end_monotonic_ns: null`; gap `SO08-NO-EDGE-WITHDRAWAL-PATH` | per-sample start and probe-stops-reaching end; `pass_rule.bound_ms: 5000.0` |
+| `parts[name=withdrawal]` | per-sample start, `end_monotonic_ns: null`; gap `SO08-NO-EDGE-WITHDRAWAL-PATH` (mandatory, blocking) | per-sample start, probe-stops-reaching end, and `edge_enforcement_event_ref` (`edge-enforcement:<id>`) naming the Edge enforcement event; `pass_rule.bound_ms: 5000.0`; the same gap, mandatory and blocking, until Edge#412 |
 | `verdict` | `fail` or `not_measurable` — never `pass` | `pass` / `fail` / `not_measurable`, recomputed from the samples |
 
 The validator recomputes every part's verdict from its samples and gaps (a gap
-with `blocks_verdict: true` forces `not_measurable`) and refuses a record whose
-stated verdict is better than its samples support. There is no `skip` verdict.
+with `blocks_verdict: true` forces `not_measurable`; every gap must carry a
+boolean `blocks_verdict`) and refuses a record whose stated verdict is better
+than its samples support. Both parts need 20 samples of every declared kind,
+with unique `sample_id`s (copies do not count) and the same injections in
+both; every finished detection sample names its evidence-chain record
+(`evidence_event_id`, `evidence_seq`); times are integers, never booleans.
+There is no `skip` verdict.
 
 A passing HIL record is evidence an operator may cite as the `evidence_ref` of
 a `LiveGateCertification` for `hil_host_restart_and_route_drift_injection`; it

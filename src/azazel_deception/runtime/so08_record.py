@@ -11,8 +11,15 @@ That is not a convention here, it is what :func:`validate_record` checks:
 * a ``virtual-lab-regression`` record must carry ``gate: false``, can never
   carry ``verdict: "pass"``, and must say it has no commissioned identity;
 * a ``hil-field-exercise`` record must name a commissioned composite
-  identifier that is neither the virtual-lab marker nor a kernel interface
-  name, and can only pass when *both* halves were measured on every sample.
+  identifier of the shape :data:`COMMISSIONED_IDENTITY_PATTERN` (a positive
+  shape, so no kernel interface name can satisfy it), and can only pass when
+  *both* halves were measured on every sample with an Edge enforcement event
+  named per sample;
+* **no record of either class can pass while Edge's withdrawal path is
+  undeclared.** :data:`EDGE_WITHDRAWAL_PATH_DECLARED` is ``False`` and, while it
+  is, the withdrawal gap naming Azazel-Edge#412 is mandatory and blocking on
+  every record. Lifting it is a code change in a future PR, never a record
+  field.
 
 The target values below are the §8 row's. They are stated here once and read
 by the harness, the validator and the tests; changing them is changing the
@@ -55,6 +62,9 @@ VIRTUAL_LAB_BACKEND = "linux-netns"
 
 VERDICTS = ("pass", "fail", "not_measurable")
 
+#: Backends a HIL record may come from. Positive list: anything else is refused.
+HIL_BACKENDS = ("field-segment",)
+
 #: Where committed HIL field-exercise records live.
 FIELD_EXERCISE_DIR = "docs/field-exercises/so08"
 
@@ -63,6 +73,28 @@ FIELD_EXERCISE_DIR = "docs/field-exercises/so08"
 #: authority to perform it and no stand-in performs it here.
 EDGE_WITHDRAWAL_GAP_ID = "SO08-NO-EDGE-WITHDRAWAL-PATH"
 EDGE_WITHDRAWAL_GAP_REF = "01rabbit/Azazel-Edge#412"
+
+#: Whether Azazel-Edge has declared the authoritative enforcement path the
+#: withdrawal half is measured through. ``False`` until Azazel-Edge#412 lands;
+#: while ``False`` the withdrawal gap is mandatory on every record, so no SO-08
+#: record can pass. Changing this is a reviewed code change, not a record field.
+EDGE_WITHDRAWAL_PATH_DECLARED = False
+
+#: The commissioned composite identifier a HIL record must carry:
+#: ``az06-commission:<site>/<node>/<segment>``, each part lower-case
+#: alphanumerics and hyphens. A positive shape rather than an interface-name
+#: blacklist: ``eth0``, ``ETH0``, ``wwan0``, ``cni0`` … cannot match it, and
+#: ordinary site names such as ``lobby-3`` or ``enterprise-site-1`` can.
+COMMISSIONED_IDENTITY_PATTERN = re.compile(
+    r"^az06-commission:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
+    r"/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
+    r"/[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+)
+
+#: How a HIL record names the Edge authority path and, per withdrawal sample,
+#: the Edge enforcement event that ended exposure.
+EDGE_REF_PATTERN = re.compile(r"^01rabbit/Azazel-Edge(?:#[0-9]+|@[0-9a-f]{40}:[^\s]+)$")
+EDGE_ENFORCEMENT_EVENT_PATTERN = re.compile(r"^edge-enforcement:[A-Za-z0-9._:/-]{1,200}$")
 
 
 def edge_withdrawal_gap() -> dict[str, Any]:
@@ -81,16 +113,16 @@ def edge_withdrawal_gap() -> dict[str, Any]:
     }
 
 
-# Kernel interface names: the thing a commissioned identity must not be.
-_INTERFACE_NAME = re.compile(
-    r"^(?:lo|eth|en[a-z]|wl|wlan|br|veth|docker|virbr|tap|tun|bond|vlan|wg|ib|usb|azs08-)"
-    r"[A-Za-z0-9._@-]*$"
-)
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
-def looks_like_interface_name(value: str) -> bool:
-    return bool(_INTERFACE_NAME.match(value.strip()))
+def is_commissioned_identity(value: object) -> bool:
+    return isinstance(value, str) and bool(COMMISSIONED_IDENTITY_PATTERN.match(value))
+
+
+def _is_int(value: object) -> bool:
+    # bool is an int subclass; True must never stand in for a timestamp.
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def evaluate_samples(
@@ -102,10 +134,10 @@ def evaluate_samples(
 ) -> dict[str, Any]:
     """Evaluate the every-sample rule over ``samples``.
 
-    A sample with no end time is *unfinished*. Unfinished samples are counted
-    as violations: a drift that was never recorded was not detected within the
-    bound. ``holds`` is ``False`` for an empty sample set, never vacuously
-    true.
+    A sample with no integer end time is *unfinished*. Unfinished samples are
+    counted as violations: a drift that was never recorded was not detected
+    within the bound. ``holds`` is ``False`` for an empty sample set, never
+    vacuously true. Booleans are not accepted as times.
     """
 
     elapsed: list[float] = []
@@ -114,7 +146,7 @@ def evaluate_samples(
     for sample in samples:
         start = sample.get(start_key)
         end = sample.get(end_key)
-        if not isinstance(start, int) or not isinstance(end, int):
+        if not _is_int(start) or not _is_int(end):
             unfinished += 1
             violations += 1
             continue
@@ -154,6 +186,52 @@ def _part(record: Mapping[str, Any], name: str) -> Mapping[str, Any] | None:
     return None
 
 
+def _check_samples(name: str, samples: list[Any], executed: bool) -> list[str]:
+    """Shape rules every sample list obeys: known kinds, unique ids, 20 per kind."""
+
+    problems: list[str] = []
+    ids: list[Any] = []
+    counts = {kind: 0 for kind in DRIFT_KINDS}
+    for sample in samples:
+        if not isinstance(sample, Mapping):
+            problems.append(f"{name}: a sample is not a mapping")
+            continue
+        kind = sample.get("drift_kind")
+        if kind not in counts:
+            problems.append(f"{name}: sample {sample.get('sample_id')!r} has undeclared "
+                            f"drift_kind {kind!r}")
+        else:
+            counts[kind] += 1
+        ids.append(sample.get("sample_id"))
+    if any(not isinstance(i, str) or not i for i in ids):
+        problems.append(f"{name}: every sample needs a non-empty sample_id")
+    if len(set(map(str, ids))) != len(ids):
+        problems.append(f"{name}: duplicate sample_id — copies do not count as samples")
+    if executed:
+        for kind, count in counts.items():
+            if count < SAMPLES_PER_KIND:
+                problems.append(
+                    f"{name} has {count} samples of {kind}; {SAMPLES_PER_KIND} required"
+                )
+    return problems
+
+
+def _edge_gap_problems(part: Mapping[str, Any]) -> list[str]:
+    gaps = [g for g in part.get("gaps") or [] if isinstance(g, Mapping)]
+    edge = [g for g in gaps if g.get("id") == EDGE_WITHDRAWAL_GAP_ID]
+    if not edge:
+        return [
+            f"withdrawal part must carry gap {EDGE_WITHDRAWAL_GAP_ID} while Edge's "
+            "withdrawal path is undeclared (Azazel-Edge#412)"
+        ]
+    problems = []
+    if edge[0].get("blocks_verdict") is not True:
+        problems.append(f"gap {EDGE_WITHDRAWAL_GAP_ID} must carry blocks_verdict: true")
+    if EDGE_WITHDRAWAL_GAP_REF not in (edge[0].get("refs") or []):
+        problems.append(f"gap {EDGE_WITHDRAWAL_GAP_ID} must reference {EDGE_WITHDRAWAL_GAP_REF}")
+    return problems
+
+
 def validate_record(record: Mapping[str, Any]) -> list[str]:
     """Return every reason ``record`` is not a well-formed SO-08 record.
 
@@ -188,6 +266,7 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
 
     config = record.get("product_configuration")
     identity = config.get("commissioned_identity") if isinstance(config, Mapping) else None
+    backend = config.get("lab_backend") if isinstance(config, Mapping) else None
     if not isinstance(config, Mapping):
         problems.append("product_configuration is missing")
     elif list(config.get("drift_kinds") or []) != list(DRIFT_KINDS):
@@ -203,8 +282,12 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
         problems.append("parts must include 'detection' and 'withdrawal'")
         return problems
 
+    if not EDGE_WITHDRAWAL_PATH_DECLARED:
+        problems.extend(_edge_gap_problems(withdrawal))
+
     # Recompute each part's verdict from its samples.
     derived: dict[str, str] = {}
+    part_samples: dict[str, list[Any]] = {}
     for part, bound, name in (
         (detection, DETECTION_BOUND_MS, "detection"),
         (withdrawal, WITHDRAWAL_BOUND_MS, "withdrawal"),
@@ -216,29 +299,42 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
         if not isinstance(samples, list):
             problems.append(f"{name}.samples must be a list")
             samples = []
+        part_samples[name] = samples
+        problems.extend(_check_samples(name, samples, executed is True))
         gaps = part.get("gaps") or []
-        blocking = [g for g in gaps if isinstance(g, Mapping) and g.get("blocks_verdict")]
-        if executed is not True:
-            expected = "not_measurable"
-        elif blocking:
+        for gap in gaps:
+            if not isinstance(gap, Mapping) or not isinstance(gap.get("blocks_verdict"), bool):
+                problems.append(f"{name}: every gap needs a boolean blocks_verdict")
+        blocking = [g for g in gaps if isinstance(g, Mapping) and g.get("blocks_verdict") is True]
+        evaluated = evaluate_samples(
+            [s for s in samples if isinstance(s, Mapping)], bound_ms=bound
+        )
+        if executed is not True or blocking:
             expected = "not_measurable"
         else:
-            evaluated = evaluate_samples(samples, bound_ms=bound)
             expected = "pass" if evaluated["holds"] else "fail"
-            if isinstance(rule, Mapping) and rule.get("evaluated") != evaluated:
-                problems.append(f"{name}.pass_rule.evaluated does not match its samples")
+        if executed is True and isinstance(rule, Mapping) and rule.get("evaluated") != evaluated:
+            problems.append(f"{name}.pass_rule.evaluated does not match its samples")
         derived[name] = expected
         if part.get("verdict") != expected:
             problems.append(
                 f"{name}.verdict is {part.get('verdict')!r}; its samples and gaps give {expected!r}"
             )
 
-    if executed is True:
-        samples = detection.get("samples") or []
-        for kind in DRIFT_KINDS:
-            count = sum(1 for s in samples if isinstance(s, Mapping) and s.get("drift_kind") == kind)
-            if count < SAMPLES_PER_KIND:
-                problems.append(f"detection has {count} samples of {kind}; {SAMPLES_PER_KIND} required")
+    # A finished detection sample must point at the evidence-chain record it read.
+    for sample in part_samples["detection"]:
+        if isinstance(sample, Mapping) and _is_int(sample.get("end_monotonic_ns")):
+            if not sample.get("evidence_event_id") or not _is_int(sample.get("evidence_seq")):
+                problems.append(
+                    f"detection sample {sample.get('sample_id')!r} has an end time but no "
+                    "evidence_event_id / evidence_seq"
+                )
+    detection_ids = {s.get("sample_id") for s in part_samples["detection"] if isinstance(s, Mapping)}
+    withdrawal_ids = {
+        s.get("sample_id") for s in part_samples["withdrawal"] if isinstance(s, Mapping)
+    }
+    if detection_ids != withdrawal_ids:
+        problems.append("detection and withdrawal must cover the same injections (sample_id)")
 
     expected_overall = overall_verdict(list(derived.values()))
     if verdict != expected_overall:
@@ -253,24 +349,18 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
             problems.append(
                 f"virtual-lab commissioned_identity must be {VIRTUAL_LAB_NO_IDENTITY!r}"
             )
-        if isinstance(config, Mapping) and config.get("lab_backend") != VIRTUAL_LAB_BACKEND:
+        if backend != VIRTUAL_LAB_BACKEND:
             problems.append(f"virtual-lab lab_backend must be {VIRTUAL_LAB_BACKEND!r}")
-        gap_ids = {g.get("id") for g in withdrawal.get("gaps") or [] if isinstance(g, Mapping)}
-        if EDGE_WITHDRAWAL_GAP_ID not in gap_ids:
-            problems.append(f"virtual-lab withdrawal part must carry gap {EDGE_WITHDRAWAL_GAP_ID}")
     elif record_class == CLASS_HIL:
         if record.get("gate") is not True:
             problems.append("a hil-field-exercise record carries gate: true")
-        if (
-            not isinstance(identity, str)
-            or not identity.strip()
-            or identity == VIRTUAL_LAB_NO_IDENTITY
-            or looks_like_interface_name(identity)
-        ):
+        if not is_commissioned_identity(identity):
             problems.append(
-                "hil commissioned_identity must be a commissioned composite identifier, "
-                "not empty, not the virtual-lab marker and not a kernel interface name"
+                "hil commissioned_identity must be a commissioned composite identifier "
+                "az06-commission:<site>/<node>/<segment> (never a kernel interface name)"
             )
+        if backend not in HIL_BACKENDS:
+            problems.append(f"hil lab_backend must be one of {HIL_BACKENDS}")
         exercise = record.get("field_exercise")
         required = ("performed_at_utc", "operator", "site_ref", "protected_network_ref", "edge")
         if not isinstance(exercise, Mapping):
@@ -281,11 +371,25 @@ def validate_record(record: Mapping[str, Any]) -> list[str]:
                     problems.append(f"field_exercise.{key} is required")
             edge = exercise.get("edge")
             if isinstance(edge, Mapping):
+                if edge.get("repository") != "01rabbit/Azazel-Edge":
+                    problems.append("field_exercise.edge.repository must be 01rabbit/Azazel-Edge")
                 if not isinstance(edge.get("commit"), str) or not _COMMIT.match(edge["commit"]):
                     problems.append("field_exercise.edge.commit must be a full 40-hex commit")
-                if not edge.get("authority_path_ref"):
-                    problems.append("field_exercise.edge.authority_path_ref is required")
-        if isinstance(config, Mapping) and config.get("lab_backend") == VIRTUAL_LAB_BACKEND:
-            problems.append("a hil record cannot come from the virtual-lab backend")
+                ref = edge.get("authority_path_ref")
+                if not isinstance(ref, str) or not EDGE_REF_PATTERN.match(ref):
+                    problems.append(
+                        "field_exercise.edge.authority_path_ref must name an Azazel-Edge "
+                        "issue (01rabbit/Azazel-Edge#N) or file at a commit"
+                    )
+        # Every measured withdrawal must name the Edge enforcement event that
+        # ended the exposure: the withdrawal half is Edge's, end-to-end.
+        for sample in part_samples["withdrawal"]:
+            if isinstance(sample, Mapping) and _is_int(sample.get("end_monotonic_ns")):
+                ref = sample.get("edge_enforcement_event_ref")
+                if not isinstance(ref, str) or not EDGE_ENFORCEMENT_EVENT_PATTERN.match(ref):
+                    problems.append(
+                        f"withdrawal sample {sample.get('sample_id')!r} has an end time but no "
+                        "edge_enforcement_event_ref"
+                    )
 
     return problems

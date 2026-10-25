@@ -340,6 +340,18 @@ def test_a_full_virtual_lab_record_validates(virtual_record):
         (lambda r: r["parts"][0]["samples"][0].__setitem__("end_monotonic_ns", None),
          "does not match"),
         (lambda r: r["owner"].__setitem__("commit", "unavailable"), "40-hex"),
+        (lambda r: r["parts"][0].__setitem__("verdict", "fail"), "detection.verdict is"),
+        (lambda r: r["parts"][1].__setitem__("verdict", "pass"), "withdrawal.verdict is"),
+        (lambda r: r["parts"][0]["samples"][0].__setitem__("drift_kind", "dns"),
+         "undeclared drift_kind"),
+        (lambda r: r["parts"][0]["samples"].__setitem__(
+            19, copy.deepcopy(r["parts"][0]["samples"][0])), "duplicate sample_id"),
+        (lambda r: r["parts"][0]["samples"][0].__setitem__("evidence_event_id", None),
+         "evidence_event_id"),
+        (lambda r: r["parts"][0]["samples"][0].__setitem__("evidence_seq", True),
+         "evidence_event_id"),
+        (lambda r: r["parts"][1]["samples"].pop(), "withdrawal has 19"),
+        (lambda r: r["parts"][1]["gaps"].append({"id": "x"}), "boolean blocks_verdict"),
     ],
 )
 def test_validator_refuses_a_record_claiming_more_than_it_shows(
@@ -351,19 +363,36 @@ def test_validator_refuses_a_record_claiming_more_than_it_shows(
     assert any(needle in p for p in problems), problems
 
 
+IDENTITY = "az06-commission:site-a/az06-node-07/seg-decoy-2"
+
+
 def _hil_record(record: dict[str, Any]) -> dict[str, Any]:
     record["class"] = rec.CLASS_HIL
     record["gate"] = True
     record["product_configuration"]["lab_backend"] = "field-segment"
-    record["product_configuration"]["commissioned_identity"] = "site-a/az06-node-07/seg-decoy-2"
+    record["product_configuration"]["commissioned_identity"] = IDENTITY
     record["field_exercise"] = {
         "performed_at_utc": "2026-11-01T00:00:00Z",
         "operator": "operator-ref",
         "site_ref": "site-a",
         "protected_network_ref": "seg-prod-1",
         "edge": {"repository": "01rabbit/Azazel-Edge", "commit": "1" * 40,
-                 "authority_path_ref": "Azazel-Edge#412"},
+                 "authority_path_ref": "01rabbit/Azazel-Edge#412"},
     }
+    return record
+
+
+def _measure_withdrawal(record: dict[str, Any], *, with_refs: bool = True) -> dict[str, Any]:
+    """Pretend every withdrawal was measured at 1 s, as a future HIL run would."""
+
+    part = record["parts"][1]
+    for sample in part["samples"]:
+        sample["end_monotonic_ns"] = sample["start_monotonic_ns"] + 1_000_000_000
+        if with_refs:
+            sample["edge_enforcement_event_ref"] = f"edge-enforcement:{sample['sample_id']}"
+    part["pass_rule"]["evaluated"] = rec.evaluate_samples(
+        part["samples"], bound_ms=rec.WITHDRAWAL_BOUND_MS
+    )
     return record
 
 
@@ -376,17 +405,127 @@ def test_a_hil_record_cannot_pass_while_withdrawal_is_unmeasured(virtual_record)
     assert any("parts give" in p for p in rec.validate_record(bad))
 
 
-@pytest.mark.parametrize("identity", ["", "eth0", "br0", "enp3s0", rec.VIRTUAL_LAB_NO_IDENTITY])
-def test_a_hil_record_needs_a_commissioned_identity(virtual_record, identity):
+def test_no_hil_record_can_pass_until_edge_declares_the_withdrawal_path(virtual_record):
+    """Even fully measured, with the gap dropped and pass claimed, it is refused.
+
+    The doc's "no HIL record can pass until Azazel-Edge#412" is this test.
+    """
+
+    assert rec.EDGE_WITHDRAWAL_PATH_DECLARED is False
+    pristine = copy.deepcopy(virtual_record)
+    record = _measure_withdrawal(_hil_record(virtual_record))
+    record["parts"][1]["gaps"] = []
+    record["parts"][1]["verdict"] = "pass"
+    record["verdict"] = "pass"
+    problems = rec.validate_record(record)
+    assert any(rec.EDGE_WITHDRAWAL_GAP_ID in p for p in problems), problems
+
+    # With the gap kept, the same measured record is not_measurable, not pass.
+    kept = _measure_withdrawal(_hil_record(pristine))
+    assert rec.validate_record(kept) == []
+    assert kept["verdict"] == "not_measurable"
+
+
+def test_the_reviewers_forged_hil_pass_is_refused(virtual_record):
+    record = _measure_withdrawal(_hil_record(virtual_record))
+    part = record["parts"][1]
+    part["samples"] = part["samples"][:1]
+    part["pass_rule"]["evaluated"] = rec.evaluate_samples(
+        part["samples"], bound_ms=rec.WITHDRAWAL_BOUND_MS
+    )
+    part["gaps"] = []
+    part["verdict"] = "pass"
+    record["verdict"] = "pass"
+    record["product_configuration"]["lab_backend"] = "netns2"
+    problems = rec.validate_record(record)
+    assert any(rec.EDGE_WITHDRAWAL_GAP_ID in p for p in problems), problems
+    assert any("withdrawal has 0 samples" in p or "withdrawal has 1 samples" in p
+               for p in problems), problems
+    assert any("lab_backend" in p for p in problems), problems
+    assert any("same injections" in p for p in problems), problems
+
+
+def test_once_edge_declares_the_path_a_measured_hil_record_needs_edge_event_refs(
+    virtual_record, monkeypatch
+):
+    """The future path: lifting the flag is a code change, and refs are still required."""
+
+    monkeypatch.setattr(rec, "EDGE_WITHDRAWAL_PATH_DECLARED", True)
+    record = _measure_withdrawal(_hil_record(virtual_record))
+    record["parts"][1]["gaps"] = []
+    record["parts"][1]["verdict"] = "pass"
+    record["verdict"] = "pass"
+    assert rec.validate_record(record) == []
+
+    no_refs = copy.deepcopy(record)
+    for sample in no_refs["parts"][1]["samples"]:
+        sample.pop("edge_enforcement_event_ref")
+    assert any("edge_enforcement_event_ref" in p for p in rec.validate_record(no_refs))
+
+
+@pytest.mark.parametrize("value", [False, "false", None])
+def test_the_edge_gap_must_block_the_verdict(virtual_record, value):
+    virtual_record["parts"][1]["gaps"][0]["blocks_verdict"] = value
+    assert any("blocks_verdict" in p for p in rec.validate_record(virtual_record))
+
+
+def test_the_edge_gap_must_name_edge_412(virtual_record):
+    virtual_record["parts"][1]["gaps"][0]["refs"] = ["somewhere-else"]
+    assert any(rec.EDGE_WITHDRAWAL_GAP_REF in p for p in rec.validate_record(virtual_record))
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "", "eth0", "ETH0", "br0", "enp3s0", "wwan0", "ppp0", "cni0", "dummy0", "vmbr0",
+        "tailscale0", "lobby-3", "site-a/az06-node-07/seg-decoy-2",
+        "az06-commission:site-a/node", "az06-commission:Site-A/node/seg",
+        "az06-commission:site-a/node/seg/extra", "az06-commission:-a/node/seg",
+        rec.VIRTUAL_LAB_NO_IDENTITY, 7,
+    ],
+)
+def test_a_hil_record_refuses_anything_but_a_commissioned_identity(virtual_record, identity):
     record = _hil_record(virtual_record)
     record["product_configuration"]["commissioned_identity"] = identity
     assert any("commissioned" in p for p in rec.validate_record(record))
 
 
-def test_a_hil_record_cannot_come_from_the_virtual_lab(virtual_record):
+@pytest.mark.parametrize(
+    "identity",
+    [
+        IDENTITY,
+        "az06-commission:lobby-3/node-1/seg-decoy",
+        "az06-commission:enterprise-site-1/eth0-closet/br0",  # names may contain such words
+        "az06-commission:a/b/c",
+    ],
+)
+def test_a_hil_record_accepts_a_commissioned_identity(virtual_record, identity):
     record = _hil_record(virtual_record)
-    record["product_configuration"]["lab_backend"] = rec.VIRTUAL_LAB_BACKEND
-    assert any("virtual-lab backend" in p for p in rec.validate_record(record))
+    record["product_configuration"]["commissioned_identity"] = identity
+    assert rec.validate_record(record) == []
+
+
+@pytest.mark.parametrize("backend", [rec.VIRTUAL_LAB_BACKEND, "netns2", "", None, "test-fake"])
+def test_a_hil_record_backend_is_a_positive_list(virtual_record, backend):
+    record = _hil_record(virtual_record)
+    record["product_configuration"]["lab_backend"] = backend
+    assert any("lab_backend" in p for p in rec.validate_record(record))
+
+
+@pytest.mark.parametrize(
+    "mutate, needle",
+    [
+        (lambda e: e.__setitem__("commit", "1" * 39), "edge.commit"),
+        (lambda e: e.__setitem__("commit", "G" * 40), "edge.commit"),
+        (lambda e: e.__setitem__("repository", "someone/Azazel-Edge"), "edge.repository"),
+        (lambda e: e.__setitem__("authority_path_ref", "anything"), "authority_path_ref"),
+        (lambda e: e.__setitem__("authority_path_ref", "Azazel-Edge#412"), "authority_path_ref"),
+    ],
+)
+def test_a_hil_record_edge_fields_are_validated(virtual_record, mutate, needle):
+    record = _hil_record(virtual_record)
+    mutate(record["field_exercise"]["edge"])
+    assert any(needle in p for p in rec.validate_record(record))
 
 
 def test_targets_are_the_section_8_values():
@@ -402,3 +541,137 @@ def test_the_record_format_doc_names_the_kinds_and_the_validator():
     assert "azazel_deception.runtime.so08_record.validate_record" in text
     assert rec.FIELD_EXERCISE_DIR in text
     assert "No green CI run satisfies the SO-08 HIL gate" in text
+
+
+def test_drift_stage_literal_is_pinned():
+    assert DRIFT_STAGE == "isolation_drift"
+
+
+def test_evaluate_samples_refuses_booleans_as_times():
+    result = rec.evaluate_samples(
+        [{"start_monotonic_ns": True, "end_monotonic_ns": True},
+         {"start_monotonic_ns": 0, "end_monotonic_ns": False}],
+        bound_ms=rec.DETECTION_BOUND_MS,
+    )
+    assert result["unfinished_samples"] == 2
+    assert result["holds"] is False
+
+
+# --- observer restart and environment state ------------------------------------
+
+
+def test_a_restarted_observer_never_reuses_an_event_id(tmp_path):
+    state, first = _observer(tmp_path)
+    snap = _empty()
+    snap["published_port"] = frozenset({"tcp:18080"})
+    first.observe(snap)
+
+    second = IsolationDriftObserver(
+        state, environment_id="env-1", package_id="pkg-1", node_id="node-1"
+    )
+    # Persistent drift is re-recorded once by a new observer (documented).
+    second.observe(snap)
+    ids = [r["event_id"] for r in recorded_drift(state, "env-1")]
+    assert len(ids) == 2 and len(set(ids)) == 2, ids
+    assert state.verify_evidence_chain("env-1") is True
+
+
+def test_drift_after_termination_is_recorded_with_the_environment_state(tmp_path):
+    """SO-08 is independent of runtime cleanup: drift outliving the decoy matters."""
+
+    state, observer = _observer(tmp_path)
+    snap = _empty()
+    snap["route_to_protected"] = frozenset({"eth0:10.0.2.0/24:via:10.0.1.1"})
+    observer.observe(snap)
+    state.write("env-1", {"environment_id": "env-1", "state": "terminated"})
+    observer.observe(_empty())
+    observer.observe(snap)
+    states = [r["metadata"]["environment_state"] for r in recorded_drift(state, "env-1")]
+    assert states == ["absent", "terminated"]
+
+
+# --- harness baseline abort --------------------------------------------------------
+
+
+def test_a_drifted_baseline_aborts_as_not_executed(harness, tmp_path):
+    lab = FakeLab()
+    lab.findings["published_port"] = frozenset({"tcp:80"})
+    record, status = harness.run_lab(lab, state_root=tmp_path / "s", samples_per_kind=1)
+    assert status == harness.EXIT_NOT_EXECUTED
+    assert "not isolated at baseline" in record["not_executed_reason"]
+    assert record["prerequisites"][0] == {
+        "id": "baseline_isolated", "met": False,
+        "detail": "baseline already drifted: {'published_port': ['tcp:80']}",
+    }
+    assert record["parts"][0]["samples"] == []
+
+
+def test_a_reachable_baseline_aborts_as_not_executed(harness, tmp_path):
+    lab = FakeLab()
+    lab.probe = lambda: True  # decoy already reaches the protected side
+    record, status = harness.run_lab(lab, state_root=tmp_path / "s", samples_per_kind=1)
+    assert status == harness.EXIT_NOT_EXECUTED
+    assert "not isolated at baseline" in record["not_executed_reason"]
+    assert record["prerequisites"][1]["met"] is False
+
+
+# --- scripts/ci/assert_so08_record.py, as CI runs it -------------------------------
+
+ASSERT_SCRIPT = ROOT / "scripts/ci/assert_so08_record.py"
+
+
+def _run_assert(tmp_path: Path, record: dict[str, Any]):
+    import subprocess
+    import sys
+
+    path = tmp_path / "record.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(ASSERT_SCRIPT), str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_assert_script_accepts_an_executed_virtual_record(tmp_path, virtual_record):
+    result = _run_assert(tmp_path, virtual_record)
+    assert result.returncode == 0, result.stderr
+    assert "not HIL evidence" in result.stdout
+
+
+def test_assert_script_refuses_a_run_that_did_not_execute(tmp_path, virtual_record):
+    record = virtual_record
+    record["executed"] = False
+    record["not_executed_reason"] = "not root"
+    for part in record["parts"]:
+        part["verdict"] = "not_measurable"
+    record["verdict"] = "not_measurable"
+    assert rec.validate_record(record) == []  # well-formed; only "executed" is wrong
+    result = _run_assert(tmp_path, record)
+    assert result.returncode == 1
+    assert "run did not execute: 'not root'" in result.stderr
+
+
+def test_assert_script_refuses_a_hil_record(tmp_path, virtual_record):
+    record = _hil_record(virtual_record)
+    assert rec.validate_record(record) == []  # well-formed; only the class is wrong
+    result = _run_assert(tmp_path, record)
+    assert result.returncode == 1
+    assert "expected 'virtual-lab-regression'" in result.stderr
+    assert "detection half" not in result.stderr
+
+
+def test_assert_script_refuses_a_detection_regression(tmp_path, virtual_record):
+    record = virtual_record
+    detection = record["parts"][0]
+    sample = detection["samples"][0]
+    sample["start_monotonic_ns"] = sample["end_monotonic_ns"] - 3_000_000_000
+    detection["pass_rule"]["evaluated"] = rec.evaluate_samples(
+        detection["samples"], bound_ms=rec.DETECTION_BOUND_MS
+    )
+    detection["verdict"] = "fail"
+    record["verdict"] = "fail"
+    assert rec.validate_record(record) == []  # well-formed; only detection failed
+    result = _run_assert(tmp_path, record)
+    assert result.returncode == 1
+    assert "detection half did not hold" in result.stderr
+    assert "did not execute" not in result.stderr
