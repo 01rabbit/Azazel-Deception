@@ -19,6 +19,24 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Added
 
+- **Presented Terrain `v0.9.0rc5` integration test** (Deception#31) —
+  `tests/test_presented_terrain_rc5_integration.py` adds the test #31 promised
+  once Azazel-Fabric#51 was released: one path from an Edge effect payload
+  through `ProducerRedirectionEvidence`, `PresentedTerrainSnapshotV0` and
+  `project_presented_terrain(..., source_effect=...)` to a JSON round-trip
+  through Fabric's `PresentedTerrainRef` and `assert_effect_chain_consistent`,
+  for a decided effect and for the default shadow run. It pins the rejection of
+  ref mix-ups (another effect, another decision), trace mix-ups (refused before
+  a record exists and after a rewrite) and classification mix-ups (an
+  `identity:` reference in the credential slot, a `credential:` reference in
+  the identity slot, and swapped slots in a serialized record). No decision,
+  approval or execution path is added; a chain that checks out claims no
+  DIVERT, success or attacker belief.
+- **Version restatement guard** (Deception#35 AC-1) —
+  `tests/test_fabric_pin_documentation.py` now fails when any Markdown document
+  other than `docs/fabric-pin.md` and this CHANGELOG names a Fabric tag or the
+  product version. `docs/safety-model.md` still stated the pin as `v0.9.0rc2`;
+  it now links to `docs/fabric-pin.md`.
 - **SO-08 isolation-drift harness — virtual-lab regression signal, not a gate**
   (Deception#41). `runtime/isolation_drift.py` declares the drift kinds once
   (`route_to_protected`, `published_port`, `capability_regranted`, each the
