@@ -453,6 +453,11 @@ class _Detector(threading.Thread):
         self.lab = lab
         self.observer = observer
         self.error: BaseException | None = None
+        # Completed sample->observe cycles. The harness waits on this after a
+        # revert: the observer appends a record *before* it updates its active
+        # set, so seeing the record (or an empty active set) alone does not
+        # mean the cycle that sampled the drift is over.
+        self.cycles = 0
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -462,6 +467,7 @@ class _Detector(threading.Thread):
             except BaseException as exc:  # recorded and surfaced: fail closed
                 self.error = exc
                 return
+            self.cycles += 1
             self._stop_event.wait(POLL_INTERVAL_S)
 
     def stop(self) -> None:
@@ -515,12 +521,29 @@ def _wait_detected(
     return None
 
 
-def _wait_cleared(lab: Lab, observer: IsolationDriftObserver, kind: str) -> bool:
+def _wait_cleared(
+    lab: Lab, observer: IsolationDriftObserver, kind: str, detector: _Detector
+) -> bool:
+    """Wait until the detector has seen the reverted state.
+
+    Two full cycles must complete after the revert: the first may have
+    sampled before it. Without this, the next injection can land while the
+    detector is still finishing the cycle that saw the previous one, and the
+    observer would treat the new drift as already recorded.
+    """
+
+    floor = detector.cycles + 2
     deadline = time.monotonic() + SETTLE_TIMEOUT_S
     while time.monotonic() < deadline:
-        if not lab.sample()[kind] and not observer.active_findings()[kind]:
+        if detector.error is not None:
+            return False
+        if (
+            detector.cycles >= floor
+            and not lab.sample()[kind]
+            and not observer.active_findings()[kind]
+        ):
             return True
-        time.sleep(POLL_INTERVAL_S)
+        time.sleep(POLL_INTERVAL_S / 2)
     return False
 
 
@@ -652,7 +675,7 @@ def run_lab(
                         "(Azazel-Edge#412)",
                         "probe_reachable_after_detection": reachable,
                     })
-                    if not _wait_cleared(lab, observer, kind):
+                    if not _wait_cleared(lab, observer, kind, detector):
                         raise LabUnavailable(f"{kind} drift did not clear after revert")
         finally:
             detector.stop()

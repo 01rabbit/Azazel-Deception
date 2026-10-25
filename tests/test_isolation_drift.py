@@ -216,6 +216,31 @@ def test_harness_measures_every_kind_and_never_reports_pass(harness, tmp_path):
     assert record["product_configuration"]["commissioned_identity"] == rec.VIRTUAL_LAB_NO_IDENTITY
 
 
+def test_reinjection_is_not_lost_to_the_detectors_in_flight_cycle(harness, tmp_path, monkeypatch):
+    """The observer appends before it updates its active set.
+
+    A harness that injected the next sample as soon as the previous record was
+    readable could land the new drift inside that window, and the observer
+    would treat it as already recorded — a missed detection. Widening the
+    window makes the race near-certain if the harness does not wait for the
+    detector to finish the cycle.
+    """
+
+    import time as _time
+
+    original = RuntimeStateStore.append_evidence
+
+    def slow_append(self, environment_id, event):
+        path = original(self, environment_id, event)
+        _time.sleep(0.03)
+        return path
+
+    monkeypatch.setattr(RuntimeStateStore, "append_evidence", slow_append)
+    record, status = harness.run_lab(FakeLab(), state_root=tmp_path / "s", samples_per_kind=4)
+    assert record["parts"][0]["pass_rule"]["evaluated"]["unfinished_samples"] == 0
+    assert status == harness.EXIT_DETECTION_WITHIN_BOUND
+
+
 def test_an_undetected_drift_is_an_unfinished_violation(harness, tmp_path):
     record, status = harness.run_lab(
         FakeLab(detect=False), state_root=tmp_path / "s", samples_per_kind=1
