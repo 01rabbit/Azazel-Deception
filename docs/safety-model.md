@@ -96,8 +96,9 @@ Adoption is a *validator* import (`coerce_defensive_state`), not a copy of the
 vocabulary: the five values still appear in no AZ-06 string literal, and
 recording a reported state still gives it no path to activation. Both
 properties are re-asserted after adoption, because an adoption commit is
-exactly what would erode them. This repository pins Fabric `v0.9.0rc2`; a test
-fails if the pin stops being an exact tag or stops carrying the contract.
+exactly what would erode them. The pinned Fabric tag is stated only in
+[`fabric-pin.md`](fabric-pin.md) (single source: `pyproject.toml`); a test fails
+if the pin stops being an exact tag or stops carrying the contract.
 
 ## Deployment guidance
 

@@ -85,3 +85,40 @@ def test_the_installed_distribution_matches_the_pinned_tag():
         f"installed azazel_fabric {installed} does not match the pin {tag}; "
         "reinstall before trusting a green run"
     )
+
+
+# `docs/fabric-pin.md` は「他のどの文書も版番号を書き直さない」と約束している。
+# この約束も強制されておらず、実際に一度破れていた。pin が `rc5` へ移った後も
+# `docs/safety-model.md` は `v0.9.0rc2` を pin と述べていた（Deception#35 AC-1）。
+# 版を書いてよいのは pin の文書と、履歴を記録する CHANGELOG だけである。
+_VERSION_EXEMPT = {PIN_DOC, ROOT / "CHANGELOG.md"}
+_SKIPPED_DIRS = {".git", ".venv", "venv", "build", "dist", "artifacts", "node_modules"}
+_FABRIC_TAG_ON_LINE = re.compile(r"Fabric\b.*\bv\d+\.\d+\.\d+(?:rc\d+|a\d+|b\d+)?\b")
+_PRODUCT_VERSION_LINE = re.compile(r'^version\s*=\s*"(?P<version>[^"]+)"', re.MULTILINE)
+
+
+def _current_facing_documents() -> list[Path]:
+    return sorted(
+        path
+        for path in ROOT.rglob("*.md")
+        if path not in _VERSION_EXEMPT
+        and not _SKIPPED_DIRS.intersection(path.relative_to(ROOT).parts)
+        and not any(part.endswith(".egg-info") for part in path.parts)
+    )
+
+
+def test_no_other_document_restates_the_fabric_pin_or_the_product_version():
+    product = _PRODUCT_VERSION_LINE.search(PYPROJECT.read_text("utf-8"))
+    assert product, "pyproject.toml lost its [project].version line"
+    version = product.group("version")
+
+    offenders = []
+    for path in _current_facing_documents():
+        for number, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+            if _FABRIC_TAG_ON_LINE.search(line) or version in line:
+                offenders.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+
+    assert not offenders, (
+        "a version is restated outside docs/fabric-pin.md; link there instead, "
+        "so a bump cannot leave a stale copy behind:\n" + "\n".join(offenders)
+    )
