@@ -82,6 +82,36 @@ jobs:
           path: artifacts/lab/virtual-phase1-lab.json
           if-no-files-found: error
 
+  so08-virtual-lab:
+    # SO-08 (Azazel-Deception#41) detection half, as a REGRESSION SIGNAL ONLY.
+    # The record this produces is class virtual-lab-regression with gate:
+    # false; SO-08 is hardware-only and no green run of this job satisfies its
+    # HIL gate (docs/so08-isolation-drift.md). The withdrawal half is
+    # not_measurable until Azazel-Edge#412, so the record's verdict is never
+    # pass; this job goes green on the detection half alone.
+    name: SO-08 isolation-drift virtual lab (regression, not a gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e '.[dev]'
+      - name: Inject drift in network/PID namespaces (needs root)
+        # The harness exits 2 when it could not run (no root, no namespaces),
+        # so a skipped lab cannot come out green.
+        run: sudo "$(command -v python)" scripts/dev/so08_drift_lab.py --output artifacts/so08/so08-virtual-lab.json
+      - name: Assert the record shows an executed run
+        if: always()
+        run: python scripts/ci/assert_so08_record.py artifacts/so08/so08-virtual-lab.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: az06-so08-virtual-lab-record
+          path: artifacts/so08/so08-virtual-lab.json
+          if-no-files-found: error
+
   cross-repo-heartbeat-e2e:
     name: Networked Edge->AZ-06 heartbeat E2E
     runs-on: ubuntu-latest
