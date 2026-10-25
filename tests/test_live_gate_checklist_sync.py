@@ -39,7 +39,7 @@ _HEADING = re.compile(r"^## (?P<title>.+)$")
 
 
 class Item:
-    __slots__ = ("state", "section", "text", "gate_ids", "line_no")
+    __slots__ = ("state", "section", "text", "gate_ids", "line_no", "prose")
 
     def __init__(self, state: str, section: str, text: str, gate_ids: list[str], line_no: int):
         self.state = state
@@ -47,6 +47,8 @@ class Item:
         self.text = text
         self.gate_ids = gate_ids
         self.line_no = line_no
+        # The item line plus its indented continuation lines, verbatim.
+        self.prose = text
 
     def __repr__(self) -> str:  # pragma: no cover - failure messages only
         return f"{CHECKLIST.name}:{self.line_no} [{self.state}] {self.text[:70]}"
@@ -79,6 +81,7 @@ def _parse_items() -> list[Item]:
         # line ends the item so the next section's text is never absorbed.
         if current is not None and raw.startswith("    "):
             current.gate_ids.extend(m.group("gate_id") for m in _GATE_ID.finditer(raw))
+            current.prose += "\n" + raw.strip()
         elif not raw.startswith("    "):
             current = None
     return items
@@ -224,3 +227,62 @@ def test_registry_entries_are_well_formed() -> None:
     for gate_id, category, summary in LIVE_GATES:
         assert category in {"hil", "portability", "deployment", "software"}, gate_id
         assert summary.strip(), gate_id
+
+
+# --- SO-08: the route-drift gate names its HIL record format -----------------
+
+ROUTE_DRIFT_GATE = "hil_host_restart_and_route_drift_injection"
+SO08_DOC = CHECKLIST.parent / "so08-isolation-drift.md"
+SO08_RECORD_DIR = CHECKLIST.parents[1] / "docs" / "field-exercises" / "so08"
+
+
+def _gate_item(items: list[Item], gate_id: str) -> Item:
+    matches = [i for i in items if gate_id in i.gate_ids]
+    assert len(matches) == 1, f"{gate_id}: expected one checklist item, got {matches}"
+    return matches[0]
+
+
+def test_route_drift_gate_names_the_so08_field_exercise_record_format(items: list[Item]) -> None:
+    """The gate row must say what evidence closes it, and that CI does not (#41)."""
+
+    item = _gate_item(items, ROUTE_DRIFT_GATE)
+    assert "so08-isolation-drift.md#hil-field-exercise-record" in item.prose
+    assert "azazel_deception.runtime.so08_record.validate_record" in item.prose
+    assert "docs/field-exercises/so08/" in item.prose
+    assert "No green CI run satisfies it" in item.prose
+    # The anchor the row links to exists, and the doc names the same validator.
+    doc = SO08_DOC.read_text(encoding="utf-8")
+    assert re.search(r"^## HIL field-exercise record$", doc, re.MULTILINE)
+    assert "azazel_deception.runtime.so08_record.validate_record" in doc
+
+
+def test_route_drift_gate_cannot_be_checked_without_a_passing_committed_hil_record(
+    items: list[Item],
+) -> None:
+    """A `[x]` here needs a committed, validating, passing HIL record named on the line.
+
+    A virtual-lab record never qualifies: the validator refuses ``gate: true``
+    and ``pass`` on it. This holds vacuously while the gate is open.
+    """
+
+    import json
+
+    from azazel_deception.runtime.so08_record import CLASS_HIL, validate_record
+
+    item = _gate_item(items, ROUTE_DRIFT_GATE)
+    if item.state != "x":
+        return
+    passing = []
+    for path in sorted(SO08_RECORD_DIR.glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not validate_record(record)
+            and record.get("class") == CLASS_HIL
+            and record.get("verdict") == "pass"
+            and path.name in item.prose
+        ):
+            passing.append(path.name)
+    assert passing, (
+        f"{ROUTE_DRIFT_GATE} is [x] but names no committed, validating, passing "
+        f"hil-field-exercise record under {SO08_RECORD_DIR}"
+    )

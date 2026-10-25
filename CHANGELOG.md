@@ -19,6 +19,25 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Added
 
+- **SO-08 isolation-drift harness — virtual-lab regression signal, not a gate**
+  (Deception#41). `runtime/isolation_drift.py` declares the drift kinds once
+  (`route_to_protected`, `published_port`, `capability_regranted`, each the
+  runtime twin of a static Compose-policy violation) and records newly observed
+  drift into AZ-06's real evidence chain as a Fabric `EnvironmentEvent`
+  (`failure`, `stage: isolation_drift`). `scripts/dev/so08_drift_lab.py`
+  (`make so08-virtual-lab`, Linux + root) injects each kind 20 times in
+  network/PID namespaces and times injection → evidence-chain record on the
+  monotonic clock. The withdrawal half is enforcement on Azazel-Edge's
+  authority path and is recorded `not_measurable` with a gap naming
+  Azazel-Edge#412 — nothing here withdraws a route — so a run's verdict is never
+  `pass`. Records are `class: virtual-lab-regression`, `gate: false`, with no
+  commissioned identity; a run that could not execute exits 2 and is never
+  green. The HIL field-exercise record format is defined in
+  `docs/so08-isolation-drift.md` and validated by
+  `runtime/so08_record.validate_record`; the route-drift gate row of
+  `docs/live-gate-checklist.md` names it, and the sync test holds it to that.
+  No green CI run satisfies the HIL gate. Target values are unchanged.
+
 - **Producer Defensive State recorded without adopting it** (Deception#28 AC-7)
   — `ProducerRedirectionEvidence` and `PresentedTerrainSnapshotV0` carry
   `producer_defensive_state` (verbatim, or absent) beside
