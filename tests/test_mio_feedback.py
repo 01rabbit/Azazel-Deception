@@ -929,6 +929,44 @@ def test_no_mechanism_means_no_active_materialized_terrain(world):
     assert "runtime_state_not_independently_reverified" in bundle["limitations"]
 
 
+@pytest.mark.parametrize("with_mechanism", [False, True])
+def test_persisted_active_never_yields_an_active_materialized_observation(world, with_mechanism):
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    decision_id, plan, _, _, _, chain = _bind(world)
+    mechanism = None
+    if with_mechanism:
+        mechanism = ProducerRedirectionEvidence(
+            producer_product="azazel-edge", producer_node=chain.node_id,
+            trace_id=chain.trace_id, decision_ref=f"decision:{decision_id}",
+            execution_ref="execution-1", mechanism_observation_ref="mechanism-1",
+            evidence_refs=["edge-nft-1"],
+        )
+    bundle = _bundle(
+        world, chain, mechanism=mechanism,
+        isolation_assertion_refs=("isolation-net-none",), active_surface_refs=("surface-a",),
+    )
+    runtime = bundle["runtime_materialization"]
+    assert runtime["environment_state"] == "active"
+    # No observation at all: never "active", never a stand-in status.
+    assert runtime["effect_observation"] is None
+    terrain = runtime["presented_terrain"]
+    assert terrain is None or terrain["lifecycle_state_ref"].endswith(".stale")
+    if terrain is not None:
+        assert not terrain["lifecycle_state_ref"].endswith(".active")
+        assert terrain["active_surface_refs"] == []
+    limitations = bundle["limitations"]
+    assert "effect_observation_withheld_not_independently_verified" in limitations
+    assert "runtime_state_not_independently_reverified" in limitations
+    if not with_mechanism:
+        assert "presented_terrain_not_projected" in limitations
+    # The honest bundle still verifies, and the live context is still not "active".
+    verify_feedback_bundle(bundle, **_kw(world, chain, mechanism=mechanism))
+    assert mio_deception_context(
+        bundle, **_kw(world, chain, mechanism=mechanism)
+    )["lifecycle_state"] == "unknown"
+
+
 def test_empty_expected_telemetry_is_telemetry_missing(world):
     _, plan, _, _, _, chain = _bind(world)
     with pytest.raises(BindingRefused) as refused:
