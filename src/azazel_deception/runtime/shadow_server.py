@@ -16,9 +16,9 @@ Transport security model:
   identity must match this node.
 * Envelopes carry `issued_at` freshness (`heartbeat_is_fresh`) and a one-shot
   `request_id` anti-replay ledger, so stale or replayed envelopes fail closed.
-* All rejections are deterministic reason codes; every request/response pair
-  is appended to the tamper-evident evidence log for Edge audit and Knowledge
-  ingest.
+* All rejections are deterministic reason codes; an append-only evidence
+  record is attempted for each request. A failed append is reported explicitly
+  and is never claimed to have been persisted.
 
 The `heartbeat` and `reconcile` actions extend the same boundary to a live
 liveness/state-reconciliation loop: Edge can poll this node for a small health
