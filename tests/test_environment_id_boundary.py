@@ -546,13 +546,26 @@ def test_strict_id_compose_ops_refused_while_legacy_alias_persisted(mocked, lega
     adapter, calls = mocked
     strict = "env-1" if legacy_id == "ENV-1" else "env1"
     _persist(adapter, legacy_id)  # old project az06-<strict>
-    _persist(adapter, strict)
+    # Address both records by exact file path. On a case-folding filesystem the
+    # strict and legacy names are the same physical file, so writing the strict
+    # record would overwrite the legacy record before its snapshot is taken.
+    legacy_path = adapter.state.root / "environments" / f"{legacy_id}.json"
+    strict_path = adapter.state.root / "environments" / f"{strict}.json"
+    same_file = (
+        legacy_path.exists()
+        and strict_path.exists()
+        and os.path.samefile(legacy_path, strict_path)
+    )
+    if not same_file:
+        _persist(adapter, strict)
+    legacy_before = legacy_path.read_bytes()
     with pytest.raises(RuntimeGateError, match="shares a Compose project"):
         adapter.terminate_environment(strict, _termination(strict))
     with pytest.raises(RuntimeGateError, match="shares a Compose project"):
         adapter.emergency_stop(strict, operator="op", reason="r")
     assert calls == []
-    assert adapter.state.read(strict)["state"] == "active"
+    assert legacy_path.read_bytes() == legacy_before
+    assert _json.loads(legacy_before.decode("utf-8"))["state"] == "active"
     assert not adapter.state.decision_consumed("dec-term-1")
 
 
@@ -594,3 +607,61 @@ def test_fifo_record_is_refused_without_blocking(tmp_path):
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old)
+
+
+def _folding_listdir(monkeypatch, real_listdir):
+    """Simulate a case-folding filesystem: a lookup of ``foo.json`` also finds
+    the stored ``Foo.json``. Only the directory listing is patched; the store's
+    exact-name check is what must refuse the alias."""
+
+    from azazel_deception.runtime import state as state_module
+
+    def fake_listdir(path="."):
+        return list(real_listdir(path))
+
+    monkeypatch.setattr(state_module.os, "listdir", fake_listdir)
+
+
+def test_strict_id_never_touches_legacy_case_alias_on_folding_filesystem(tmp_path, monkeypatch):
+    store = RuntimeStateStore(tmp_path)
+    legacy_state = tmp_path / "environments" / "Foo.json"
+    legacy_evidence = tmp_path / "evidence" / "Foo.jsonl"
+    legacy_state.write_text('{"state": "active", "legacy": true}\n', encoding="utf-8")
+    store.append_evidence("Foo", {"event_id": "foo-activated"})
+    state_before = legacy_state.read_bytes()
+    evidence_before = legacy_evidence.read_bytes()
+
+    real_listdir = os.listdir
+    _folding_listdir(monkeypatch, real_listdir)
+
+    # Strict ID "foo" folds onto the legacy "Foo": every operation is refused
+    # before any read, append, replace or unlink happens.
+    with pytest.raises(EnvironmentIdError):
+        store.read("foo")
+    with pytest.raises(EnvironmentIdError):
+        store.write("foo", {"state": "terminated"})
+    with pytest.raises(EnvironmentIdError):
+        store.clear_runtime_state("foo")
+    with pytest.raises(EnvironmentIdError):
+        store.append_evidence("foo", {"event_id": "foo-forged"})
+    with pytest.raises(EnvironmentIdError):
+        store.read_evidence_snapshot("foo")
+    with pytest.raises(EnvironmentIdError):
+        store.evidence_head_hash("foo")
+    with pytest.raises(EnvironmentIdError):
+        store.verify_evidence_chain("foo")
+    with pytest.raises(EnvironmentIdError):
+        store.evidence_path("foo")
+
+    assert legacy_state.read_bytes() == state_before
+    assert legacy_evidence.read_bytes() == evidence_before
+    # No new entry was created for the strict alias (listing-level check, so it
+    # holds on case-insensitive hosts too).
+    assert sorted(real_listdir(tmp_path / "environments")) == ["Foo.json"]
+    assert sorted(real_listdir(tmp_path / "evidence")) == ["Foo.jsonl"]
+
+    # The exact-case legacy record keeps working through the same folding view.
+    monkeypatch.undo()
+    assert store.read("Foo") == {"state": "active", "legacy": True}
+    assert store.verify_evidence_chain("Foo") is True
+    assert legacy_state.read_bytes() == state_before

@@ -14,6 +14,7 @@ import re
 import secrets
 import stat
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +107,36 @@ def _read_private_text(path: Path) -> str:
 def _refuse_symlink(path: Path) -> None:
     if os.path.islink(path):
         raise OSError(f"refusing to follow symlink: {path}")
+
+
+def _case_fold_name(name: str) -> str:
+    return unicodedata.normalize("NFD", name).casefold()
+
+
+def _require_exact_entry(directory: Path, name: str) -> None:
+    """Refuse ``name`` if the directory holds a different entry that folds to it.
+
+    On a case- or normalization-insensitive filesystem a lookup for ``foo.json``
+    can resolve to an existing ``Foo.json`` (a legacy record or evidence file).
+    Reads, appends, replaces and unlinks through such a name would then touch
+    that other file. When the exact name is absent and a folding alias exists,
+    refuse before any filesystem operation. An exact-name entry is never
+    refused, so legacy exact-case records keep working.
+    """
+
+    try:
+        entries = os.listdir(directory)
+    except FileNotFoundError:
+        return
+    if name in entries:
+        return
+    folded = _case_fold_name(name)
+    aliases = sorted(entry for entry in entries if _case_fold_name(entry) == folded)
+    if aliases:
+        raise EnvironmentIdError(
+            f"{name} would resolve to existing {aliases[0]} on a case- or "
+            "normalization-insensitive filesystem; refusing to touch it"
+        )
 
 
 class EnvironmentIdError(ValueError):
@@ -274,6 +305,7 @@ class RuntimeStateStore:
 
     def _state_path(self, environment_id: str) -> Path:
         safe = self._check_environment_id(environment_id)
+        _require_exact_entry(self.root / "environments", f"{safe}.json")
         return self.root / "environments" / f"{safe}.json"
 
     def _decision_path(self, decision_id: str) -> Path:
@@ -560,6 +592,7 @@ class RuntimeStateStore:
 
     def evidence_path(self, environment_id: str) -> Path:
         safe = self._check_environment_id(environment_id)
+        _require_exact_entry(self.root / "evidence", f"{safe}.jsonl")
         return self.root / "evidence" / f"{safe}.jsonl"
 
     def clear_runtime_state(self, environment_id: str) -> None:
