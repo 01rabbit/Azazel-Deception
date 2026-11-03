@@ -1552,3 +1552,65 @@ def test_mc_coverage_distinguishes_confounded_outside_lease_and_unmapped(world):
             assert entry["status"] == f"undeterminable_unmapped_surface:{entry['surface']}"
     assert "desired_observations_not_hypothesis_specific" in bundle["limitations"]
     assert "tactical" not in json.dumps(bundle["objective_coverage"]).lower()
+
+
+# --- key and marker hygiene, remaining cases -------------------------------------
+
+
+def _bundle_with_key(world):
+    _, plan, signed, _, admitted, chain = _bind(world)
+    _observer(world, chain, plan).record(
+        observation_class="interaction", surface="service", untrusted_text="probe"
+    )
+    return plan, signed, admitted, chain, _bundle(world, chain)
+
+
+def test_lb_symlinked_session_key_is_evidence_tampered(world, tmp_path):
+    plan, signed, admitted, chain, bundle = _bundle_with_key(world)
+    key = _key_file(world)
+    decoy = tmp_path / "decoy.key"
+    decoy.write_bytes(key.read_bytes())
+    os.chmod(decoy, 0o600)
+    key.unlink()
+    key.symlink_to(decoy)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(bundle, **_kw(world, chain))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_lb_keys_directory_mode_0755_makes_build_evidence_tampered(world):
+    plan, signed, admitted, chain, bundle = _bundle_with_key(world)
+    directory = _key_file(world).parent
+    os.chmod(directory, 0o755)
+    with pytest.raises(BindingRefused) as refused:
+        _bundle(world, chain)
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_bindings_directory_mode_0755_makes_bind_evidence_tampered(world):
+    decision_id, plan, signed, _, admitted, chain = _bind(world)
+    directory = world.adapter.state.root / "mio_bindings"
+    os.chmod(directory, 0o755)
+    with pytest.raises(BindingRefused) as refused:
+        bind_reference_chain(
+            admitted=admitted, signed_activation_decision=signed,
+            defensive_effect_ref=edge_effect_payload(decision_id, utcnow()),
+            adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+        )
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_l1_verify_never_creates_a_key(world):
+    import shutil
+
+    plan, signed, admitted, chain, bundle = _bundle_with_key(world)
+    directory = world.adapter.state.root / "mio_feedback_keys"
+    shutil.rmtree(directory)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(bundle, **_kw(world, chain))
+    assert refused.value.code == "evidence_tampered"
+    assert not directory.exists() or not list(directory.glob("*.key")), "verify recreated a key"
+    for fn in _consumers():
+        with pytest.raises(BindingRefused):
+            fn(bundle, **_kw(world, chain))
+    assert not directory.exists() or not list(directory.glob("*.key"))
