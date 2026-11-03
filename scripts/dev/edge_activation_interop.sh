@@ -14,6 +14,14 @@
 #        EDGE_COMMIT (default: 4fb67850bfc134ffa25ee44693e6eb3f15ee6dff; full 40-char hex)
 #        PYTHON (default python3.12)
 # WORKDIR defaults to a new mktemp directory; it is kept so the log can be inspected.
+#
+# Prerequisites:
+#   * uv on PATH (creates the venv and installs requirements).
+#   * Python 3.11+ for PYTHON. The default python3.12 is used because pyproject
+#     parsing relies on tomllib (3.11+); any 3.11+ interpreter may be set via PYTHON.
+#   * Network access during install: Deception's pinned dependencies include a
+#     Fabric git dependency that uv fetches from its git source.
+#   * A local Azazel-Edge checkout containing the pinned EDGE_COMMIT (see EDGE_REPO).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

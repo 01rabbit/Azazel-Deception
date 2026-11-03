@@ -10,8 +10,10 @@ the signed objects through Deception's existing authenticator and runtime gates
 Scope and limits
   * Test-only. The key below is a fixed string in this file; it is not a secret
     and no production key path is exercised.
-  * Compose is MOCKED: ``subprocess.run`` inside ``azazel_deception.runtime.compose``
-    is replaced by a fake that records argv and returns rc=0. No Docker daemon.
+  * Compose is MOCKED: the ``subprocess`` name inside
+    ``azazel_deception.runtime.compose`` is replaced by a small namespace whose
+    ``run`` records argv and returns rc=0. The global ``subprocess`` module is not
+    patched. No Docker daemon.
   * No production caller and no live authorization is implemented here. Passing
     this test grants no runtime authority; it only proves the wire objects built
     by Edge bind and are accepted by Deception's existing gates.
@@ -29,6 +31,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +40,7 @@ from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime import compose as compose_module
 from azazel_deception.runtime.mio_feedback import (
     AdmittedObjective,
+    AdvisoryRetained,
     accept_mio_objective,
     admit_objective,
     objective_digest,
@@ -77,8 +81,12 @@ BUDGET = {
 }
 
 
-def _load_edge_builders():
-    """Import the real Edge module from the extracted pinned commit, or fail."""
+def _load_edge_builders(monkeypatch: pytest.MonkeyPatch):
+    """Import the real Edge module from the extracted pinned commit, or fail.
+
+    The Edge path is added with ``monkeypatch.syspath_prepend`` so pytest restores
+    ``sys.path`` after the test; no global path change persists.
+    """
 
     src = os.environ.get(EDGE_SRC_ENV)
     if not src:
@@ -86,7 +94,7 @@ def _load_edge_builders():
     src_path = Path(src).resolve()
     if not (src_path / "azazel_edge" / "deception_activation.py").is_file():
         pytest.fail(f"{EDGE_SRC_ENV} does not contain azazel_edge/deception_activation.py: {src_path}")
-    sys.path.insert(0, str(src_path))
+    monkeypatch.syspath_prepend(str(src_path))
     module = importlib.import_module("azazel_edge.deception_activation")
     module_file = Path(module.__file__).resolve()
     assert src_path in module_file.parents, "Edge module must come from the extracted pinned source"
@@ -119,13 +127,22 @@ def _fake_compose(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="ok")
 
-    monkeypatch.setattr(compose_module.subprocess, "run", _fake_run)
+    # Only the compose module's own `subprocess` name is replaced; the global
+    # subprocess module is untouched. The namespace carries the constants that
+    # compose.py reads alongside run().
+    fake_subprocess = SimpleNamespace(
+        run=_fake_run,
+        PIPE=subprocess.PIPE,
+        STDOUT=subprocess.STDOUT,
+        SubprocessError=subprocess.SubprocessError,
+    )
+    monkeypatch.setattr(compose_module, "subprocess", fake_subprocess)
     return calls
 
 
 @pytest.mark.skipif(os.environ.get(ENABLE_ENV) != "1", reason=f"set {ENABLE_ENV}=1 (see runner)")
 def test_edge_builders_signed_objects_pass_deception_gates(tmp_path, monkeypatch):
-    edge = _load_edge_builders()
+    edge = _load_edge_builders(monkeypatch)
     raw = load_package(PACKAGE)
     plan = build_placement_plan(raw, _host(), "lite", edge_decision_id=ACTIVATION_DECISION_ID)
     # Deterministic clock for the runtime gates (builders take as_of explicitly).
@@ -185,6 +202,17 @@ def test_edge_builders_signed_objects_pass_deception_gates(tmp_path, monkeypatch
     assert isinstance(admitted, AdmittedObjective), admitted
     assert admitted.objective == objective
     assert admitted.objective_content_bound is True
+    # Negative content binding: a second VALID accepted objective with identical
+    # advisory refs but different desired_observations has a different content
+    # digest. The original Edge-signed activation must not admit it.
+    substitute = accept_mio_objective(
+        objective_payload(desired_observations=[["interaction", "service"]])
+    )
+    assert substitute.advisory_refs() == objective.advisory_refs()
+    assert objective_digest(substitute) != digest
+    retained = admit_objective(substitute, activation, authenticator=authenticator, now=NOW)
+    assert isinstance(retained, AdvisoryRetained), retained
+    assert retained.reason == "objective_not_in_authenticated_decision"
     # Fail-closed sanity: a tampered budget no longer verifies.
     tampered = dict(activation, budget=dict(activation["budget"], bandwidth_kbps=5001))
     assert authenticator(tampered) is False
