@@ -7,7 +7,7 @@
 # on a free 127.0.0.1 port itself. Then asserts the JUnit report has no skip.
 #
 # Usage: scripts/dev/mio_feedback_interop.sh [WORKDIR]
-# Env:   MIO_REPO (default ../Azazel-MIO)  KNOWLEDGE_REPO (default ../Azazel-Knowledge)
+# Env:   MIO_REPO KNOWLEDGE_REPO (default: sibling of this checkout, else one level up)
 #        MIO_COMMIT (7a35288)  KNOWLEDGE_COMMIT (6b590f3)  PYTHON (python3.12)
 # Knowledge is private: its output goes to the log file in WORKDIR, never to stdout.
 set -euo pipefail
@@ -15,8 +15,14 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="${1:-$here/../interop}"
 mkdir -p "$work"; work="$(cd "$work" && pwd)"
-MIO_REPO="${MIO_REPO:-$here/../../Azazel-MIO}"
-KNOWLEDGE_REPO="${KNOWLEDGE_REPO:-$here/../../Azazel-Knowledge}"
+find_repo() { # name: sibling of this checkout first, then one level further up
+  for candidate in "$here/../$1" "$here/../../$1"; do
+    if [ -d "$candidate/.git" ] || [ -f "$candidate/.git" ]; then (cd "$candidate" && pwd); return; fi
+  done
+  echo "cannot find $1 next to this checkout; set ${2}" >&2; exit 2
+}
+MIO_REPO="${MIO_REPO:-$(find_repo Azazel-MIO MIO_REPO)}"
+KNOWLEDGE_REPO="${KNOWLEDGE_REPO:-$(find_repo Azazel-Knowledge KNOWLEDGE_REPO)}"
 MIO_COMMIT="${MIO_COMMIT:-7a35288}"
 KNOWLEDGE_COMMIT="${KNOWLEDGE_COMMIT:-6b590f3}"
 PYTHON="${PYTHON:-python3.12}"
@@ -58,4 +64,4 @@ set +e
 status=${PIPESTATUS[0]}
 set -e
 [ "$status" -eq 0 ] || { echo "interop pytest failed (rc=$status); log: $log" >&2; exit "$status"; }
-"$work/venv-mio/bin/python" scripts/ci/assert_executed.py "$report" --min-tests 10
+"$work/venv-mio/bin/python" scripts/ci/assert_executed.py "$report" --min-tests 12

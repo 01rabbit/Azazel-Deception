@@ -800,12 +800,12 @@ def test_termination_and_reset_only_through_edge_decision(world):
 
     world.terminate()
     # terminated but not yet reset: reset_feedback must not claim a reset
-    with pytest.raises(BindingRefused):
+    with pytest.raises(BindingRefused) as early:
         reset_feedback(world.adapter, chain, now=utcnow())
-    world.adapter.reset_environment(world.environment_id)
+    assert early.value.code == "session_mismatch"
+    assert world.adapter.reset_environment(world.environment_id)["status"] == "reset"
     result = reset_feedback(world.adapter, chain, now=utcnow())
-    observation = result.get("effect_observation") or result
-    assert "terminated" in json.dumps(observation)
+    assert result["effect_observation"]["status"] == "terminated"
     assert result.get("limitations")
 
 
