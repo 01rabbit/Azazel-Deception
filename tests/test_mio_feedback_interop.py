@@ -602,8 +602,10 @@ def test_mio_frame_carries_desired_observation_known_facts(world_with_objective)
 # (`advisory:mio-*` refs + a Fabric observation vocabulary). Nothing in production
 # converts one to the other yet. The conversion below is a SYNTHETIC Edge/contract
 # adapter that exists only in this test; it is not production code and does not
-# claim that Edge has such a mapping. Only the generated frame/trace/objective/
-# hypothesis IDs are copied; the desired-observation vocabulary is a fixed allowlist.
+# claim that Edge has such a mapping. It maps the generated objective/frame/
+# hypothesis IDs. The objective ID is derived by MIO from frame, trace and gap,
+# but trace/gap IDs and question text are not copied separately. Desired
+# observations come from a test-only fixed allowlist keyed by gap capability.
 
 SYNTHETIC_ADAPTER_DESIRED_OBSERVATIONS = {
     # MIO gap capability -> allowlisted (observation_class, surface) pairs
@@ -614,6 +616,7 @@ SYNTHETIC_ADAPTER_DESIRED_OBSERVATIONS = {
 def _synthetic_edge_adapter(objective, gap_capability: str) -> dict:
     """Test-only mapping from one MIO objective to the Deception receiver's shape."""
 
+    assert objective.objective_id.startswith("obs-")
     desired = SYNTHETIC_ADAPTER_DESIRED_OBSERVATIONS[gap_capability]
     return {
         "objective_ref": "advisory:mio-objective-" + objective.objective_id[len("obs-"):],
@@ -733,7 +736,7 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
     assert admitted.decision_id == decision_id and admitted.objective == accepted
     assert admitted.objective_content_bound is True
 
-    # 4. Admission is refused for every ref set that is not the generated one.
+    # 4. Admission rejects missing/substituted advisory refs and a wrong digest.
     def refused(refs, *, sign=True):
         decision = world.signed_decision(decision_id, plan, evidence_refs=refs, sign=sign)
         result = admit_objective(accepted, decision, authenticator=world.authenticator, now=utcnow())
