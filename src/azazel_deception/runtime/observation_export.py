@@ -57,12 +57,12 @@ def export_observations(
     which is deterministic for a given environment.
     """
 
-    path = state.evidence_path(environment_id)
-    if not path.exists():
+    snapshot = state.read_evidence_snapshot(environment_id)
+    if snapshot is None:
         return []
 
     observations: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in snapshot.splitlines():
         if not line.strip():
             continue
         record = json.loads(line)

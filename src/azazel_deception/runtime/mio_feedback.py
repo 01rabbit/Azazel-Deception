@@ -527,12 +527,12 @@ class ReferenceChain:
 
 
 def _read_records(store: RuntimeStateStore, environment_id: str) -> list[dict[str, Any]]:
-    path = store.evidence_path(environment_id)
-    if not path.exists():
-        return []
     out: list[dict[str, Any]] = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        snapshot = store.read_evidence_snapshot(environment_id)
+        if snapshot is None:
+            return []
+        for line in snapshot.splitlines():
             if line.strip():
                 record = json.loads(line)
                 if isinstance(record, dict):
