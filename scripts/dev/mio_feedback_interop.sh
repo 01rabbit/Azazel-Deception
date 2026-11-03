@@ -64,4 +64,4 @@ set +e
 status=${PIPESTATUS[0]}
 set -e
 [ "$status" -eq 0 ] || { echo "interop pytest failed (rc=$status); log: $log" >&2; exit "$status"; }
-"$work/venv-mio/bin/python" scripts/ci/assert_executed.py "$report" --min-tests 13
+"$work/venv-mio/bin/python" scripts/ci/assert_executed.py "$report" --min-tests 14

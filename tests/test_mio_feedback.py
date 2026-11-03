@@ -1194,8 +1194,10 @@ def test_objective_coverage_is_caller_declared_and_never_a_verdict(world):
     assert "tactical" not in json.dumps(covered["objective_coverage"]).lower()
 
     unmapped = _bundle(world, chain, objective=objective)
-    assert any(e["status"].startswith("undeterminable_telemetry_gap:")
+    assert any(e["status"] == f"undeterminable_unmapped_surface:{e['surface']}"
                for e in unmapped["objective_coverage"]["entries"])
+    assert not any("unmapped_surface" in e["status"] and e["status"].startswith("undeterminable_telemetry_gap")
+                   for e in unmapped["objective_coverage"]["entries"])
 
 
 def test_frame_inputs_carry_markers_for_every_honesty_limit(world):

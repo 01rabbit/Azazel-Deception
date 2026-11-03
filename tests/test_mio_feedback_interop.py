@@ -110,6 +110,33 @@ def scenario(tmp_path, monkeypatch):
     return world, chain, bundle
 
 
+@pytest.fixture
+def world_with_objective(tmp_path, monkeypatch):
+    """Like `scenario`, but the bundle is built with the objective and a coverage map."""
+
+    world = World(tmp_path, monkeypatch)
+    decision_id, plan, signed = world.activate()
+    now = utcnow()
+    objective = accept_mio_objective(objective_payload())
+    admitted = admit_objective(objective, signed, authenticator=world.authenticator, now=now)
+    chain = bind_reference_chain(
+        admitted=admitted, signed_activation_decision=signed,
+        defensive_effect_ref=accept_defensive_effect_ref(edge_effect_payload(decision_id, now)),
+        adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+    )
+    bound_observer(world.adapter, chain, world.package, plan).record(
+        observation_class="interaction", surface="service"
+    )
+    bundle = build_feedback_bundle(
+        world.adapter, chain, now=utcnow(), max_age=MAX_AGE,
+        expected_telemetry=EXPECTED, observed_telemetry=EXPECTED, mechanism=None,
+        isolation_assertion_refs=("isolation-net-none",), active_surface_refs=(SURFACE,),
+        objective=objective,
+        surface_telemetry={"service": "interaction_log", "credential_lure": "process_events"},
+    )
+    return world, chain, bundle
+
+
 # =========================== MIO (Azazel-MIO 7a35288) ======================
 
 
@@ -531,25 +558,38 @@ def test_mio_frame_carries_deception_unknowns_from_mio_frame_inputs(scenario):
     assert handoff["model_contribution"] == "none"
 
 
-def test_mio_frame_carries_desired_observation_known_facts(scenario):
-    """mio_frame_inputs known_facts (addendum 2) reach the MIO frame unchanged.
+def test_mio_frame_carries_desired_observation_known_facts(world_with_objective):
+    """`known_facts` from mio_frame_inputs reach a MIO frame.
 
-    The key name `known_facts` is provisional until the implementation report.
+    MioSituationFrameBuilder.build derives its own known_facts and accepts no
+    caller list, so the facts go to `MioSituationFrame.build` directly, the
+    entry point that takes `known_facts`, `unknowns`, `evidence_refs`,
+    `freshness_seconds` and `deception_context`.
     """
 
-    from azazel_mio.frame_builder import MioSituationFrameBuilder
+    from azazel_mio.contracts import MioSituationFrame
+    from azazel_mio.handoff import build_no_model_handoff
 
-    world, chain, bundle = scenario
+    world, chain, bundle = world_with_objective
     inputs = mio_frame_inputs(bundle, **_kw(world, chain))
     facts = inputs["known_facts"]
-    assert all(f.startswith("DECEPTION_DESIRED_") for f in facts)
+    assert facts and all(f.startswith("DECEPTION_DESIRED_") for f in facts)
+    assert any(f.startswith("DECEPTION_DESIRED_OBSERVED_") for f in facts)
     now = utcnow().isoformat().replace("+00:00", "Z")
-    frame = MioSituationFrameBuilder().build(
-        events=[{"event_id": "ev:az06-1", "ts": now, "severity": 10}],
-        noc_evaluation={}, soc_evaluation={}, current_defensive_state="OBSERVE",
-        mission="az06-conformance", trace_id=chain.trace_id, frame_id="frame-55-facts",
-        created_at=now, deception_context=inputs["deception_context"],
-        explicit_unknowns=inputs["explicit_unknowns"],
+    frame = MioSituationFrame.build(
+        frame_id="frame-55-facts", trace_id=chain.trace_id, created_at=now,
+        mission="az06-conformance", current_defensive_state="OBSERVE", threat_level="LOW",
+        known_facts=facts, unknowns=inputs["unknowns"],
+        evidence_refs=inputs["evidence_refs"], freshness_seconds=inputs["freshness_seconds"],
+        deception_status=inputs["deception_status"],
+        deception_context=inputs["deception_context"],
+        provenance={"known_facts": ["deception"], "unknowns": ["deception"],
+                    "deception_context": ["deception"]},
     )
     for fact in facts:
         assert fact in frame.known_facts, f"MIO dropped {fact}"
+    for marker in inputs["unknowns"]:
+        assert marker in frame.unknowns, f"MIO dropped {marker}"
+    handoff = build_no_model_handoff(frame, reason="dependency_unavailable").to_dict()
+    assert handoff["counts"]["known_facts"] >= len(facts)
+    assert handoff["model_contribution"] == "none"
