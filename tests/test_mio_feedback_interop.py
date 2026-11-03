@@ -625,6 +625,10 @@ def _synthetic_edge_adapter(objective, gap_capability: str) -> dict:
     }
 
 
+@pytest.mark.skipif(
+    os.environ.get("AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP") != "1",
+    reason="requires explicit opt-in with the pinned MIO #37 candidate",
+)
 def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_and_refuses_mismatches(
     tmp_path, monkeypatch
 ):
@@ -688,7 +692,7 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
     assert set(mio_data) == {"objective_id", "frame_id", "trace_id", "source_gap_id",
                              "hypothesis_ids", "authority", "executable"}
     assert mio_data["authority"] == "advisory_only" and mio_data["executable"] is False
-    with pytest.raises(ObjectiveRejected):
+    with pytest.raises(ObjectiveRejected, match="outside the advisory shape"):
         accept_mio_objective(mio_data)
 
     # 2. Test-only synthetic adapter -> Deception's closed receiver payload.
@@ -698,7 +702,12 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
     text = json.dumps(payload)
     assert "Does interaction match" not in text  # MIO's question text does not cross
     for forbidden in ("command", "route", "package", "environment", "activation", "lease", "action"):
-        assert forbidden not in payload
+        with pytest.raises(ObjectiveRejected, match="outside the advisory shape"):
+            accept_mio_objective({**payload, forbidden: "fixture-value"})
+    with pytest.raises(ObjectiveRejected, match="authority must be advisory_only"):
+        accept_mio_objective({**payload, "authority": "executable"})
+    with pytest.raises(ObjectiveRejected, match="executable must be False"):
+        accept_mio_objective({**payload, "executable": True})
 
     accepted = accept_mio_objective(payload)
     assert accepted.advisory_refs() == (
@@ -709,6 +718,9 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
         "objective_ref", "hypothesis_refs", "frame_ref", "desired_observations", "authority"
     }
 
+    # The objective ID repeats for the same frame/trace/gap. This test's
+    # content digest binds the mapped proposal; it does not prove a freshness
+    # or revocation mechanism for a previously issued production decision.
     # 3. Test-only Edge decision binds the generated refs and content digest.
     digest = objective_digest(accepted)
     digest_ref = "advisory:mio-objective-digest-" + digest.split(":", 1)[1][:32]

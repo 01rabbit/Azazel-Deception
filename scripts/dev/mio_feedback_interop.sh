@@ -58,8 +58,14 @@ cd "$here"
 export AZAZEL_DECEPTION_MIO_INTEROP=1
 export AZAZEL_DECEPTION_KNOWLEDGE_PYTHON="$work/venv-knowledge/bin/python"
 export AZAZEL_DECEPTION_KNOWLEDGE_SRC="$work/knowledge"
+pytest_args=(tests/test_mio_feedback_interop.py -p no:cacheprovider)
+if [ "${AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP:-0}" != "1" ]; then
+  # The MIO observation-objective producer is still a Draft candidate. Keep
+  # the default main-to-main suite independent of that not-yet-merged API.
+  pytest_args+=(-k 'not test_mio_453b4d3_objective_producer')
+fi
 set +e
-"$work/venv-mio/bin/python" -m pytest tests/test_mio_feedback_interop.py -p no:cacheprovider \
+"$work/venv-mio/bin/python" -m pytest "${pytest_args[@]}" \
   --junitxml "$report" -rs 2>&1 | tee -a "$log"
 status=${PIPESTATUS[0]}
 set -e
