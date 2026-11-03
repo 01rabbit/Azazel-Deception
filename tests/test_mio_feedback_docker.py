@@ -111,6 +111,11 @@ def test_real_container_lifecycle_keeps_the_reference_chain(tmp_path):
         )["status"] == "terminated"
         assert _project_containers(adapter, environment_id) == []
 
+        with pytest.raises(BindingRefused) as premature:
+            reset_feedback(adapter, chain, now=utcnow())
+        assert premature.value.code == "session_mismatch"
+        adapter.reset_environment(environment_id)
+
         reset_feedback(adapter, chain, now=utcnow())
         assert adapter.verify_evidence(environment_id) is True
         with pytest.raises(BindingRefused) as refused:
