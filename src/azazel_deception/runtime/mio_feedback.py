@@ -1072,71 +1072,44 @@ def _terrain(
     if not assertions:
         return None
     expires = min(chain.lease_end, _parse_ts(effect.expires_at))
+    if mechanism is None:
+        # Without Edge mechanism evidence there is no #31 snapshot/projection gate to
+        # pass, so no terrain is claimed: never ACTIVE_MATERIALIZED or active surfaces
+        # built from caller-declared strings.
+        return None
     try:
-        if mechanism is not None:
-            runtime_state = {
-                "environment_id": chain.environment_id,
-                "state": env_state,
-                "package_id": chain.package_id,
-                "package_digest": chain.package_digest,
-                "node_id": chain.node_id,
-                "activated_at": activated_at,
-            }
-            if env_state in ("terminated", "reset"):
-                runtime_state["terminated_at"] = ended_at
-            snapshot = build_presented_terrain_snapshot(
-                environment_id=chain.environment_id,
-                producer=mechanism,
-                runtime_state=runtime_state,
-                expected_package_id=chain.package_id,
-                expected_package_digest=chain.package_digest,
-                package_version="not_recorded",
-                observed_at=_iso(now),
-                active_surface_refs=surfaces,
-                isolation_assertion_refs=assertions[:1],
-                reset_ref=reset_ref if env_state == "reset" else None,
-                runtime_verified_active=surfaces_attested,
-                expires_at=_iso(expires),
-                evidence_refs=evidence_refs,
-            )
-            projected = project_presented_terrain(
-                snapshot,
-                presentation_version=chain.generation,
-                expires_at=_iso(expires),
-                source_effect=effect,
-            )
-            return projected.ref.model_dump(mode="json")
-
-        lifecycle = {
-            "active": "active" if surfaces_attested else "stale",
-            "terminated": "terminated",
-            "reset": "reset",
-            "failed": "failed",
-        }.get(env_state, "stale")
-        authority = {
-            "active": AuthorityClass.ACTIVE_MATERIALIZED,
-            "terminated": AuthorityClass.OBSERVED_FACT,
-            "reset": AuthorityClass.OBSERVED_FACT,
-            "failed": AuthorityClass.OBSERVED_FACT,
-            "stale": AuthorityClass.STALE_OR_UNKNOWN,
-        }[lifecycle]
-        body = _sha24(chain.environment_id, chain.trace_id, chain.package_digest, chain.session_ref)
-        ref = PresentedTerrainRef(
-            presentation_id=f"presentation:{body}",
-            presentation_version=chain.generation,
-            producer_product="azazel-deception",
-            activation_decision_ref=effect.decision_ref,
-            source_effect_ref=effect.effect_id,
-            trace_id=chain.trace_id,
-            lifecycle_state_ref=f"lifecycle:{body}.{lifecycle}",
-            active_surface_refs=surfaces if lifecycle == "active" else (),
-            isolation_assertion_ref=assertions[0],
-            created_at=_iso(_parse_ts(activated_at)),
+        runtime_state = {
+            "environment_id": chain.environment_id,
+            "state": env_state,
+            "package_id": chain.package_id,
+            "package_digest": chain.package_digest,
+            "node_id": chain.node_id,
+            "activated_at": activated_at,
+        }
+        if env_state in ("terminated", "reset"):
+            runtime_state["terminated_at"] = ended_at
+        snapshot = build_presented_terrain_snapshot(
+            environment_id=chain.environment_id,
+            producer=mechanism,
+            runtime_state=runtime_state,
+            expected_package_id=chain.package_id,
+            expected_package_digest=chain.package_digest,
+            package_version="not_recorded",
+            observed_at=_iso(now),
+            active_surface_refs=surfaces,
+            isolation_assertion_refs=assertions[:1],
+            reset_ref=reset_ref if env_state == "reset" else None,
+            runtime_verified_active=surfaces_attested,
             expires_at=_iso(expires),
             evidence_refs=evidence_refs,
-            authority_class=authority,
         )
-        return ref.model_dump(mode="json")
+        projected = project_presented_terrain(
+            snapshot,
+            presentation_version=chain.generation,
+            expires_at=_iso(expires),
+            source_effect=effect,
+        )
+        return projected.ref.model_dump(mode="json")
     except EffectRefRejected:
         raise BindingRefused(
             "effect_decision_mismatch", "terrain cannot be bound to this effect"
@@ -1817,6 +1790,9 @@ def _context(bundle: Mapping[str, Any], *, now: datetime, max_age: float) -> dic
         not fresh_now
         or bundle["isolation"]["status"] == "drift_observed"
         or "lease_expired" in limitations and env_state == "active"
+        # "active" in the persisted evidence log is not an independent runtime
+        # verification; without one the context cannot claim active.
+        or (env_state == "active" and "runtime_state_not_independently_reverified" in limitations)
     ):
         lifecycle = "unknown"
     else:

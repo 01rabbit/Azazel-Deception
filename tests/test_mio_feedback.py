@@ -920,6 +920,15 @@ def test_no_isolation_assertion_means_no_projected_terrain(world):
     assert "presented_terrain_not_projected" in bundle["limitations"]
 
 
+def test_no_mechanism_means_no_active_materialized_terrain(world):
+    _, plan, _, _, _, chain = _bind(world)
+    bundle = _bundle(world, chain, isolation_assertion_refs=("isolation-net-none",),
+                     active_surface_refs=("surface-a",))
+    assert bundle["runtime_materialization"]["presented_terrain"] is None
+    assert "presented_terrain_not_projected" in bundle["limitations"]
+    assert "runtime_state_not_independently_reverified" in bundle["limitations"]
+
+
 def test_empty_expected_telemetry_is_telemetry_missing(world):
     _, plan, _, _, _, chain = _bind(world)
     with pytest.raises(BindingRefused) as refused:
@@ -1641,7 +1650,8 @@ def test_consumer_age_reflects_consumption_time_not_build_time(world):
         (later_now - datetime.fromisoformat(anchor.replace("Z", "+00:00"))).total_seconds()
     )
     context = mio_deception_context(bundle, **_kw_at(world, chain, later_now))
-    assert context["lifecycle_state"] == "active"
+    # Persisted evidence-log "active" is not an independent runtime verification.
+    assert context["lifecycle_state"] == "unknown"
 
     # Past max_age at consumption time: refused, never reported as active.
     too_late = built + timedelta(seconds=MAX_AGE + 1)

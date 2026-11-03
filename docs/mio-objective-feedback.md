@@ -197,7 +197,12 @@ only, which comes from real interactions) and unknowns such as
 `DECEPTION_ISOLATION_NOT_ASSERTED`, `DECEPTION_ISOLATION_DRIFT_OBSERVED`,
 `DECEPTION_NO_INTERACTION_NOT_SAFETY`, `DECEPTION_LEASE_EXPIRED`,
 `DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND`. Anything AZ-06 cannot vouch for maps
-the lifecycle to `unknown`, never `active`.
+the lifecycle to `unknown`, never `active`. The persisted evidence-log state
+`active` is not an independent runtime verification (`runtime_state_not_independently_reverified`),
+so `mio_deception_context` and `mio_frame_inputs` report `unknown` for it. Without
+Edge mechanism evidence (`mechanism=`) no presented terrain is projected: the
+bundle carries `presented_terrain: null` with `presented_terrain_not_projected`,
+and no `ACTIVE_MATERIALIZED` or active surface is claimed from caller strings.
 
 ## Requests to other teams
 

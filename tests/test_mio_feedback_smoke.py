@@ -195,7 +195,8 @@ def test_full_lifecycle_bundle_and_consumers(lifecycle):
     payload = knowledge_ingest_payload(bundle, **kw)
     assert payload["environment_id"] == ENV and len(payload["items"]) == 1
     context = mio_deception_context(bundle, **kw)
-    assert context["lifecycle_state"] == "active" and len(context["observation_refs"]) == 1
+    # Persisted evidence-log "active" is not an independent runtime verification.
+    assert context["lifecycle_state"] == "unknown" and len(context["observation_refs"]) == 1
 
 
 def test_silence_carries_a_limitation_and_stale_bundle_is_refused(lifecycle):
@@ -467,7 +468,7 @@ def test_objective_coverage_and_frame_inputs(lifecycle):
         bundle, expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300
     )
     assert "DECEPTION_TELEMETRY_GAP_NETWORK" in inputs["unknowns"]
-    assert inputs["deception_context"]["lifecycle_state"] == "active"
+    assert inputs["deception_context"]["lifecycle_state"] == "unknown"
 
 
 # --- regressions for the second review (R1, R2) -----------------------------
