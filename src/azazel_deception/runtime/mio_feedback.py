@@ -1800,12 +1800,21 @@ def knowledge_ingest_payload(
 _MIO_OBSERVATION_REFS_CAP = 8
 
 
-def _context(bundle: Mapping[str, Any]) -> dict[str, Any]:
+def _age_at(bundle: Mapping[str, Any], now: datetime) -> float:
+    """Age of the bundle's newest evidence at consumption time ``now``."""
+
+    anchor = _parse_ts(bundle["freshness"]["observed_at"])
+    return max(0.0, (_aware(now) - anchor).total_seconds())
+
+
+def _context(bundle: Mapping[str, Any], *, now: datetime, max_age: float) -> dict[str, Any]:
     chain = bundle["reference_chain"]
     env_state = bundle["runtime_materialization"].get("environment_state")
     limitations = set(bundle["limitations"])
+    # Freshness is judged at consumption time, not at build time.
+    fresh_now = bool(bundle["freshness"]["fresh"]) and _age_at(bundle, now) <= float(max_age)
     if (
-        not bundle["freshness"]["fresh"]
+        not fresh_now
         or bundle["isolation"]["status"] == "drift_observed"
         or "lease_expired" in limitations and env_state == "active"
     ):
@@ -1841,7 +1850,7 @@ def mio_deception_context(
     """
 
     _verified(bundle, expected_chain, state, now, max_age, mechanism)
-    return _context(bundle)
+    return _context(bundle, now=now, max_age=max_age)
 
 
 def _marker(name: str) -> str:
@@ -1884,7 +1893,9 @@ def mio_frame_inputs(
         elif status == "observed":
             known_facts.append(f"DECEPTION_DESIRED_OBSERVED_{suffix}")
         elif status == "not_observed_with_coverage":
-            known_facts.append(f"DECEPTION_DESIRED_NOT_OBSERVED_WITH_COVERAGE_{suffix}")
+            # Coverage is caller-declared (surface_telemetry/observed_telemetry), so
+            # "not observed" is an explicit unknown, never a known fact.
+            unknowns.append(f"DECEPTION_DESIRED_NOT_OBSERVED_CALLER_DECLARED_COVERAGE_{suffix}")
         elif status == "observed_confounded_only":
             unknowns.append(f"DECEPTION_DESIRED_OBSERVED_CONFOUNDED_ONLY_{suffix}")
         elif status == "observed_outside_lease_only":
@@ -1903,12 +1914,12 @@ def mio_frame_inputs(
         unknowns.append("DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND")
     unknowns = list(dict.fromkeys(unknowns))
     return {
-        "deception_context": _context(bundle),
+        "deception_context": _context(bundle, now=now, max_age=max_age),
         "deception_status": "available",
         "known_facts": list(dict.fromkeys(known_facts)),
         "unknowns": unknowns,
         "explicit_unknowns": list(unknowns),
-        "freshness_seconds": int(bundle["freshness"]["age_seconds"]),
+        "freshness_seconds": int(_age_at(bundle, now)),
         "evidence_refs": [i["observation_id"] for i in bundle["interactions"]][-32:],
     }
 

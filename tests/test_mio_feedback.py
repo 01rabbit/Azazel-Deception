@@ -15,7 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -1614,3 +1614,57 @@ def test_l1_verify_never_creates_a_key(world):
         with pytest.raises(BindingRefused):
             fn(bundle, **_kw(world, chain))
     assert not directory.exists() or not list(directory.glob("*.key"))
+
+
+# --- review M1/M2 regressions ------------------------------------------------
+
+
+def _kw_at(world, chain, now):
+    return dict(expected_chain=chain, state=world.adapter.state, now=now, max_age=MAX_AGE)
+
+
+def test_consumer_age_reflects_consumption_time_not_build_time(world):
+    """freshness_seconds and lifecycle use the consumer's now, not the build's."""
+
+    _, plan, _, objective, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    built = utcnow()
+    bundle = _bundle(world, chain, now=built, objective=objective)
+    anchor = bundle["freshness"]["observed_at"]
+
+    early = mio_frame_inputs(bundle, **_kw_at(world, chain, built))
+    later_now = built + timedelta(seconds=100)
+    later = mio_frame_inputs(bundle, **_kw_at(world, chain, later_now))
+    assert later["freshness_seconds"] - early["freshness_seconds"] in (99, 100, 101)
+    assert later["freshness_seconds"] <= MAX_AGE
+    assert later["freshness_seconds"] == int(
+        (later_now - datetime.fromisoformat(anchor.replace("Z", "+00:00"))).total_seconds()
+    )
+    context = mio_deception_context(bundle, **_kw_at(world, chain, later_now))
+    assert context["lifecycle_state"] == "active"
+
+    # Past max_age at consumption time: refused, never reported as active.
+    too_late = built + timedelta(seconds=MAX_AGE + 1)
+    with pytest.raises(BindingRefused) as refused:
+        mio_deception_context(bundle, **_kw_at(world, chain, too_late))
+    assert refused.value.code == "stale"
+    with pytest.raises(BindingRefused):
+        mio_frame_inputs(bundle, **_kw_at(world, chain, too_late))
+
+
+def test_caller_only_coverage_never_becomes_a_known_fact(world):
+    _, plan, _, objective, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    bundle = _bundle(
+        world, chain, objective=objective,
+        surface_telemetry={"service": "interaction_log", "credential_lure": "process_events"},
+    )
+    status = {(e["observation_class"], e["surface"]): e["status"]
+              for e in bundle["objective_coverage"]["entries"]}
+    assert status[("interaction", "credential_lure")] == "not_observed_with_coverage"
+
+    inputs = mio_frame_inputs(bundle, **_kw(world, chain))
+    assert not any("NOT_OBSERVED" in fact for fact in inputs["known_facts"])
+    assert "DECEPTION_DESIRED_OBSERVED_INTERACTION_SERVICE" in inputs["known_facts"]
+    assert "DECEPTION_DESIRED_NOT_OBSERVED_CALLER_DECLARED_COVERAGE_INTERACTION_CREDENTIAL_LURE" \
+        in inputs["unknowns"]

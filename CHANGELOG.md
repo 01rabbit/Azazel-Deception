@@ -24,6 +24,7 @@ are not proven (see `docs/live-gate-checklist.md`).
   - It reports one approved static environment as a bounded bundle of Fabric `v0.9.0rc5` types. The bundle verifies against the evidence chain and its current head before Knowledge or MIO receive it.
   - The bundle separates decision, execution request, materialization, mechanism, interaction, outcome and a tactical assessment fixed at `not_assessed`.
   - The module adds no activation, termination, withdrawal or routing path.
+  - Consumer freshness is measured at consumption time. Caller-declared telemetry coverage cannot turn an unobserved objective into a known fact, and the local evidence/MAC checks do not protect against a same-user rewrite of the state root.
   - Real-consumer checks: MIO `7a35288` and Knowledge `6b590f3`, run locally with `scripts/dev/mio_feedback_interop.sh`. They are not CI-gated because Knowledge is private.
   - Real-container check: `tests/test_mio_feedback_docker.py` in the executed-evidence Docker job.
   - Requests to other teams are listed in `docs/mio-objective-feedback.md`. No HIL gate is closed.

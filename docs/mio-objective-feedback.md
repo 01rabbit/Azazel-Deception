@@ -135,8 +135,10 @@ remain; on a `credential_lure` surface only the length remains.
 
 Each entry carries `observed_count`, `confounded_count`, `outside_lease_count`
 and a status: `observed`, `observed_confounded_only`,
-`observed_outside_lease_only`, `not_observed_with_coverage`,
-`undeterminable_telemetry_gap:<name>` or `undeterminable_unmapped_surface:<surface>`.
+`observed_outside_lease_only`, `not_observed_with_coverage` (caller-declared
+coverage only: the "observed" telemetry names are the caller's declaration, so
+this is never a known fact), `undeterminable_telemetry_gap:<name>` or
+`undeterminable_unmapped_surface:<surface>`.
 Desired observations are not hypothesis-specific, which the section states as
 `desired_observations_not_hypothesis_specific`. `freshness.anchor_kind` is
 `last_interaction` or `activation`.
@@ -149,8 +151,16 @@ evidence chain cut at that head plus the inputs the caller declared, and
 compares every key. The bundle's head must be the chain's current head:
 evidence appended later (a drift, a new contact) makes it `stale`.
 `allow_historical=True` (audit only; the consumers cannot ask for it) accepts
-an earlier head, never for a bundle claiming a live effect. Any rewrite of isolation, limitations, freshness,
-interactions, coverage or environment state is `evidence_tampered`. The Edge
+an earlier head, never for a bundle claiming a live effect. A rewrite of
+isolation, limitations, freshness, interactions, coverage or environment state
+that does not match the evidence is `evidence_tampered` (subject to the limit
+described under Verification below).
+
+Freshness is judged at consumption time. `freshness_seconds` from
+`mio_frame_inputs` and the lifecycle from `mio_deception_context` use the
+consumer's `now`, measured from the bundle's `freshness.observed_at` anchor. A
+bundle older than `max_age` at consumption is refused (`stale`) and is never
+reported as `active`. The Edge
 mechanism evidence must be supplied again (`mechanism=`) for a bundle that
 claims an observed mechanism. The knowledge and MIO projections
 (`knowledge_ingest_payload`, `mio_deception_context`, `mio_frame_inputs`) call
@@ -158,9 +168,19 @@ verify themselves and need `expected_chain`, `state`, `now`, `max_age`.
 
 `caller_declared` (telemetry names, isolation assertion refs, surfaces, the
 surface-to-telemetry map) is the build caller's declaration. It is covered by
-`caller_declared_mac`, an HMAC under the per-session key, so a change after
-build is detected (`evidence_tampered`); the truth of the declaration is not
-guaranteed. The Edge mechanism evidence is likewise assumed to be received
+`caller_declared_mac`, an HMAC under the per-session key. That is a local
+integrity check: it detects a change to the declaration made by a party that
+cannot read the key (`evidence_tampered`). It is not an external anchor, and it
+does not make the declaration true.
+
+Limits of tamper detection. The evidence chain and the MAC are not tamper-proof
+against a writer who has the same OS user's access to the same state root. Such
+a writer can rewrite the evidence file and the adjacent session key, then
+recompute the hashes and the MAC, and verification will pass. The narrow claim
+is therefore: evidence and declarations altered without the key, or without
+recomputing the chain, are detected. Detecting a same-user rewrite needs an
+external anchor (for example a head hash held by another party), which this
+design does not provide. The Edge mechanism evidence is likewise assumed to be received
 from Edge over a trusted path and presented again by the caller. The session
 key is not discarded on reset, because earlier digests must stay checkable;
 key files must be regular, owner-only (0600) files of exactly 32 bytes in a
@@ -169,8 +189,10 @@ key files must be regular, owner-only (0600) files of exactly 32 bytes in a
 `mio_frame_inputs` returns what MIO 7a35288's `MioSituationFrameBuilder.build`
 accepts (`deception_context`, `explicit_unknowns`) and what
 `MioSituationFrame.build` accepts (`unknowns`, `freshness_seconds`,
-`evidence_refs`) plus `known_facts` (`DECEPTION_DESIRED_OBSERVED_<CLASS>_<SURFACE>`,
-`DECEPTION_DESIRED_NOT_OBSERVED_WITH_COVERAGE_<CLASS>_<SURFACE>`) and unknowns such as
+`evidence_refs`) plus `known_facts` (`DECEPTION_DESIRED_OBSERVED_<CLASS>_<SURFACE>`
+only, which comes from real interactions) and unknowns such as
+`DECEPTION_DESIRED_NOT_OBSERVED_CALLER_DECLARED_COVERAGE_<CLASS>_<SURFACE>` (a
+"not observed" that rests on caller-declared coverage is an unknown, not a fact),
 `DECEPTION_UNMAPPED_SURFACE_<SURFACE>`: `DECEPTION_TELEMETRY_GAP_<NAME>`, `DECEPTION_EVIDENCE_STALE`,
 `DECEPTION_ISOLATION_NOT_ASSERTED`, `DECEPTION_ISOLATION_DRIFT_OBSERVED`,
 `DECEPTION_NO_INTERACTION_NOT_SAFETY`, `DECEPTION_LEASE_EXPIRED`,
