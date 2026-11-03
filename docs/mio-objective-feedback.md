@@ -86,8 +86,9 @@ Fabric has no tenant field in the pinned effect and outcome types. `node_id`
 isolation guarantee between tenants.
 
 `trace_id` is **not authenticated**: the decision HMAC covers the decision, not
-the effect. One decision binds one effect only (recorded as
-`mio_bound_effect_ref` in the runtime state); a second effect with another
+the effect. One decision binds one effect only (recorded as an
+exclusively created file under `<state root>/mio_bindings/`; the runtime state
+is never written by this module); a second effect with another
 trace is refused (`effect_rejected`).
 
 ## Objective content
@@ -130,22 +131,47 @@ now plus 5 s. `untrusted_text` is never stored: only its length and a keyed
 HMAC-SHA256 (a per-session random key kept beside, not in, the evidence chain)
 remain; on a `credential_lure` surface only the length remains.
 
+### Coverage entries
+
+Each entry carries `observed_count`, `confounded_count`, `outside_lease_count`
+and a status: `observed`, `observed_confounded_only`,
+`observed_outside_lease_only`, `not_observed_with_coverage`,
+`undeterminable_telemetry_gap:<name>` or `undeterminable_unmapped_surface:<surface>`.
+Desired observations are not hypothesis-specific, which the section states as
+`desired_observations_not_hypothesis_specific`. `freshness.anchor_kind` is
+`last_interaction` or `activation`.
+
 ### Verification
 
 `verify_feedback_bundle` believes nothing the bundle says about itself. It
 requires the evidence head the bundle names, rebuilds the whole bundle from the
 evidence chain cut at that head plus the inputs the caller declared, and
-compares every key. Any rewrite of isolation, limitations, freshness,
+compares every key. The bundle's head must be the chain's current head:
+evidence appended later (a drift, a new contact) makes it `stale`.
+`allow_historical=True` (audit only; the consumers cannot ask for it) accepts
+an earlier head, never for a bundle claiming a live effect. Any rewrite of isolation, limitations, freshness,
 interactions, coverage or environment state is `evidence_tampered`. The Edge
 mechanism evidence must be supplied again (`mechanism=`) for a bundle that
 claims an observed mechanism. The knowledge and MIO projections
 (`knowledge_ingest_payload`, `mio_deception_context`, `mio_frame_inputs`) call
 verify themselves and need `expected_chain`, `state`, `now`, `max_age`.
 
+`caller_declared` (telemetry names, isolation assertion refs, surfaces, the
+surface-to-telemetry map) is the build caller's declaration. It is covered by
+`caller_declared_mac`, an HMAC under the per-session key, so a change after
+build is detected (`evidence_tampered`); the truth of the declaration is not
+guaranteed. The Edge mechanism evidence is likewise assumed to be received
+from Edge over a trusted path and presented again by the caller. The session
+key is not discarded on reset, because earlier digests must stay checkable;
+key files must be regular, owner-only (0600) files of exactly 32 bytes in a
+0700 directory, otherwise `evidence_tampered`.
+
 `mio_frame_inputs` returns what MIO 7a35288's `MioSituationFrameBuilder.build`
 accepts (`deception_context`, `explicit_unknowns`) and what
 `MioSituationFrame.build` accepts (`unknowns`, `freshness_seconds`,
-`evidence_refs`): `DECEPTION_TELEMETRY_GAP_<NAME>`, `DECEPTION_EVIDENCE_STALE`,
+`evidence_refs`) plus `known_facts` (`DECEPTION_DESIRED_OBSERVED_<CLASS>_<SURFACE>`,
+`DECEPTION_DESIRED_NOT_OBSERVED_WITH_COVERAGE_<CLASS>_<SURFACE>`) and unknowns such as
+`DECEPTION_UNMAPPED_SURFACE_<SURFACE>`: `DECEPTION_TELEMETRY_GAP_<NAME>`, `DECEPTION_EVIDENCE_STALE`,
 `DECEPTION_ISOLATION_NOT_ASSERTED`, `DECEPTION_ISOLATION_DRIFT_OBSERVED`,
 `DECEPTION_NO_INTERACTION_NOT_SAFETY`, `DECEPTION_LEASE_EXPIRED`,
 `DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND`. Anything AZ-06 cannot vouch for maps
