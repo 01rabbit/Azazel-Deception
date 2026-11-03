@@ -563,3 +563,73 @@ def test_l1_verify_never_creates_a_session_key(lifecycle):
         _verify(lc, chain, bundle, now)
     assert info.value.code == "evidence_tampered" and "session key missing" in str(info.value)
     assert not keys.exists()
+
+
+# --- limitation tokens against the shared conventions (C2, C3) --------------
+
+_C2 = __import__("re").compile(r"[a-z][a-z0-9_]{2,63}(:[A-Za-z0-9._-]{1,64})?")
+
+
+def _c3_hits(token):
+    import re
+
+    from azazel_deception.runtime.mio_feedback import COMMAND_WORDS
+
+    return set(re.split(r"[_.~:-]+", token.lower())) & COMMAND_WORDS
+
+
+def test_telemetry_names_exclude_colon_and_command_words(lifecycle):
+    lc = lifecycle
+    _, chain = _activate(lc)
+    now = lc["now"] + timedelta(seconds=5)
+    for bad in ("net:flow", "run-sensor", "Redirect.log", "a_b.shell", "x" * 65, ""):
+        with pytest.raises(BindingRefused) as info:
+            build_feedback_bundle(
+                lc["adapter"], chain, now=now, max_age=300,
+                expected_telemetry=[bad], observed_telemetry=[],
+            )
+        assert info.value.code == "telemetry_missing"
+    with pytest.raises(BindingRefused) as info:
+        build_feedback_bundle(
+            lc["adapter"], chain, now=now, max_age=300, expected_telemetry=["ok"],
+            observed_telemetry=["ok"], surface_telemetry={"service": "stop"},
+        )
+    assert info.value.code == "telemetry_missing"
+    # near-misses are fine: segments are compared whole
+    build_feedback_bundle(
+        lc["adapter"], chain, now=now, max_age=300,
+        expected_telemetry=["redirection", "isolation", "active_log"], observed_telemetry=[],
+    )
+
+
+def test_every_emitted_limitation_token_fits_c2_and_avoids_c3(lifecycle):
+    from azazel_deception.runtime.isolation_drift import IsolationDriftObserver
+
+    lc = lifecycle
+    _, chain = _activate(lc)
+    observer = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    observer.record(observation_class="interaction", surface="service")
+    # an unbound interaction and one outside the lease give the dynamic tokens
+    plain = lc["adapter"].make_observer(
+        ENV, lc["adapter"].validate_package(lc["package"]), PlacementPlan.model_validate(lc["plan"])
+    )
+    plain.record(observation_class="interaction", surface="service")
+    late = lc["now"] + timedelta(minutes=6)
+    bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: late).record(
+        observation_class="interaction", surface="service"
+    )
+    IsolationDriftObserver(
+        lc["adapter"].state, environment_id=ENV, package_id=chain.package_id, node_id=chain.node_id
+    ).observe({"route_to_protected": ["10.0.0.0/8"], "published_port": [], "capability_regranted": []})
+    bundle = build_feedback_bundle(
+        lc["adapter"], chain, now=late, max_age=1,
+        expected_telemetry=["flow.log", "x-y_z"], observed_telemetry=["flow.log"],
+    )
+    tokens = set(bundle["limitations"])
+    tokens |= set(bundle["runtime_materialization"]["effect_observation"]["limitations"])
+    assert any(t.startswith("telemetry_gap:") for t in tokens)
+    assert any(t.startswith("unbound_interactions_excluded:") for t in tokens)
+    assert any(t.startswith("interactions_outside_lease:") for t in tokens)
+    for token in tokens:
+        assert _C2.fullmatch(token), token
+        assert not _c3_hits(token), token

@@ -166,7 +166,22 @@ ALLOWED_METADATA_KEYS = frozenset(
     }
 )
 _METADATA_STRING = re.compile(r"[A-Za-z0-9._:-]{1,64}")
-_TELEMETRY_NAME = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+_TELEMETRY_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+#: Shared command-word set (conventions C3). A name is refused when any
+#: segment, split on ``_ - . ~ :`` and lower-cased, is one of these.
+COMMAND_WORDS = frozenset(
+    "activate activation deactivate execute exec run start stop open allow authorize "
+    "authorized approve approved enable extend terminate withdraw block isolate quarantine "
+    "redirect expose command shell sudo deploy install delete kill override enforce grant "
+    "granted bypass".split()
+)
+_SEGMENT_SPLIT = re.compile(r"[_.~:-]+")
+
+
+def _telemetry_name_ok(value: Any) -> bool:
+    if not isinstance(value, str) or not _TELEMETRY_NAME.fullmatch(value):
+        return False
+    return not (set(_SEGMENT_SPLIT.split(value.lower())) & COMMAND_WORDS)
 _SAFE_ENV = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _OBJECTIVE_DIGEST_PREFIX = "mio-objective-digest-"
 _OPAQUE = re.compile(r"[A-Za-z0-9._~@=+:-]{1,200}")
@@ -1032,7 +1047,7 @@ def _names(value: Any, *, name: str) -> list[str]:
         raise BindingRefused("telemetry_missing", f"{name} must be a collection of names")
     out = []
     for item in value:
-        if not isinstance(item, str) or not _TELEMETRY_NAME.fullmatch(item):
+        if not _telemetry_name_ok(item):
             raise BindingRefused("telemetry_missing", f"{name} holds an invalid name")
         out.append(item)
     return sorted(set(out))
@@ -1535,7 +1550,7 @@ def _assert_bundle_clean(bundle: Mapping[str, Any]) -> None:
 def _surface_map(value: Mapping[str, str] | None) -> dict[str, str]:
     out: dict[str, str] = {}
     for surface, name in dict(value or {}).items():
-        if surface not in _SURFACES or not isinstance(name, str) or not _TELEMETRY_NAME.fullmatch(name):
+        if surface not in _SURFACES or not _telemetry_name_ok(name):
             raise BindingRefused("telemetry_missing", "surface_telemetry holds an invalid entry")
         out[surface] = name
     return out
