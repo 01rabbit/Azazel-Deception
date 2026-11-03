@@ -204,6 +204,13 @@ Edge mechanism evidence (`mechanism=`) no presented terrain is projected: the
 bundle carries `presented_terrain: null` with `presented_terrain_not_projected`,
 and no `ACTIVE_MATERIALIZED` or active surface is claimed from caller strings.
 
+Current mechanism evidence alone does not independently verify runtime or
+isolation. A persisted `active` state with mechanism evidence projects as a
+`stale` presented terrain (`runtime_active_not_independently_verified`), and the
+caller-declared surfaces are not carried on that path (`active_surface_refs: []`).
+Active terrain is never emitted until a real runtime verifier input exists; the
+mechanism projection itself is kept through #31.
+
 ## Requests to other teams
 
 The numbering is this document's own; reconcile it with the team ledger.

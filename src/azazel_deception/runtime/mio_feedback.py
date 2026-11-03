@@ -1061,8 +1061,6 @@ def _terrain(
     reset_ref: str | None,
     mechanism: ProducerRedirectionEvidence | None,
     assertions: tuple[str, ...],
-    surfaces: tuple[str, ...],
-    surfaces_attested: bool,
     now: datetime,
     evidence_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
@@ -1096,10 +1094,15 @@ def _terrain(
             expected_package_digest=chain.package_digest,
             package_version="not_recorded",
             observed_at=_iso(now),
-            active_surface_refs=surfaces,
+            # Caller-declared surfaces are not carried on this unverified path.
+            active_surface_refs=(),
             isolation_assertion_refs=assertions[:1],
             reset_ref=reset_ref if env_state == "reset" else None,
-            runtime_verified_active=surfaces_attested,
+            # Current mechanism evidence alone does not independently verify
+            # runtime or isolation, and AZ-06 has no real verifier input yet. A
+            # persisted "active" therefore projects as a stale snapshot
+            # (runtime_active_not_independently_verified) with no active surfaces.
+            runtime_verified_active=False,
             expires_at=_iso(expires),
             evidence_refs=evidence_refs,
         )
@@ -1377,8 +1380,7 @@ def _derive(
     reset_ref = f"evidence:{resets[-1].get('_evidence_hash')}" if resets else None
     terrain = _terrain(
         chain=chain, env_state=env_state, activated_at=activated_at, ended_at=ended_at,
-        reset_ref=reset_ref, mechanism=mech, assertions=assertions, surfaces=surfaces,
-        surfaces_attested=bool(surfaces) and env_state == "active" and not drift and fresh and not lease_closed,
+        reset_ref=reset_ref, mechanism=mech, assertions=assertions,
         now=now, evidence_refs=tuple(evidence_ref_list[:100]),
     )
     if terrain is None:
