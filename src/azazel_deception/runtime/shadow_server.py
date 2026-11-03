@@ -35,6 +35,7 @@ endpoint being reachable.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import threading
@@ -81,7 +82,8 @@ def _echo_request_id(envelope: Any) -> str:
 
     Valid non-empty string IDs are echoed verbatim. Absent/empty IDs keep the
     legacy ``missing`` placeholder; any other type is reported as
-    ``unparsable`` so a hostile payload cannot shape the response.
+    ``unparsable`` (including strings that are not encodable as UTF-8) so a
+    hostile payload cannot shape or break the signed response.
     """
 
     if not isinstance(envelope, dict):
@@ -90,6 +92,11 @@ def _echo_request_id(envelope: Any) -> str:
     if value is None or value == "":
         return "missing"
     if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            # Lone surrogates cannot be signed (canonical bytes are UTF-8).
+            return "unparsable"
         return value
     return "unparsable"
 
@@ -98,9 +105,9 @@ def _ledger_key(request_id: str) -> str | None:
     """Derive the SHA-256 fallback one-shot ledger key for a request_id.
 
     This is only used when the raw ``shadow-request-<request_id>`` marker is
-    rejected by state-store path validation (unsafe filesystem characters).
-    Older builds always wrote the raw marker, so they could never have written
-    such an ID; the SHA key therefore cannot be missed by a rollback. Returns
+    rejected by state-store path validation (unsafe filesystem characters) or
+    is too long for the filesystem (ENAMETOOLONG). Older builds always wrote
+    the raw marker, so they could never have written such an ID; the SHA key therefore cannot be missed by a rollback. Returns
     ``None`` for strings that cannot be encoded as UTF-8 (lone surrogates),
     which the caller rejects as malformed.
     """
@@ -109,7 +116,9 @@ def _ledger_key(request_id: str) -> str | None:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
     except UnicodeEncodeError:
         return None
-    return f"shadow-request-{digest}"
+    # "_" after "request" can never be produced by the raw marker
+    # ("shadow-request-" + id), so this namespace cannot collide with a raw ID.
+    return f"shadow-request_sha256-{digest}"
 
 
 class ShadowReplayService:
@@ -235,8 +244,9 @@ class ShadowReplayService:
         same key older builds wrote, so a rollback sees and honours markers
         written by this build. ``consume_decision`` is atomic on that key, so
         old and new markers are checked without a separate pre-check. Only a
-        ``ValueError`` from path validation (unsafe filesystem characters) falls
-        back to ``fallback_key``, the SHA-256 key.
+        ``ValueError`` from path validation (unsafe filesystem characters) or an
+        ``OSError`` with ``ENAMETOOLONG`` falls back to ``fallback_key``, the
+        SHA-256 key. Other ``OSError`` values propagate (fail closed).
         """
 
         raw_key = f"shadow-request-{request_id}"
@@ -254,6 +264,9 @@ class ShadowReplayService:
         except ValueError:
             # Unsafe path characters: old builds could not have written this ID.
             pass
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
         return self.state.consume_decision(fallback_key, _record(fallback_key))
 
     def _handle_inner(self, envelope: Any) -> dict[str, Any]:
@@ -488,7 +501,9 @@ class _ShadowRequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length > 0 else b""
             envelope = json.loads(body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # Unparsable body (incl. pathologically nested JSON): let handle()
+            # reject it as a malformed envelope, signed and audited.
             envelope = None
         response = self.service.handle(envelope)
         encoded = json.dumps(response).encode("utf-8")

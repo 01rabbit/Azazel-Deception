@@ -1,6 +1,9 @@
 """Tests for the authenticated Edge shadow/replay service."""
 
+import errno
+import hashlib
 import json
+import threading
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -387,3 +390,162 @@ def test_audit_store_failure_returns_signed_audit_write_failed(service, tmp_path
     assert response["reason_codes"] == ["audit_write_failed"]
     _assert_signed_response(response)
     assert _audit_events(tmp_path) == []
+
+
+def _post_raw(server, body: bytes):
+    host, port = server.address
+    request = urllib.request.Request(
+        f"http://{host}:{port}/shadow",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as raw:
+        return json.loads(raw.read().decode("utf-8"))
+
+
+def test_lone_surrogate_request_id_gets_signed_rejection_and_audit(service, tmp_path):
+    envelope = {
+        "schema_version": REQUEST_SCHEMA,
+        "request_id": "\ud800",
+        "edge_node_id": EDGE_ID,
+        "az06_node_id": NODE_ID,
+        "action": "capabilities",
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "payload": {},
+        ENVELOPE_SIGNATURE_FIELD: "0" * 64,
+    }
+    response = service.handle(envelope)
+    assert response["status"] == "rejected"
+    assert response["request_id"] == "unparsable"
+    _assert_signed_response(response)
+    events = _audit_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["status"] == "rejected"
+
+
+def test_deeply_nested_json_body_gets_signed_rejection_and_audit(service, tmp_path):
+    body = b"[" * 200000 + b"]" * 200000
+    with ShadowReplayHTTPServer(service) as server:
+        response = _post_raw(server, body)
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["malformed_envelope"]
+    _assert_signed_response(response)
+    events = _audit_events(tmp_path)
+    assert [event["status"] for event in events] == ["rejected"]
+
+
+def test_concurrent_requests_keep_evidence_chain_intact(service, tmp_path):
+    # Drives ShadowReplayService.handle() directly (no HTTP) so the audit path
+    # is exercised deterministically: a fixed small worker pool, a barrier that
+    # releases all workers together for each batch, and 4 batches x 6 workers
+    # = 24 unique authenticated requests.
+    workers = 6
+    batches = 4
+    count = workers * batches
+    # Envelopes are built in the main thread: _envelope() mutates a module-level
+    # counter and is not thread-safe.
+    envelopes = [[_envelope("capabilities") for _ in range(workers)] for _ in range(batches)]
+    barrier = threading.Barrier(workers)
+    results = [[None] * workers for _ in range(batches)]
+    errors = []
+
+    def worker(index):
+        try:
+            for batch in range(batches):
+                barrier.wait(timeout=30)
+                results[batch][index] = service.handle(envelopes[batch][index])
+        except Exception as exc:  # surfaced via the assertion below
+            errors.append(exc)
+            barrier.abort()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not errors
+    assert not any(thread.is_alive() for thread in threads)
+
+    responses = [response for batch in results for response in batch]
+    assert len(responses) == count
+    assert all(response is not None and response["status"] == "ok" for response in responses)
+
+    store = RuntimeStateStore(tmp_path / "state")
+    assert store.verify_evidence_chain(AUDIT_ENVIRONMENT_ID) is True
+    events = _audit_events(tmp_path)
+    assert len(events) == count
+    assert [event["_evidence_seq"] for event in events] == list(range(count))
+
+
+def test_append_evidence_partial_write_failure_rolls_back_to_prior_eof(tmp_path, monkeypatch):
+    import azazel_deception.runtime.state as state_module
+
+    store = RuntimeStateStore(tmp_path / "state")
+    store.append_evidence("env", {"n": 1})
+    path = store.evidence_path("env")
+    before = path.read_bytes()
+
+    real_write = state_module.os.write
+
+    def partial_write(fd, data):
+        real_write(fd, bytes(data)[: len(data) // 2])
+        raise OSError(errno.EIO, "simulated partial write")
+
+    monkeypatch.setattr(state_module, "_write_all", lambda fd, data: partial_write(fd, data))
+    with pytest.raises(OSError):
+        store.append_evidence("env", {"n": 2})
+    monkeypatch.undo()
+
+    assert path.read_bytes() == before
+    assert store.verify_evidence_chain("env") is True
+    store.append_evidence("env", {"n": 3})
+    assert store.verify_evidence_chain("env") is True
+
+
+def test_append_evidence_does_not_repair_preexisting_corruption(tmp_path):
+    store = RuntimeStateStore(tmp_path / "state")
+    store.append_evidence("env", {"n": 1})
+    path = store.evidence_path("env")
+    path.write_bytes(path.read_bytes() + b'{"torn":')
+    corrupt = path.read_bytes()
+    with pytest.raises(ValueError):
+        store.append_evidence("env", {"n": 2})
+    assert path.read_bytes() == corrupt
+
+
+def test_overlong_safe_request_id_falls_back_to_sha_marker(service, tmp_path):
+    request_id = "a" * 300
+    envelope = _envelope("capabilities", request_id=request_id)
+    first = service.handle(envelope)
+    assert first["status"] == "ok"
+    assert first["request_id"] == request_id
+    store = RuntimeStateStore(tmp_path / "state")
+    assert store.decision_consumed(_ledger_key(request_id))
+    replay = service.handle(envelope)
+    assert replay["reason_codes"] == ["replayed_request"]
+
+
+def test_non_path_length_oserror_is_not_swallowed_into_fallback(service, tmp_path, monkeypatch):
+    def deny(decision_id, record):
+        raise OSError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(service.state, "consume_decision", deny)
+    response = service.handle(_envelope("capabilities"))
+    assert response["reason_codes"] == ["internal_error"]
+    _assert_signed_response(response)
+
+
+def test_sha_fallback_key_does_not_collide_with_raw_marker_of_digest_id(service, tmp_path):
+    unsafe_id = "tenant/a b"
+    digest = hashlib.sha256(unsafe_id.encode("utf-8")).hexdigest()
+    assert _ledger_key(unsafe_id) != f"shadow-request-{digest}"
+    raw_first = service.handle(_envelope("capabilities", request_id=digest))
+    unsafe = service.handle(_envelope("capabilities", request_id=unsafe_id))
+    assert raw_first["status"] == "ok"
+    assert unsafe["status"] == "ok"
+    # And in the other order, on a fresh unsafe/raw pair.
+    other_unsafe = "x/y z"
+    other_digest = hashlib.sha256(other_unsafe.encode("utf-8")).hexdigest()
+    assert service.handle(_envelope("capabilities", request_id=other_unsafe))["status"] == "ok"
+    assert service.handle(_envelope("capabilities", request_id=other_digest))["status"] == "ok"

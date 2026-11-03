@@ -9,7 +9,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -26,10 +25,12 @@ from tests.test_shadow_server import (
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src"
-STARTUP_TIMEOUT = 30.0
+# Generous bound: this runs after the full suite on constrained macOS CI.
+STARTUP_TIMEOUT = 120.0
 STARTUP_POLL_INTERVAL = 0.05
 REQUEST_TIMEOUT = 10.0
 SHUTDOWN_TIMEOUT = 10.0
+NO_STAGE_REPORTED = "<no stage reported>"
 # Test-child only: keep the freshness window far larger than any CI scheduling
 # delay so the request always reaches the replay ledger. The signed request
 # bytes are unchanged; only the server-side age bound differs.
@@ -43,10 +44,28 @@ _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 # It binds 127.0.0.1 on an OS-chosen port and, only after server.start(),
 # atomically writes "<port>\n" to the READY file given in argv[2]. It serves
 # until its stdin reaches EOF (parent closes it) so it cannot outlive the test.
-# stdout and stderr both go to a per-child log file (never an undrained PIPE).
+# argv[3] is a per-child STAGE file: the child atomically overwrites it with
+# its progress marker at each milestone so a startup timeout can report how
+# far the child got. stdout and stderr both go to a per-child log file (never
+# an undrained PIPE).
 _CHILD = """
 import os
 import sys
+
+stage_path = sys.argv[3]
+
+
+def _stage(name):
+    tmp = stage_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(name + "\\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, stage_path)
+
+
+_stage("pre-imports")
+
 from azazel_deception.runtime.shadow_server import ShadowReplayHTTPServer, ShadowReplayService
 from tests.test_shadow_server import COMPOSE, EDGE_ID, KEY, NODE_ID, PACKAGE, _synthetic_capabilities
 
@@ -62,6 +81,7 @@ service = ShadowReplayService(
     max_request_age_seconds=%r,
     capability_provider=_synthetic_capabilities,
 )
+_stage("imports-done-service-created")
 server = ShadowReplayHTTPServer(service, host="127.0.0.1", port=0)
 server.start()
 tmp_path = ready_path + ".tmp"
@@ -70,6 +90,7 @@ with open(tmp_path, "w", encoding="utf-8") as fh:
     fh.flush()
     os.fsync(fh.fileno())
 os.replace(tmp_path, ready_path)
+_stage("server-started-ready-written")
 try:
     sys.stdin.read()
 finally:
@@ -77,14 +98,26 @@ finally:
 """ % (TEST_MAX_REQUEST_AGE_SECONDS,)
 
 
-def _read_stderr(stderr_log):
-    """Return everything the child has written to its log so far (non-destructive)."""
-    stderr_log.flush()
-    stderr_log.seek(0)
-    return stderr_log.read()
+def _read_log(log_path):
+    """Return everything the child has written to its log so far.
+
+    Opens an independent file handle on every call. The parent never holds the
+    writer's file description, so reads cannot share an offset with the child.
+    """
+    with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+        return fh.read()
 
 
-def _stop_child(proc, stderr_log):
+def _read_stage(stage_path):
+    """Return the last stage the child reported, or a marker if none yet."""
+    try:
+        text = Path(stage_path).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return NO_STAGE_REPORTED
+    return text or NO_STAGE_REPORTED
+
+
+def _stop_child(proc, log_path):
     """Close stdin, bound the wait (kill on timeout), and return (returncode, log text)."""
     try:
         if proc.poll() is None:
@@ -102,34 +135,37 @@ def _stop_child(proc, stderr_log):
         if proc.stdin is not None:
             proc.stdin.close()
     returncode = proc.returncode
-    stderr_text = _read_stderr(stderr_log)
-    stderr_log.close()
-    return returncode, stderr_text
+    return returncode, _read_log(log_path)
 
 
 def _start_child(tmp_path, state_root, label):
-    """Start a child serving process; return (proc, port, stderr_log).
+    """Start a child serving process; return (proc, port, log_path).
 
     Readiness is signalled through a per-child READY file written only after
     server.start(). The parent polls it against a monotonic deadline and fails
-    fast if the child exits during startup.
+    fast if the child exits during startup. On timeout the error names the
+    last stage the child completed.
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(SRC), str(REPO), env.get("PYTHONPATH", "")) if p
     )
     ready_path = Path(tmp_path) / f"ready-{label}.txt"
-    # Per-child log file receives both stdout and stderr: never an undrained PIPE.
-    log = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, "-c", _CHILD, str(state_root), str(ready_path)],
-        cwd=str(REPO),
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=log,
-        stderr=log,
-        text=True,
-    )
+    stage_path = Path(tmp_path) / f"stage-{label}.txt"
+    # Named per-child log receives both stdout and stderr: never an undrained PIPE.
+    log_path = Path(tmp_path) / f"child-{label}.log"
+    # The parent closes its writer handle right after Popen; the child keeps the
+    # inherited descriptor. All parent reads go through _read_log's own handle.
+    with open(log_path, "w", encoding="utf-8") as log_out:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _CHILD, str(state_root), str(ready_path), str(stage_path)],
+            cwd=str(REPO),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=log_out,
+            stderr=log_out,
+            text=True,
+        )
     try:
         deadline = time.monotonic() + STARTUP_TIMEOUT
         port = None
@@ -141,22 +177,24 @@ def _start_child(tmp_path, state_root, label):
                     break
             if proc.poll() is not None:
                 raise AssertionError(
-                    f"shadow child exited during startup: returncode={proc.returncode}"
+                    f"shadow child exited during startup: returncode={proc.returncode}; "
+                    f"last stage: {_read_stage(stage_path)}"
                 )
             if time.monotonic() >= deadline:
                 raise AssertionError(
-                    f"shadow child did not report READY within {STARTUP_TIMEOUT}s"
+                    f"shadow child did not report READY within {STARTUP_TIMEOUT}s; "
+                    f"last stage: {_read_stage(stage_path)}"
                 )
             time.sleep(STARTUP_POLL_INTERVAL)
     except BaseException as exc:
-        _, stderr_text = _stop_child(proc, log)
+        _, child_text = _stop_child(proc, log_path)
         if isinstance(exc, AssertionError):
-            raise AssertionError(f"{exc}; child output:\n{stderr_text}") from None
+            raise AssertionError(f"{exc}; child output:\n{child_text}") from None
         raise
-    return proc, port, log
+    return proc, port, log_path
 
 
-def _post(port, body: bytes, stderr_log):
+def _post(port, body: bytes, log_path):
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/shadow",
         data=body,
@@ -167,7 +205,7 @@ def _post(port, body: bytes, stderr_log):
         with _NO_PROXY_OPENER.open(request, timeout=REQUEST_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        child_output = _read_stderr(stderr_log)
+        child_output = _read_log(log_path)
         raise AssertionError(
             f"POST /shadow to 127.0.0.1:{port} failed: {exc!r}; "
             f"child output:\n{child_output}"
@@ -179,12 +217,12 @@ def test_replayed_capabilities_envelope_rejected_after_process_restart(tmp_path)
     envelope = _envelope("capabilities")
     body = json.dumps(envelope).encode("utf-8")
 
-    proc, port, stderr_log = _start_child(tmp_path, state_root, "first")
+    proc, port, log_path = _start_child(tmp_path, state_root, "first")
     first_pid = proc.pid
     try:
-        first = _post(port, body, stderr_log)
+        first = _post(port, body, log_path)
     finally:
-        first_rc, first_stderr = _stop_child(proc, stderr_log)
+        first_rc, first_stderr = _stop_child(proc, log_path)
     assert first_rc == 0, (
         f"first shadow child (pid {first_pid}) did not exit cleanly: "
         f"returncode={first_rc}; child output:\n{first_stderr}"
@@ -194,12 +232,12 @@ def test_replayed_capabilities_envelope_rejected_after_process_restart(tmp_path)
     assert first["enforcement_applied"] is False, f"first response: {first!r}"
     _assert_signed_response(first)
 
-    proc, port, stderr_log = _start_child(tmp_path, state_root, "second")
+    proc, port, log_path = _start_child(tmp_path, state_root, "second")
     second_pid = proc.pid
     try:
-        replay = _post(port, body, stderr_log)
+        replay = _post(port, body, log_path)
     finally:
-        second_rc, second_stderr = _stop_child(proc, stderr_log)
+        second_rc, second_stderr = _stop_child(proc, log_path)
     assert second_rc == 0, (
         f"second shadow child (pid {second_pid}) did not exit cleanly: "
         f"returncode={second_rc}; child output:\n{second_stderr}"

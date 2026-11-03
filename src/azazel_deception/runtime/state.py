@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,33 @@ def _evidence_hash(record: dict[str, Any]) -> str:
     payload = {k: v for k, v in record.items() if k != _EVIDENCE_HASH}
     encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+_EVIDENCE_LOCKS_GUARD = threading.Lock()
+_EVIDENCE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _evidence_lock(path: Path) -> threading.Lock:
+    """Return the process-wide lock serializing appends to one evidence file.
+
+    Keyed by absolute path so every RuntimeStateStore instance in this process
+    that targets the same file shares one lock. This does not coordinate
+    separate processes.
+    """
+
+    key = os.path.abspath(path)
+    with _EVIDENCE_LOCKS_GUARD:
+        lock = _EVIDENCE_LOCKS.get(key)
+        if lock is None:
+            lock = _EVIDENCE_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -132,23 +160,51 @@ class RuntimeStateStore:
         Each record embeds its sequence number, the previous record's hash, and
         its own hash. Any edit, deletion, or reordering of a prior record breaks
         :meth:`verify_evidence_chain`.
+
+        Appends to one file are serialized within this process (not across
+        processes). A failed write/fsync is rolled back to the prior EOF.
         """
 
         path = self.root / "evidence" / f"{environment_id}.jsonl"
-        prev_hash = ""
-        seq = 0
-        if path.exists():
-            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-            if lines:
-                last = json.loads(lines[-1])
-                prev_hash = str(last.get(_EVIDENCE_HASH, ""))
-                seq = int(last.get(_EVIDENCE_SEQ, -1)) + 1
-        record = dict(event)
-        record[_EVIDENCE_SEQ] = seq
-        record[_EVIDENCE_PREV] = prev_hash
-        record[_EVIDENCE_HASH] = _evidence_hash(record)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        with _evidence_lock(path):
+            prev_hash = ""
+            seq = 0
+            if path.exists():
+                lines = [
+                    line
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                if lines:
+                    # Pre-existing corruption raises here; it is never repaired.
+                    last = json.loads(lines[-1])
+                    prev_hash = str(last.get(_EVIDENCE_HASH, ""))
+                    seq = int(last.get(_EVIDENCE_SEQ, -1)) + 1
+            record = dict(event)
+            record[_EVIDENCE_SEQ] = seq
+            record[_EVIDENCE_PREV] = prev_hash
+            record[_EVIDENCE_HASH] = _evidence_hash(record)
+            data = (json.dumps(record, sort_keys=True, default=str) + "\n").encode("utf-8")
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+            try:
+                offset = os.lseek(fd, 0, os.SEEK_END)
+                try:
+                    _write_all(fd, data)
+                    os.fsync(fd)
+                except BaseException:
+                    # Roll back a partial/unsynced append to the prior EOF so no
+                    # torn last line is left. If the rollback itself fails the
+                    # original error still propagates (fail closed), but the
+                    # file may then hold a torn line and nothing durable is
+                    # claimed; verify_evidence_chain would report it.
+                    try:
+                        os.ftruncate(fd, offset)
+                        os.fsync(fd)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                os.close(fd)
         return path
 
     def evidence_head_hash(self, environment_id: str) -> str | None:
