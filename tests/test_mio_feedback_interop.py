@@ -44,6 +44,7 @@ from azazel_deception.runtime.mio_feedback import (
     build_feedback_bundle,
     knowledge_ingest_payload,
     mio_deception_context,
+    mio_frame_inputs,
     verify_feedback_bundle,
 )
 from tests._mio_feedback_support import (
@@ -64,6 +65,12 @@ pytestmark = pytest.mark.skipif(
 
 EXPECTED = ("interaction_log", "process_events")
 MAX_AGE = 300.0
+
+
+def _kw(world, chain):
+    return dict(
+        expected_chain=chain, state=world.adapter.state, now=utcnow(), max_age=300.0
+    )
 
 
 def _required(name: str) -> str:
@@ -112,7 +119,7 @@ def test_mio_context_frame_and_no_model_handoff(scenario):
     from azazel_mio.handoff import build_no_model_handoff
 
     world, chain, bundle = scenario
-    context = MioDeceptionContext.coerce(mio_deception_context(bundle))
+    context = MioDeceptionContext.coerce(mio_deception_context(bundle, **_kw(world, chain)))
     assert context is not None, "MIO refused the Deception context (coerce -> None)"
     assert context.environment_id == world.environment_id
     assert context.node_id == chain.node_id
@@ -159,8 +166,8 @@ def test_mio_refuses_a_context_with_an_address_in_it(scenario):
 
     from azazel_mio.contracts import MioDeceptionContext
 
-    _, _, bundle = scenario
-    context = dict(mio_deception_context(bundle))
+    world, chain, bundle = scenario
+    context = dict(mio_deception_context(bundle, **_kw(world, chain)))
     context["node_id"] = "10.1.2.3"
     coerced = MioDeceptionContext.coerce(context)
     assert coerced is None or coerced.node_id == ""
@@ -281,8 +288,8 @@ def knowledge(tmp_path):
 
 
 def test_knowledge_accepts_ingests_and_is_idempotent_on_resend(scenario, knowledge):
-    _, _, bundle = scenario
-    payload = knowledge_ingest_payload(bundle)
+    world, chain, bundle = scenario
+    payload = knowledge_ingest_payload(bundle, **_kw(world, chain))
     assert len(payload["items"]) == 2
 
     status, body = knowledge.post(payload)
@@ -317,8 +324,8 @@ def test_knowledge_accepts_ingests_and_is_idempotent_on_resend(scenario, knowled
     ids=["verdict_field", "bad_class", "bad_surface", "missing_environment", "non_object_item"],
 )
 def test_knowledge_rejects_tampered_payload_with_422(scenario, knowledge, mutate):
-    _, _, bundle = scenario
-    payload = knowledge_ingest_payload(bundle)
+    world, chain, bundle = scenario
+    payload = knowledge_ingest_payload(bundle, **_kw(world, chain))
     mutate(payload)
     status, _ = knowledge.post(payload)
     assert status == 422
@@ -328,7 +335,7 @@ def test_knowledge_rejects_tampered_payload_with_422(scenario, knowledge, mutate
 
 def test_knowledge_unavailable_keeps_evidence_and_delivery_is_incomplete(scenario, knowledge):
     world, chain, bundle = scenario
-    payload = knowledge_ingest_payload(bundle)
+    payload = knowledge_ingest_payload(bundle, **_kw(world, chain))
     knowledge.stop()
 
     delivered = True
@@ -348,11 +355,11 @@ def test_knowledge_unavailable_keeps_evidence_and_delivery_is_incomplete(scenari
     verify_feedback_bundle(
         again, expected_chain=chain, state=world.adapter.state, now=utcnow(), max_age=MAX_AGE
     )
-    assert knowledge_ingest_payload(again)["items"] == payload["items"]
+    assert knowledge_ingest_payload(again, **_kw(world, chain))["items"] == payload["items"]
 
     # once Knowledge returns, the retained evidence is deliverable exactly once
     knowledge.start()
-    status, _ = knowledge.post(knowledge_ingest_payload(again))
+    status, _ = knowledge.post(knowledge_ingest_payload(again, **_kw(world, chain)))
     assert status == 202
     knowledge.drain()
     assert knowledge.row_count() == 2
@@ -387,7 +394,7 @@ def test_knowledge_advisory_reaches_mio_reevaluation_still_advisory_only(scenari
     from azazel_mio.frame_builder import MioSituationFrameBuilder
 
     world, chain, bundle = scenario
-    status, _ = knowledge.post(knowledge_ingest_payload(bundle))
+    status, _ = knowledge.post(knowledge_ingest_payload(bundle, **_kw(world, chain)))
     assert status == 202
     knowledge.drain()
     advisory = _get_advisory(knowledge, chain.environment_id)
@@ -399,7 +406,7 @@ def test_knowledge_advisory_reaches_mio_reevaluation_still_advisory_only(scenari
     assert advisory["observation_refs"] == bundle_ids
 
     now = utcnow().isoformat().replace("+00:00", "Z")
-    context = mio_deception_context(bundle)
+    context = mio_deception_context(bundle, **_kw(world, chain))
     frame = MioSituationFrameBuilder().build(
         events=[{"event_id": "ev:az06-1", "ts": now, "severity": 10}],
         noc_evaluation={}, soc_evaluation={}, current_defensive_state="OBSERVE",
@@ -471,13 +478,13 @@ def test_knowledge_advisory_text_that_looks_like_a_command_stays_a_reported_clai
     from azazel_mio.assistant import AssistantCore, ReportedKnowledgeContext
     from azazel_mio.frame_builder import MioSituationFrameBuilder
 
-    _, chain, bundle = scenario
+    world, chain, bundle = scenario
     now = utcnow().isoformat().replace("+00:00", "Z")
     frame = MioSituationFrameBuilder().build(
         events=[{"event_id": "ev:az06-1", "ts": now, "severity": 10}],
         noc_evaluation={}, soc_evaluation={}, current_defensive_state="OBSERVE",
         mission="az06-conformance", trace_id=chain.trace_id, frame_id="frame-55-cmd",
-        created_at=now, deception_context=mio_deception_context(bundle),
+        created_at=now, deception_context=mio_deception_context(bundle, **_kw(world, chain)),
     )
     reported = ReportedKnowledgeContext(
         source="azazel-knowledge", generation="interop-1", as_of=now,
@@ -491,3 +498,34 @@ def test_knowledge_advisory_text_that_looks_like_a_command_stays_a_reported_clai
     assert result["handoff"]["current_defensive_state"] == "OBSERVE"
     assert result["handoff"]["model_contribution"] == "none"
     assert all(h["verification"] != "verified" for h in result["hypotheses"])
+
+
+def test_mio_frame_carries_deception_unknowns_from_mio_frame_inputs(scenario):
+    """Telemetry gap / unasserted isolation / silence reach MIO as frame unknowns."""
+
+    from azazel_mio.frame_builder import MioSituationFrameBuilder
+    from azazel_mio.handoff import build_no_model_handoff
+
+    world, chain, _ = scenario
+    gappy = build_feedback_bundle(
+        world.adapter, chain, now=utcnow(), max_age=MAX_AGE,
+        expected_telemetry=EXPECTED, observed_telemetry=("interaction_log",), mechanism=None,
+        isolation_assertion_refs=(), active_surface_refs=(SURFACE,),
+    )
+    inputs = mio_frame_inputs(gappy, **_kw(world, chain))
+    assert inputs["explicit_unknowns"]
+    now = utcnow().isoformat().replace("+00:00", "Z")
+    frame = MioSituationFrameBuilder().build(
+        events=[{"event_id": "ev:az06-1", "ts": now, "severity": 10}],
+        noc_evaluation={}, soc_evaluation={}, current_defensive_state="OBSERVE",
+        mission="az06-conformance", trace_id=chain.trace_id, frame_id="frame-55-unk",
+        created_at=now, deception_context=inputs["deception_context"],
+        explicit_unknowns=inputs["explicit_unknowns"],
+    )
+    for marker in inputs["explicit_unknowns"]:
+        assert marker in frame.unknowns, f"MIO dropped {marker}"
+    assert any(m.startswith("DECEPTION_TELEMETRY_GAP_") for m in frame.unknowns)
+    assert "DECEPTION_ISOLATION_NOT_ASSERTED" in frame.unknowns
+    handoff = build_no_model_handoff(frame, reason="dependency_unavailable").to_dict()
+    assert handoff["counts"]["unknowns"] >= len(inputs["explicit_unknowns"])
+    assert handoff["model_contribution"] == "none"

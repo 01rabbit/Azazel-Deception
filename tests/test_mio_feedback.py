@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import timedelta
 
 import pytest
@@ -32,6 +33,8 @@ from azazel_deception.runtime.mio_feedback import (
     build_feedback_bundle,
     knowledge_ingest_payload,
     mio_deception_context,
+    mio_frame_inputs,
+    objective_digest,
     reset_feedback,
     verify_feedback_bundle,
 )
@@ -100,6 +103,12 @@ def _bundle(world, chain, **overrides):
     )
     kwargs.update(overrides)
     return build_feedback_bundle(world.adapter, chain, **kwargs)
+
+
+def _kw(world, chain, **extra):
+    return dict(
+        expected_chain=chain, state=world.adapter.state, now=utcnow(), max_age=MAX_AGE, **extra
+    )
 
 
 def _all_text(*objects) -> str:
@@ -336,10 +345,10 @@ def test_static_scenario_reference_chain_is_consistent_end_to_end(world):
     assert "virtual_or_local_evidence_not_hil" in bundle["limitations"]
 
     # downstream consumer shapes derive from the same bundle
-    ingest = knowledge_ingest_payload(bundle)
+    ingest = knowledge_ingest_payload(bundle, **_kw(world, chain))
     assert ingest["environment_id"] == world.environment_id
     assert len(ingest["items"]) == 1
-    context = mio_deception_context(bundle)
+    context = mio_deception_context(bundle, **_kw(world, chain))
     assert isinstance(context, dict)
 
     # terminate (Edge decision) and reset
@@ -476,13 +485,35 @@ def test_bind_after_lease_end_is_refused(world):
     assert refused.value.code == "lease_expired"
 
 
-def test_observer_refuses_outside_lease(world):
+def test_observation_outside_lease_is_recorded_marked_and_reported(world):
+    """M1: a late observation is a fact, recorded with a mark; it authorizes nothing."""
+
     decision_id, plan, signed, _, _, chain = _bind(world)
     late = chain.lease_end + timedelta(seconds=1)
     observer = bound_observer(world.adapter, chain, world.package, plan, now_fn=lambda: late)
+    recorded = observer.record(observation_class="interaction", surface="service")
+    assert recorded.metadata.get("outside_lease") is True
+
+    bundle = _bundle(world, chain, now=late)
+    assert "lease_expired" in bundle["limitations"]
+    assert bundle["interactions"][0]["metadata"].get("outside_lease") is True
+    observation = bundle["runtime_materialization"]["effect_observation"]
+    assert observation["status"] == "failed"
+    assert observation["termination_reason"] == "lease_expired_runtime_still_active"
+    # nothing was withdrawn by reporting it
+    assert world.adapter.collect_status(world.environment_id)["state"] == "active"
+    # the honest bundle verifies; one that claims a live session after the lease does not
+    verify_feedback_bundle(
+        bundle, expected_chain=chain, state=world.adapter.state, now=late, max_age=MAX_AGE
+    )
+    forged = copy.deepcopy(bundle)
+    forged["runtime_materialization"]["effect_observation"]["status"] = "active"
+    forged["runtime_materialization"]["effect_observation"]["termination_reason"] = None
     with pytest.raises(BindingRefused) as refused:
-        observer.record(observation_class="interaction", surface="service")
-    assert refused.value.code == "lease_expired"
+        verify_feedback_bundle(
+            forged, expected_chain=chain, state=world.adapter.state, now=late, max_age=MAX_AGE
+        )
+    assert refused.value.code in {"lease_expired", "evidence_tampered"}
 
 
 def test_session_from_before_reset_cannot_be_adopted_after_new_activation(world):
@@ -718,15 +749,22 @@ def test_untrusted_interaction_text_is_hashed_never_stored_or_forwarded(world):
     _, plan, _, _, _, chain = _bind(world)
     observation = _observer(world, chain, plan).record(
         observation_class="interaction",
-        surface="service",
+        surface="credential_lure",
         untrusted_text=INJECTION_TEXT,
     )
+    # credential_lure surface: not even a digest, only the length
     assert observation.metadata["untrusted_text_len"] == len(INJECTION_TEXT)
-    assert len(observation.metadata["untrusted_text_sha256"]) == 64
+    assert "untrusted_text_hmac" not in observation.metadata
+    assert "untrusted_text_sha256" not in observation.metadata
+    on_service = _observer(world, chain, plan).record(
+        observation_class="interaction", surface="service", untrusted_text=INJECTION_TEXT
+    )
+    assert len(on_service.metadata["untrusted_text_hmac"]) == 64
+    assert "untrusted_text_sha256" not in on_service.metadata
 
     bundle = _bundle(world, chain)
-    ingest = knowledge_ingest_payload(bundle)
-    context = mio_deception_context(bundle)
+    ingest = knowledge_ingest_payload(bundle, **_kw(world, chain))
+    context = mio_deception_context(bundle, **_kw(world, chain))
     evidence_file = world.adapter.state.evidence_path(world.environment_id).read_text(
         encoding="utf-8"
     )
@@ -752,7 +790,7 @@ def test_text_that_tries_to_forge_a_verdict_does_not_change_the_bundle(world):
     )
     bundle = _bundle(world, chain)
     assert bundle["tactical_assessment"] == baseline_tactical
-    assert "activate" not in json.dumps(mio_deception_context(bundle))
+    assert "activate" not in json.dumps(mio_deception_context(bundle, **_kw(world, chain)))
 
 
 def test_observer_rejects_verdict_in_metadata(world):
@@ -773,7 +811,7 @@ def test_knowledge_payload_envelope_shape(world):
     observer = _observer(world, chain, plan)
     observer.record(observation_class="interaction", surface="service")
     observer.record(observation_class="reaction", surface="credential_lure", reaction_kind="authenticate")
-    ingest = knowledge_ingest_payload(_bundle(world, chain))
+    ingest = knowledge_ingest_payload(_bundle(world, chain), **_kw(world, chain))
     assert set(ingest) == {"environment_id", "items"}
     assert [item["observation_class"] for item in ingest["items"]] == ["interaction", "reaction"]
     for item in ingest["items"]:
@@ -782,7 +820,7 @@ def test_knowledge_payload_envelope_shape(world):
 
 def test_mio_context_does_not_carry_authority_or_a_verdict(world):
     _, plan, _, _, _, chain = _bind(world)
-    context = mio_deception_context(_bundle(world, chain))
+    context = mio_deception_context(_bundle(world, chain), **_kw(world, chain))
     text = json.dumps(context).lower()
     for forbidden in ("signature", "decision_authority", "executable\": true", "effective"):
         assert forbidden not in text
@@ -872,7 +910,7 @@ def test_drift_makes_mio_context_lifecycle_unknown(world):
         world.adapter.state, environment_id=world.environment_id,
         package_id=chain.package_id, node_id=chain.node_id,
     ).observe({"route_to_protected": [], "published_port": ["8080"], "capability_regranted": []})
-    assert mio_deception_context(_bundle(world, chain))["lifecycle_state"] == "unknown"
+    assert mio_deception_context(_bundle(world, chain), **_kw(world, chain))["lifecycle_state"] == "unknown"
 
 
 def test_no_isolation_assertion_means_no_projected_terrain(world):
@@ -901,3 +939,294 @@ def test_interaction_without_chain_refs_is_excluded_and_flagged(world):
     bundle = _bundle(world, chain)
     assert bundle["interactions"] == []
     assert any(x.startswith("unbound_interactions_excluded:") for x in bundle["limitations"])
+
+
+# --- addendum 1: rebuild-and-compare verification, bounded inputs, coverage ------
+
+
+def _digest_ref_of(objective):
+    return "advisory:mio-objective-digest-" + objective_digest(objective).split(":", 1)[1][:32]
+
+
+def _admit(world, decision_id, extra_refs, objective=None):
+    objective = objective or accept_mio_objective(objective_payload())
+    plan = world.plan(decision_id)
+    signed = world.signed_decision(
+        decision_id, plan, evidence_refs=[OBJECTIVE_REF, HYPOTHESIS_REF, FRAME_REF, *extra_refs]
+    )
+    return objective, plan, signed
+
+
+def test_objective_digest_match_binds_content(world):
+    objective = accept_mio_objective(objective_payload())
+    decision_id = world.next_id()
+    _, plan, signed = _admit(world, decision_id, [_digest_ref_of(objective)])
+    admitted = admit_objective(objective, signed, authenticator=world.authenticator, now=utcnow())
+    assert isinstance(admitted, AdmittedObjective) and admitted.objective_content_bound is True
+
+
+def test_objective_digest_mismatch_is_advice_only(world):
+    objective = accept_mio_objective(objective_payload())
+    other = accept_mio_objective(objective_payload(desired_observations=[["interaction", "file"]]))
+    decision_id = world.next_id()
+    _, plan, signed = _admit(world, decision_id, [_digest_ref_of(other)])
+    result = admit_objective(objective, signed, authenticator=world.authenticator, now=utcnow())
+    assert isinstance(result, AdvisoryRetained)
+    assert world.adapter.state.decision_consumed(decision_id) is False
+
+
+def test_objective_digest_absent_is_admitted_but_reported_unbound(world):
+    _, plan, _, _, admitted, chain = _bind(world)
+    assert admitted.objective_content_bound is False and chain.objective_content_bound is False
+    bundle = _bundle(world, chain)
+    assert "objective_content_not_bound" in bundle["limitations"]
+    inputs = mio_frame_inputs(bundle, **_kw(world, chain))
+    assert "DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND" in inputs["unknowns"]
+
+
+def test_bound_objective_digest_carries_through_without_the_limitation(world):
+    objective = accept_mio_objective(objective_payload())
+    decision_id = world.next_id()
+    _, plan, signed = _admit(world, decision_id, [_digest_ref_of(objective)])
+    world.adapter.activate_environment(world.environment_id, world.package, plan, signed)
+    now = utcnow()
+    admitted = admit_objective(objective, signed, authenticator=world.authenticator, now=now)
+    chain = bind_reference_chain(
+        admitted=admitted, signed_activation_decision=signed,
+        defensive_effect_ref=accept_defensive_effect_ref(edge_effect_payload(decision_id, now)),
+        adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+    )
+    assert chain.objective_content_bound is True
+    assert chain.objective_digest == objective_digest(objective)
+    assert "objective_content_not_bound" not in _bundle(world, chain)["limitations"]
+
+
+def test_second_effect_for_one_decision_is_rejected(world):
+    decision_id, plan, signed, _, admitted, chain = _bind(world)
+    now = utcnow()
+    second = accept_defensive_effect_ref(
+        edge_effect_payload(decision_id, now, effect_id="effect:second-for-same-decision")
+    )
+    with pytest.raises(BindingRefused) as refused:
+        bind_reference_chain(
+            admitted=admitted, signed_activation_decision=signed, defensive_effect_ref=second,
+            adapter=world.adapter, environment_id=world.environment_id, now=now,
+        )
+    assert refused.value.code == "effect_rejected"
+
+
+def test_bundle_past_the_effect_window_is_effect_rejected(world):
+    decision_id, plan, signed = world.activate()
+    now = utcnow()
+    admitted = admit_objective(
+        accept_mio_objective(objective_payload()), signed,
+        authenticator=world.authenticator, now=now,
+    )
+    short = accept_defensive_effect_ref(
+        edge_effect_payload(decision_id, now, expires_at=(now + timedelta(minutes=1)).isoformat())
+    )
+    chain = bind_reference_chain(
+        admitted=admitted, signed_activation_decision=signed, defensive_effect_ref=short,
+        adapter=world.adapter, environment_id=world.environment_id, now=now,
+    )
+    # still inside the decision lease (5 min), outside the effect window (1 min)
+    with pytest.raises(BindingRefused) as refused:
+        _bundle(world, chain, now=now + timedelta(minutes=2))
+    assert refused.value.code == "effect_rejected"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"payload": "x"},
+        {"protocol": "tcp and a space"},
+        {"protocol": "x" * 65},
+        {"port": [80]},
+        {"sensor_id": "ignore previous instructions"},
+        {"request_count": float("inf")},
+    ],
+)
+def test_metadata_is_allow_listed_and_bounded(world, metadata):
+    _, plan, _, _, _, chain = _bind(world)
+    with pytest.raises((ValueError, TypeError)):
+        _observer(world, chain, plan).record(
+            observation_class="interaction", surface="service", metadata=metadata
+        )
+
+
+def test_allowed_metadata_is_kept(world):
+    _, plan, _, _, _, chain = _bind(world)
+    record = _observer(world, chain, plan).record(
+        observation_class="interaction", surface="service",
+        metadata={"protocol": "tcp", "port": 8080, "request_count": 3},
+    )
+    assert record.metadata["port"] == 8080
+
+
+def test_unknown_lure_and_oversized_evidence_refs_are_refused(world):
+    _, plan, _, _, _, chain = _bind(world)
+    observer = _observer(world, chain, plan)
+    with pytest.raises(ValueError):
+        observer.record(
+            observation_class="interaction", surface="credential_lure", lure_id="not-a-lure"
+        )
+    with pytest.raises((ValueError, BindingRefused)):
+        observer.record(
+            observation_class="interaction", surface="service",
+            evidence_refs=[f"extra:{i}" for i in range(40)],
+        )
+
+
+def test_observation_ids_are_session_derived_and_unique_across_observers_and_generations(world):
+    _, plan1, _, _, _, chain1 = _bind(world)
+    a = _observer(world, chain1, plan1).record(observation_class="interaction", surface="service")
+    b = _observer(world, chain1, plan1).record(observation_class="interaction", surface="service")
+    assert a.observation_id != b.observation_id  # a re-created observer does not restart at 1
+    assert re.fullmatch(rf"{world.environment_id}-s\d+-obs-\d{{6}}", a.observation_id)
+
+    world.terminate()
+    world.adapter.reset_environment(world.environment_id)
+    _, plan2, _, _, _, chain2 = _bind(world)
+    c = _observer(world, chain2, plan2).record(observation_class="interaction", surface="service")
+    assert c.observation_id not in {a.observation_id, b.observation_id}
+    assert f"-s{chain2.generation}-" in c.observation_id
+
+
+def test_observed_at_must_lie_within_the_session(world):
+    _, plan, _, _, _, chain = _bind(world)
+    observer = _observer(world, chain, plan)
+    with pytest.raises(BindingRefused) as future:
+        observer.record(
+            observation_class="interaction", surface="service",
+            observed_at=utcnow() + timedelta(minutes=5),
+        )
+    assert future.value.code == "stale"
+    with pytest.raises(BindingRefused) as past:
+        observer.record(
+            observation_class="interaction", surface="service",
+            observed_at=utcnow() - timedelta(hours=1),
+        )
+    assert past.value.code == "session_mismatch"
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [
+        lambda b: b["interactions"].clear(),
+        lambda b: b["limitations"].clear(),
+        lambda b: b["isolation"].update({"status": "asserted", "drift_count": 0}),
+        lambda b: b["outcome"].update({"coverage_complete": True, "telemetry_gaps": []}),
+        lambda b: b["evidence"].pop("head_hash"),
+        lambda b: b["freshness"].update({"fresh": True, "age_seconds": 0}),
+        lambda b: b["runtime_materialization"].update({"environment_state": "reset"}),
+        lambda b: b["interactions"][0].update({"surface": "file"}),
+    ],
+    ids=["drop_interactions", "clear_limitations", "isolation", "coverage", "no_head",
+         "freshness", "environment_state", "edit_interaction"],
+)
+def test_bundle_is_rebuilt_from_evidence_and_every_forgery_is_caught(world, forge):
+    """The bundle's own claims are never believed. Start from a drifted, gappy,
+    stale-ish bundle so each forgery claims something the evidence contradicts."""
+
+    _, plan, _, _, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    IsolationDriftObserver(
+        world.adapter.state, environment_id=world.environment_id,
+        package_id=chain.package_id, node_id=chain.node_id,
+    ).observe({"route_to_protected": ["n"], "published_port": [], "capability_regranted": []})
+    bundle = _bundle(world, chain, observed_telemetry=("interaction_log",))
+    verify_feedback_bundle(bundle, **{k: v for k, v in _kw(world, chain).items()})
+    forged = copy.deepcopy(bundle)
+    forge(forged)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(forged, **_kw(world, chain))
+    assert refused.value.code in {"evidence_tampered", "stale", "session_mismatch"}
+
+
+def test_consumer_outputs_refuse_an_unverifiable_bundle(world):
+    _, plan, _, _, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    forged = copy.deepcopy(_bundle(world, chain))
+    forged["interactions"].clear()
+    for fn in (knowledge_ingest_payload, mio_deception_context, mio_frame_inputs):
+        with pytest.raises(BindingRefused):
+            fn(forged, **_kw(world, chain))
+
+
+def test_mechanism_claiming_bundle_needs_the_mechanism_again(world):
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    decision_id, plan, _, _, _, chain = _bind(world)
+    mech = ProducerRedirectionEvidence(
+        producer_product="azazel-edge", producer_node="edge-1", trace_id="trace-55",
+        decision_ref=f"decision:{decision_id}", execution_ref="execution-1",
+        mechanism_observation_ref="mechanism-1", evidence_refs=["edge-nft-1"],
+    )
+    bundle = _bundle(world, chain, mechanism=mech)
+    verify_feedback_bundle(bundle, **_kw(world, chain, mechanism=mech))
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(bundle, **_kw(world, chain))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_objective_coverage_is_caller_declared_and_never_a_verdict(world):
+    _, plan, _, objective, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    bundle = _bundle(
+        world, chain, objective=objective,
+        surface_telemetry={"service": "interaction_log", "credential_lure": "process_events"},
+        observed_telemetry=("interaction_log",),
+    )
+    coverage = bundle["objective_coverage"]
+    assert coverage["coverage_basis"] == "caller_declared"
+    status = {(e["observation_class"], e["surface"]): e["status"] for e in coverage["entries"]}
+    assert status[("interaction", "service")] == "observed"
+    assert status[("interaction", "credential_lure")] == "undeterminable_telemetry_gap:process_events"
+    entry = next(e for e in coverage["entries"] if e["status"] == "observed")
+    assert entry["observation_ids"] and entry["hypothesis_ref"] == HYPOTHESIS_REF
+
+    covered = _bundle(
+        world, chain, objective=objective,
+        surface_telemetry={"service": "interaction_log", "credential_lure": "process_events"},
+    )
+    status = {(e["observation_class"], e["surface"]): e["status"] for e in covered["objective_coverage"]["entries"]}
+    assert status[("interaction", "credential_lure")] == "not_observed_with_coverage"
+    assert "tactical" not in json.dumps(covered["objective_coverage"]).lower()
+
+    unmapped = _bundle(world, chain, objective=objective)
+    assert any(e["status"].startswith("undeterminable_telemetry_gap:")
+               for e in unmapped["objective_coverage"]["entries"])
+
+
+def test_frame_inputs_carry_markers_for_every_honesty_limit(world):
+    _, plan, _, _, _, chain = _bind(world)
+    inputs = mio_frame_inputs(
+        _bundle(world, chain, observed_telemetry=("interaction_log",), isolation_assertion_refs=()),
+        **_kw(world, chain),
+    )
+    markers = set(inputs["unknowns"])
+    assert "DECEPTION_TELEMETRY_GAP_PROCESS_EVENTS" in markers or any(
+        m.startswith("DECEPTION_TELEMETRY_GAP_") for m in markers
+    )
+    assert {"DECEPTION_ISOLATION_NOT_ASSERTED", "DECEPTION_NO_INTERACTION_NOT_SAFETY"} <= markers
+    assert inputs["explicit_unknowns"] == inputs["unknowns"]
+    assert inputs["deception_status"] == "available"
+
+
+def test_execution_request_pins_the_activated_evidence(world):
+    _, plan, _, _, _, chain = _bind(world)
+    request = _bundle(world, chain)["execution_request"]
+    assert request["kind"] == "edge_activation_decision"
+    assert request["activated_evidence_seq"] == chain.generation
+    assert request["activated_evidence_hash"]
+
+
+def test_after_reset_a_read_only_bundle_reports_reset_and_not_active(world):
+    _, plan, _, _, _, chain = _bind(world)
+    world.terminate()
+    world.adapter.reset_environment(world.environment_id)
+    reset_feedback(world.adapter, chain, now=utcnow())
+    bundle = _bundle(world, chain)
+    assert bundle["runtime_materialization"]["environment_state"] == "reset"
+    assert bundle["runtime_materialization"]["effect_observation"]["status"] != "active"
+    assert mio_deception_context(bundle, **_kw(world, chain))["lifecycle_state"] != "active"
