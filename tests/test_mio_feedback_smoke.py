@@ -195,7 +195,8 @@ def test_full_lifecycle_bundle_and_consumers(lifecycle):
     payload = knowledge_ingest_payload(bundle, **kw)
     assert payload["environment_id"] == ENV and len(payload["items"]) == 1
     context = mio_deception_context(bundle, **kw)
-    assert context["lifecycle_state"] == "active" and len(context["observation_refs"]) == 1
+    # Persisted evidence-log "active" is not an independent runtime verification.
+    assert context["lifecycle_state"] == "unknown" and len(context["observation_refs"]) == 1
 
 
 def test_silence_carries_a_limitation_and_stale_bundle_is_refused(lifecycle):
@@ -303,6 +304,35 @@ def test_terminate_reset_closes_the_session(lifecycle):
     assert info.value.code == "session_reset"
 
 
+def test_persisted_active_without_runtime_verification_is_stale_in_snapshot():
+    from azazel_deception.runtime.presented_terrain import (
+        ProducerRedirectionEvidence,
+        build_presented_terrain_snapshot,
+    )
+
+    producer = ProducerRedirectionEvidence(
+        producer_product="azazel-edge", producer_node="edge-1", trace_id="trace-1",
+        decision_ref="decision:d1", execution_ref="execution-1",
+        mechanism_observation_ref="mechanism-1", evidence_refs=["edge-nft-1"],
+    )
+    snapshot = build_presented_terrain_snapshot(
+        environment_id="env-1", producer=producer,
+        runtime_state={
+            "environment_id": "env-1", "state": "active", "package_id": "pkg-1",
+            "package_digest": "sha256:abc", "node_id": "node-1",
+            "activated_at": "2026-11-03T00:00:00+00:00",
+        },
+        expected_package_id="pkg-1", expected_package_digest="sha256:abc",
+        package_version="not_recorded", observed_at="2026-11-03T00:00:05+00:00",
+        active_surface_refs=("surface:http:8080",),
+        isolation_assertion_refs=("isolation-net-none",),
+        runtime_verified_active=False,
+    )
+    assert snapshot.lifecycle_state == "stale"
+    assert snapshot.active_surface_refs == ()
+    assert "runtime_active_not_independently_verified" in snapshot.limitations
+
+
 def test_mechanism_and_surfaces_project_a_terrain_without_claiming_diversion(lifecycle):
     from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
 
@@ -321,7 +351,11 @@ def test_mechanism_and_surfaces_project_a_terrain_without_claiming_diversion(lif
     )
     terrain = bundle["runtime_materialization"]["presented_terrain"]
     assert terrain["source_effect_ref"] == "effect:e1"
-    assert terrain["active_surface_refs"] == ["surface:http:8080"]
+    # Mechanism evidence alone does not verify runtime: stale, never active,
+    # and caller-declared surfaces are not carried on this path.
+    assert terrain["lifecycle_state_ref"].endswith(".stale")
+    assert not terrain["lifecycle_state_ref"].endswith(".active")
+    assert terrain["active_surface_refs"] == []
     assert bundle["observed_mechanism"]["status"] == "observed"
     assert "redirection_does_not_imply_diversion" in bundle["limitations"]
     assert bundle["isolation"]["status"] == "asserted"
@@ -467,7 +501,7 @@ def test_objective_coverage_and_frame_inputs(lifecycle):
         bundle, expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300
     )
     assert "DECEPTION_TELEMETRY_GAP_NETWORK" in inputs["unknowns"]
-    assert inputs["deception_context"]["lifecycle_state"] == "active"
+    assert inputs["deception_context"]["lifecycle_state"] == "unknown"
 
 
 # --- regressions for the second review (R1, R2) -----------------------------

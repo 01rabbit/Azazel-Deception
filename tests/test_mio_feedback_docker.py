@@ -118,10 +118,12 @@ def test_real_container_lifecycle_keeps_the_reference_chain(tmp_path):
         terrain = bundle["runtime_materialization"]["presented_terrain"]
         assert terrain is not None, "synthetic mechanism did not project a PresentedTerrainRef"
         PresentedTerrainRef.model_validate(terrain)
-        assert terrain["lifecycle_state_ref"].endswith(".active"), (
-            "presented terrain must be explicitly active, not stale"
+        assert terrain["lifecycle_state_ref"].endswith(".stale"), (
+            "mechanism evidence alone must not verify runtime: presented terrain is stale"
         )
-        assert terrain["active_surface_refs"], "presented terrain must carry a nonempty active surface"
+        assert terrain["active_surface_refs"] == [], (
+            "unverified mechanism path must not carry caller-declared active surfaces"
+        )
         verify_feedback_bundle(
             bundle, expected_chain=chain, state=adapter.state, now=utcnow(),
             max_age=300.0, mechanism=mechanism,

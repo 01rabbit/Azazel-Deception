@@ -68,6 +68,17 @@ effect observation is `failed` with reason `lease_expired_runtime_still_active`
 -- AZ-06 never claims a live effect past the lease. A bundle that claims a live
 effect is refused (`lease_expired`) when verified past the lease.
 
+Liveness is judged from the persisted `environment_state`, never from the
+effect observation. A bundle with a persisted `active` state and no drift and no
+lease overrun carries `effect_observation: null` and the limitation
+`effect_observation_withheld_not_independently_verified`: AZ-06 has no
+independent runtime verifier, so it emits no `active` observation and no
+`ACTIVE_MATERIALIZED` terrain. The pinned Fabric effect status set has no
+"unknown" member, so no substitute status is used. `assert_effect_chain_consistent`
+accepts the empty observation list. Live-claim checks in `verify_feedback_bundle`
+(session reset/termination/activation, lease window, historical claims) run when
+`environment_state` is `active`, drift is absent, and the lease is not overrun.
+
 ## Session and generation
 
 `session_ref` is `session:` plus the evidence hash of the `activated` record,
@@ -197,7 +208,21 @@ only, which comes from real interactions) and unknowns such as
 `DECEPTION_ISOLATION_NOT_ASSERTED`, `DECEPTION_ISOLATION_DRIFT_OBSERVED`,
 `DECEPTION_NO_INTERACTION_NOT_SAFETY`, `DECEPTION_LEASE_EXPIRED`,
 `DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND`. Anything AZ-06 cannot vouch for maps
-the lifecycle to `unknown`, never `active`.
+the lifecycle to `unknown`, never `active`. The persisted evidence-log state
+`active` is not an independent runtime verification (`runtime_state_not_independently_reverified`),
+so `mio_deception_context` and `mio_frame_inputs` report `unknown` for it. The
+bundle's `effect_observation` is `null` for that state (see the limitation
+`effect_observation_withheld_not_independently_verified` above). Without
+Edge mechanism evidence (`mechanism=`) no presented terrain is projected: the
+bundle carries `presented_terrain: null` with `presented_terrain_not_projected`,
+and no `ACTIVE_MATERIALIZED` or active surface is claimed from caller strings.
+
+Current mechanism evidence alone does not independently verify runtime or
+isolation. A persisted `active` state with mechanism evidence projects as a
+`stale` presented terrain (`runtime_active_not_independently_verified`), and the
+caller-declared surfaces are not carried on that path (`active_surface_refs: []`).
+Active terrain is never emitted until a real runtime verifier input exists; the
+mechanism projection itself is kept through #31.
 
 ## Requests to other teams
 

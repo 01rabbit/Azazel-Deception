@@ -1061,8 +1061,6 @@ def _terrain(
     reset_ref: str | None,
     mechanism: ProducerRedirectionEvidence | None,
     assertions: tuple[str, ...],
-    surfaces: tuple[str, ...],
-    surfaces_attested: bool,
     now: datetime,
     evidence_refs: tuple[str, ...],
 ) -> dict[str, Any] | None:
@@ -1072,71 +1070,49 @@ def _terrain(
     if not assertions:
         return None
     expires = min(chain.lease_end, _parse_ts(effect.expires_at))
+    if mechanism is None:
+        # Without Edge mechanism evidence there is no #31 snapshot/projection gate to
+        # pass, so no terrain is claimed: never ACTIVE_MATERIALIZED or active surfaces
+        # built from caller-declared strings.
+        return None
     try:
-        if mechanism is not None:
-            runtime_state = {
-                "environment_id": chain.environment_id,
-                "state": env_state,
-                "package_id": chain.package_id,
-                "package_digest": chain.package_digest,
-                "node_id": chain.node_id,
-                "activated_at": activated_at,
-            }
-            if env_state in ("terminated", "reset"):
-                runtime_state["terminated_at"] = ended_at
-            snapshot = build_presented_terrain_snapshot(
-                environment_id=chain.environment_id,
-                producer=mechanism,
-                runtime_state=runtime_state,
-                expected_package_id=chain.package_id,
-                expected_package_digest=chain.package_digest,
-                package_version="not_recorded",
-                observed_at=_iso(now),
-                active_surface_refs=surfaces,
-                isolation_assertion_refs=assertions[:1],
-                reset_ref=reset_ref if env_state == "reset" else None,
-                runtime_verified_active=surfaces_attested,
-                expires_at=_iso(expires),
-                evidence_refs=evidence_refs,
-            )
-            projected = project_presented_terrain(
-                snapshot,
-                presentation_version=chain.generation,
-                expires_at=_iso(expires),
-                source_effect=effect,
-            )
-            return projected.ref.model_dump(mode="json")
-
-        lifecycle = {
-            "active": "active" if surfaces_attested else "stale",
-            "terminated": "terminated",
-            "reset": "reset",
-            "failed": "failed",
-        }.get(env_state, "stale")
-        authority = {
-            "active": AuthorityClass.ACTIVE_MATERIALIZED,
-            "terminated": AuthorityClass.OBSERVED_FACT,
-            "reset": AuthorityClass.OBSERVED_FACT,
-            "failed": AuthorityClass.OBSERVED_FACT,
-            "stale": AuthorityClass.STALE_OR_UNKNOWN,
-        }[lifecycle]
-        body = _sha24(chain.environment_id, chain.trace_id, chain.package_digest, chain.session_ref)
-        ref = PresentedTerrainRef(
-            presentation_id=f"presentation:{body}",
-            presentation_version=chain.generation,
-            producer_product="azazel-deception",
-            activation_decision_ref=effect.decision_ref,
-            source_effect_ref=effect.effect_id,
-            trace_id=chain.trace_id,
-            lifecycle_state_ref=f"lifecycle:{body}.{lifecycle}",
-            active_surface_refs=surfaces if lifecycle == "active" else (),
-            isolation_assertion_ref=assertions[0],
-            created_at=_iso(_parse_ts(activated_at)),
+        runtime_state = {
+            "environment_id": chain.environment_id,
+            "state": env_state,
+            "package_id": chain.package_id,
+            "package_digest": chain.package_digest,
+            "node_id": chain.node_id,
+            "activated_at": activated_at,
+        }
+        if env_state in ("terminated", "reset"):
+            runtime_state["terminated_at"] = ended_at
+        snapshot = build_presented_terrain_snapshot(
+            environment_id=chain.environment_id,
+            producer=mechanism,
+            runtime_state=runtime_state,
+            expected_package_id=chain.package_id,
+            expected_package_digest=chain.package_digest,
+            package_version="not_recorded",
+            observed_at=_iso(now),
+            # Caller-declared surfaces are not carried on this unverified path.
+            active_surface_refs=(),
+            isolation_assertion_refs=assertions[:1],
+            reset_ref=reset_ref if env_state == "reset" else None,
+            # Current mechanism evidence alone does not independently verify
+            # runtime or isolation, and AZ-06 has no real verifier input yet. A
+            # persisted "active" therefore projects as a stale snapshot
+            # (runtime_active_not_independently_verified) with no active surfaces.
+            runtime_verified_active=False,
             expires_at=_iso(expires),
             evidence_refs=evidence_refs,
-            authority_class=authority,
         )
-        return ref.model_dump(mode="json")
+        projected = project_presented_terrain(
+            snapshot,
+            presentation_version=chain.generation,
+            expires_at=_iso(expires),
+            source_effect=effect,
+        )
+        return projected.ref.model_dump(mode="json")
     except EffectRefRejected:
         raise BindingRefused(
             "effect_decision_mismatch", "terrain cannot be bound to this effect"
@@ -1370,6 +1346,11 @@ def _derive(
         limitations.append(f"interactions_outside_lease:{outside}")
     if env_state == "active":
         limitations.append("runtime_state_not_independently_reverified")
+    # Persisted "active" with no drift and no lease overrun: no independent runtime
+    # verifier exists, so no effect observation is emitted (not even "active" or an
+    # unknown stand-in). The bundle carries an explicit limitation instead.
+    if env_state == "active" and not drift and not lease_overrun:
+        limitations.append("effect_observation_withheld_not_independently_verified")
     if env_state == "reset":
         limitations.append("session_ended_new_observations_belong_to_a_new_session")
 
@@ -1377,45 +1358,47 @@ def _derive(
         str((terminated[-1].get("metadata") or {}).get("reason") or "environment_terminated")[:200]
         if terminated else None
     )
+    ended_at = _iso(_parse_ts((resets or terminated)[-1]["observed_at"])) if (resets or terminated) else None
+    reset_ref = f"evidence:{resets[-1].get('_evidence_hash')}" if resets else None
+    terrain = _terrain(
+        chain=chain, env_state=env_state, activated_at=activated_at, ended_at=ended_at,
+        reset_ref=reset_ref, mechanism=mech, assertions=assertions,
+        now=now, evidence_refs=tuple(evidence_ref_list[:100]),
+    )
+    if terrain is None:
+        limitations.append("presented_terrain_not_projected")
+
+    # None only for a persisted "active" with no failure fact (no drift, no lease overrun).
+    status: str | None
+    reason: str | None
     if drift:
         status, reason = "failed", "isolation_drift_observed"
     elif lease_overrun:
         status, reason = "failed", "lease_expired_runtime_still_active"
     elif env_state == "active":
-        status, reason = "active", None
+        status, reason = None, None
     elif env_state in ("terminated", "reset"):
         status, reason = "terminated", terminated_reason or "environment_reset"
     else:
         status, reason = "failed", "environment_failed"
-    try:
-        effect_observation = observe_effect(
-            effect,
-            status=status,
-            observed_at=_iso(now),
-            execution_ref=mech.execution_ref if mech is not None else None,
-            termination_reason=reason,
-            evidence_refs=evidence_ref_list,
-            limitations=limitations,
-        )
-    except ValueError:
-        raise BindingRefused("effect_rejected", "effect window does not cover this observation") from None
-
-    ended_at = _iso(_parse_ts((resets or terminated)[-1]["observed_at"])) if (resets or terminated) else None
-    reset_ref = f"evidence:{resets[-1].get('_evidence_hash')}" if resets else None
-    terrain = _terrain(
-        chain=chain, env_state=env_state, activated_at=activated_at, ended_at=ended_at,
-        reset_ref=reset_ref, mechanism=mech, assertions=assertions, surfaces=surfaces,
-        surfaces_attested=bool(surfaces) and env_state == "active" and not drift and fresh and not lease_closed,
-        now=now, evidence_refs=tuple(evidence_ref_list[:100]),
-    )
-    if terrain is None:
-        limitations.append("presented_terrain_not_projected")
-        # The observation already carries the limitation list; keep both aligned.
-        effect_observation = observe_effect(
-            effect, status=status, observed_at=_iso(now),
-            execution_ref=mech.execution_ref if mech is not None else None,
-            termination_reason=reason, evidence_refs=evidence_ref_list, limitations=limitations,
-        )
+    effect_observation = None
+    if status is not None:
+        try:
+            effect_observation = observe_effect(
+                effect,
+                status=status,
+                observed_at=_iso(now),
+                execution_ref=mech.execution_ref if mech is not None else None,
+                termination_reason=reason,
+                evidence_refs=evidence_ref_list,
+                limitations=limitations,
+            )
+        except ValueError:
+            raise BindingRefused("effect_rejected", "effect window does not cover this observation") from None
+    elif now > _parse_ts(effect.expires_at):
+        # Withhold the live observation, but preserve the effect's own expiry
+        # boundary. Previously observe_effect rejected this same live status.
+        raise BindingRefused("effect_rejected", "effect window does not cover this observation")
 
     coverage = _objective_coverage(
         objective, chain, interactions, observed=observed, surface_telemetry=surface_telemetry
@@ -1448,7 +1431,10 @@ def _derive(
         )
         terrain_model = PresentedTerrainRef.model_validate(terrain) if terrain else None
         assert_effect_chain_consistent(
-            effect, observations=[effect_observation], envelope=envelope, terrain=terrain_model
+            effect,
+            observations=[] if effect_observation is None else [effect_observation],
+            envelope=envelope,
+            terrain=terrain_model,
         )
     except ValueError:
         raise BindingRefused("effect_decision_mismatch", "outcome chain is inconsistent") from None
@@ -1478,7 +1464,9 @@ def _derive(
         "caller_declared_mac": _declared_mac(store, chain, caller_declared),
         "runtime_materialization": {
             "environment_state": env_state,
-            "effect_observation": effect_observation.model_dump(mode="json"),
+            "effect_observation": (
+                None if effect_observation is None else effect_observation.model_dump(mode="json")
+            ),
             "presented_terrain": terrain,
         },
         "observed_mechanism": (
@@ -1635,6 +1623,21 @@ def _canon(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _claims_live(bundle: Mapping[str, Any]) -> bool:
+    """Whether the bundle asserts a live session, judged from persisted state.
+
+    Uses ``environment_state`` (never the effect observation, which is absent for
+    a persisted ``active`` state). A live claim requires persisted ``active`` with
+    no recorded drift and no lease overrun; those two are failure facts, not claims.
+    """
+
+    if bundle["runtime_materialization"]["environment_state"] != "active":
+        return False
+    if bundle["isolation"]["status"] == "drift_observed":
+        return False
+    return "lease_expired" not in bundle["limitations"]
+
+
 def verify_feedback_bundle(
     bundle: Mapping[str, Any],
     *,
@@ -1698,7 +1701,7 @@ def verify_feedback_bundle(
         if head != current_head:
             if not allow_historical:
                 raise BindingRefused("stale", "evidence was appended after this bundle was built")
-            if bundle["runtime_materialization"]["effect_observation"]["status"] in ("started", "active"):
+            if _claims_live(bundle):
                 raise BindingRefused("stale", "a historical bundle may not claim a live effect")
 
         caller = bundle["caller_declared"]
@@ -1746,8 +1749,7 @@ def verify_feedback_bundle(
         if (now - anchor).total_seconds() > float(max_age):
             raise BindingRefused("stale", "bundle observations are older than max_age")
 
-        status = bundle["runtime_materialization"]["effect_observation"]["status"]
-        if status in ("started", "active"):
+        if _claims_live(bundle):
             for record in records:
                 if record.get("event_type") == "reset_completed" and _seq(record) > expected_chain.generation:
                     raise BindingRefused("session_reset", "the session was reset")
@@ -1817,6 +1819,9 @@ def _context(bundle: Mapping[str, Any], *, now: datetime, max_age: float) -> dic
         not fresh_now
         or bundle["isolation"]["status"] == "drift_observed"
         or "lease_expired" in limitations and env_state == "active"
+        # "active" in the persisted evidence log is not an independent runtime
+        # verification; without one the context cannot claim active.
+        or (env_state == "active" and "runtime_state_not_independently_reverified" in limitations)
     ):
         lifecycle = "unknown"
     else:
