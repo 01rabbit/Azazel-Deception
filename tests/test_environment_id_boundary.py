@@ -609,20 +609,7 @@ def test_fifo_record_is_refused_without_blocking(tmp_path):
         signal.signal(signal.SIGALRM, old)
 
 
-def _folding_listdir(monkeypatch, real_listdir):
-    """Simulate a case-folding filesystem: a lookup of ``foo.json`` also finds
-    the stored ``Foo.json``. Only the directory listing is patched; the store's
-    exact-name check is what must refuse the alias."""
-
-    from azazel_deception.runtime import state as state_module
-
-    def fake_listdir(path="."):
-        return list(real_listdir(path))
-
-    monkeypatch.setattr(state_module.os, "listdir", fake_listdir)
-
-
-def test_strict_id_never_touches_legacy_case_alias_on_folding_filesystem(tmp_path, monkeypatch):
+def test_strict_id_refuses_case_folded_legacy_path_alias(tmp_path):
     store = RuntimeStateStore(tmp_path)
     legacy_state = tmp_path / "environments" / "Foo.json"
     legacy_evidence = tmp_path / "evidence" / "Foo.jsonl"
@@ -631,11 +618,9 @@ def test_strict_id_never_touches_legacy_case_alias_on_folding_filesystem(tmp_pat
     state_before = legacy_state.read_bytes()
     evidence_before = legacy_evidence.read_bytes()
 
-    real_listdir = os.listdir
-    _folding_listdir(monkeypatch, real_listdir)
-
-    # Strict ID "foo" folds onto the legacy "Foo": every operation is refused
-    # before any read, append, replace or unlink happens.
+    # Only the legacy spelling is present. On a folding filesystem, a lookup
+    # for strict ID "foo" could resolve to these "Foo" records; the listing
+    # guard refuses every operation before any read, append, replace or unlink.
     with pytest.raises(EnvironmentIdError):
         store.read("foo")
     with pytest.raises(EnvironmentIdError):
@@ -657,11 +642,10 @@ def test_strict_id_never_touches_legacy_case_alias_on_folding_filesystem(tmp_pat
     assert legacy_evidence.read_bytes() == evidence_before
     # No new entry was created for the strict alias (listing-level check, so it
     # holds on case-insensitive hosts too).
-    assert sorted(real_listdir(tmp_path / "environments")) == ["Foo.json"]
-    assert sorted(real_listdir(tmp_path / "evidence")) == ["Foo.jsonl"]
+    assert sorted(os.listdir(tmp_path / "environments")) == ["Foo.json"]
+    assert sorted(os.listdir(tmp_path / "evidence")) == ["Foo.jsonl"]
 
-    # The exact-case legacy record keeps working through the same folding view.
-    monkeypatch.undo()
+    # The exact-case legacy record remains accessible.
     assert store.read("Foo") == {"state": "active", "legacy": True}
     assert store.verify_evidence_chain("Foo") is True
     assert legacy_state.read_bytes() == state_before
