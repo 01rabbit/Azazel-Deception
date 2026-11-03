@@ -1031,6 +1031,31 @@ def test_objective_digest_absent_is_admitted_but_reported_unbound(world):
     assert "DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND" in inputs["unknowns"]
 
 
+def test_forged_admission_with_mismatched_content_is_refused_by_signed_digest(world):
+    signed_objective = accept_mio_objective(objective_payload())
+    decision_id = world.next_id()
+    _, plan, signed = _admit(world, decision_id, [_digest_ref_of(signed_objective)])
+    world.adapter.activate_environment(world.environment_id, world.package, plan, signed)
+    genuine = admit_objective(signed_objective, signed, authenticator=world.authenticator, now=utcnow())
+    assert isinstance(genuine, AdmittedObjective)
+    # Same refs, different desired_observations; caller forges an empty digest and a false flag.
+    tampered = accept_mio_objective(objective_payload(desired_observations=[["interaction", "file"]]))
+    forged = AdmittedObjective(
+        objective=tampered,
+        decision_id=genuine.decision_id,
+        decision_digest=genuine.decision_digest,
+        objective_digest="",
+        objective_content_bound=False,
+    )
+    with pytest.raises(BindingRefused) as refused:
+        bind_reference_chain(
+            admitted=forged, signed_activation_decision=signed,
+            defensive_effect_ref=accept_defensive_effect_ref(edge_effect_payload(decision_id, utcnow())),
+            adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+        )
+    assert refused.value.code == "decision_mismatch"
+
+
 def test_bound_objective_digest_carries_through_without_the_limitation(world):
     objective = accept_mio_objective(objective_payload())
     decision_id = world.next_id()

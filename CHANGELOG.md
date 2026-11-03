@@ -90,6 +90,13 @@ are not proven (see `docs/live-gate-checklist.md`).
   carries a recorded reason, the history marks exactly one row current, and the
   installed distribution matches the declared pin.
 
+### Fixed
+
+- **Deception#55 objective digest binding** — `bind_reference_chain` now derives
+  content binding from the authenticated Edge decision. A caller-constructed
+  `AdmittedObjective` cannot turn a signed objective digest into reference-only
+  binding by clearing its local digest and flag.
+
 ### Changed
 
 - **Azazel-Fabric pin `v0.9.0rc4` → `v0.9.0rc5`; `trace_id` and the synthetic
