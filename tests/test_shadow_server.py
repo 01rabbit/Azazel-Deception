@@ -2,6 +2,7 @@
 
 import errno
 import hashlib
+import http.client
 import json
 import threading
 import urllib.request
@@ -18,6 +19,7 @@ from azazel_deception.runtime.shadow_server import (
     REQUEST_SCHEMA,
     RESPONSE_SCHEMA,
     AUDIT_ENVIRONMENT_ID,
+    MAX_REQUEST_BODY_BYTES,
     ShadowReplayHTTPServer,
     ShadowReplayService,
     _ledger_key,
@@ -319,6 +321,33 @@ def test_malformed_request_id_is_rejected_signed_and_audited(service, tmp_path, 
     assert events[0]["reason_codes"] == ["malformed_envelope"]
 
 
+def test_untrusted_audit_labels_are_bounded(service, tmp_path):
+    envelope = _envelope("capabilities", edge_id="edge-" + "x" * 10_000)
+    # An unauthorised oversized edge identifier still yields bounded audit data.
+    response = service.handle(envelope)
+    assert response["reason_codes"] == ["edge_identity_not_allowlisted"]
+    event = _audit_events(tmp_path)[0]
+    assert len(event["edge_node_id"]) == 256
+    assert event["edge_node_id"].endswith("[truncated]")
+
+
+def test_http_rejects_request_body_above_limit(service, tmp_path):
+    with ShadowReplayHTTPServer(service) as server:
+        host, port = server.address
+        connection = http.client.HTTPConnection(host, port, timeout=10)
+        connection.putrequest("POST", "/shadow")
+        connection.putheader("Content-Length", str(MAX_REQUEST_BODY_BYTES + 1))
+        connection.endheaders()
+        raw = connection.getresponse()
+        response = json.loads(raw.read().decode("utf-8"))
+        connection.close()
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["malformed_envelope"]
+    _assert_signed_response(response)
+    event = _audit_events(tmp_path)[0]
+    assert event["action"] == "unparsable"
+
+
 def test_slash_request_id_is_echoed_and_replay_is_still_rejected(service):
     request_id = "tenant/a:../b c"
     envelope = _envelope("capabilities", request_id=request_id)
@@ -390,6 +419,78 @@ def test_audit_store_failure_returns_signed_audit_write_failed(service, tmp_path
     assert response["reason_codes"] == ["audit_write_failed"]
     _assert_signed_response(response)
     assert _audit_events(tmp_path) == []
+
+
+def test_audit_failure_after_shadow_activation_reports_unrecorded_action(
+    service, tmp_path, monkeypatch
+):
+    action_calls = []
+
+    def activate(payload, envelope):
+        action_calls.append(envelope["request_id"])
+        return {"runtime": "created"}
+
+    def fail_write(environment_id, event):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "_action_activate", activate)
+    monkeypatch.setattr(service.state, "append_evidence", fail_write)
+    envelope = _envelope("activate", {"environment_id": "test-env", "package": {}, "placement": {}, "decision": {}})
+
+    response = service.handle(envelope)
+
+    assert action_calls == [envelope["request_id"]]
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["audit_write_failed", "shadow_action_may_have_run"]
+    assert response["result"] == {
+        "runtime_action_state": "completed_unrecorded",
+        "action_result": {"runtime": "created"},
+    }
+    _assert_signed_response(response)
+    assert _audit_events(tmp_path) == []
+
+
+def test_failed_shadow_activation_reports_unknown_runtime_state(service, tmp_path, monkeypatch):
+    def activate(payload, envelope):
+        raise RuntimeError("adapter failed after partial work")
+
+    monkeypatch.setattr(service, "_action_activate", activate)
+    envelope = _envelope("activate", {"environment_id": "test-env", "package": {}, "placement": {}, "decision": {}})
+
+    response = service.handle(envelope)
+
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["internal_error", "shadow_action_may_have_run"]
+    assert response["result"] == {"runtime_action_state": "unknown"}
+    _assert_signed_response(response)
+    events = _audit_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["reason_codes"] == ["internal_error", "shadow_action_may_have_run"]
+
+
+def test_corrupt_audit_chain_rejects_before_consuming_or_mutating(service, tmp_path, monkeypatch):
+    store = RuntimeStateStore(tmp_path / "state")
+    store.append_evidence(AUDIT_ENVIRONMENT_ID, {"event": "prior"})
+    audit_path = store.evidence_path(AUDIT_ENVIRONMENT_ID)
+    audit_path.write_bytes(audit_path.read_bytes() + b'{"torn":')
+    before = audit_path.read_bytes()
+    action_calls = []
+
+    def activate(payload, envelope):
+        action_calls.append(envelope["request_id"])
+        return {"runtime": "created"}
+
+    monkeypatch.setattr(service, "_action_activate", activate)
+    envelope = _envelope("activate", {"environment_id": "test-env", "package": {}, "placement": {}, "decision": {}})
+
+    response = service.handle(envelope)
+
+    assert action_calls == []
+    assert not store.decision_consumed(_ledger_key(envelope["request_id"]))
+    assert audit_path.read_bytes() == before
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["audit_write_failed"]
+    _assert_signed_response(response)
 
 
 def _post_raw(server, body: bytes):

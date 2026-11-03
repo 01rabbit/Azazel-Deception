@@ -59,6 +59,8 @@ REQUEST_SCHEMA = "az06-shadow-request/v0.1"
 RESPONSE_SCHEMA = "az06-shadow-response/v0.1"
 ENVELOPE_SIGNATURE_FIELD = "signature"
 AUDIT_ENVIRONMENT_ID = "shadow-audit"
+MAX_REQUEST_BODY_BYTES = 1_048_576
+_MAX_AUDIT_LABEL_CHARS = 256
 
 _ACTIONS = frozenset(
     {
@@ -71,6 +73,7 @@ _ACTIONS = frozenset(
         "reconcile",
     }
 )
+_MUTATING_ACTIONS = frozenset({"activate", "terminate"})
 
 
 def _utcnow() -> datetime:
@@ -200,17 +203,24 @@ class ShadowReplayService:
         )
 
     def _audit(self, envelope: Any, response: dict[str, Any]) -> None:
+        def bounded_label(value: Any) -> str:
+            text = str(value)
+            if len(text) > _MAX_AUDIT_LABEL_CHARS:
+                suffix = "[truncated]"
+                return text[: _MAX_AUDIT_LABEL_CHARS - len(suffix)] + suffix
+            return text
+
         summary = {
             "schema_version": "az06-shadow-audit/v0.1",
             "observed_at": _utcnow().isoformat(),
             "request_id": str(response.get("request_id")),
             "edge_node_id": (
-                str(envelope.get("edge_node_id"))
+                bounded_label(envelope.get("edge_node_id"))
                 if isinstance(envelope, dict)
                 else "unparsable"
             ),
             "action": (
-                str(envelope.get("action")) if isinstance(envelope, dict) else "unparsable"
+                bounded_label(envelope.get("action")) if isinstance(envelope, dict) else "unparsable"
             ),
             "status": response.get("status"),
             "reason_codes": response.get("reason_codes"),
@@ -220,16 +230,41 @@ class ShadowReplayService:
     # -- request handling ----------------------------------------------------
 
     def handle(self, envelope: Any) -> dict[str, Any]:
+        action_state = {"started": False, "completed": False, "result": None}
         try:
-            response = self._handle_inner(envelope)
+            response = self._handle_inner(envelope, action_state=action_state)
         except Exception:  # fail closed; details stay out of the response
+            action_may_have_run = action_state["started"]
             response = self._response(
-                _echo_request_id(envelope), "rejected", ["internal_error"]
+                _echo_request_id(envelope),
+                "rejected",
+                ["internal_error", "shadow_action_may_have_run"]
+                if action_may_have_run
+                else ["internal_error"],
+                {"runtime_action_state": "unknown"} if action_may_have_run else None,
             )
         try:
             self._audit(envelope, response)
         except Exception:
             # Not persisted, so do not claim otherwise and do not retry here.
+            # A mutating adapter call may already have changed runtime state;
+            # preserve that uncertainty instead of implying no action occurred.
+            if action_state["started"]:
+                result = {
+                    "runtime_action_state": (
+                        "completed_unrecorded"
+                        if action_state["completed"]
+                        else "unknown"
+                    )
+                }
+                if action_state["completed"] and isinstance(action_state["result"], dict):
+                    result["action_result"] = action_state["result"]
+                return self._response(
+                    _echo_request_id(envelope),
+                    "rejected",
+                    ["audit_write_failed", "shadow_action_may_have_run"],
+                    result,
+                )
             return self._response(
                 _echo_request_id(envelope), "rejected", ["audit_write_failed"]
             )
@@ -269,7 +304,12 @@ class ShadowReplayService:
                 raise
         return self.state.consume_decision(fallback_key, _record(fallback_key))
 
-    def _handle_inner(self, envelope: Any) -> dict[str, Any]:
+    def _handle_inner(
+        self,
+        envelope: Any,
+        *,
+        action_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(envelope, dict):
             return self._response("unparsable", "rejected", ["malformed_envelope"])
         request_id = _echo_request_id(envelope)
@@ -296,6 +336,15 @@ class ShadowReplayService:
         )
         if fallback_key is None:
             return self._response(request_id, "rejected", ["malformed_envelope"])
+        # Never burn a one-shot request marker or start a runtime action when
+        # the append-only audit chain is already corrupt/unreadable. The
+        # outer audit attempt will fail closed and return a signed response.
+        try:
+            audit_chain_healthy = self.state.verify_evidence_chain(AUDIT_ENVIRONMENT_ID)
+        except Exception:
+            audit_chain_healthy = False
+        if not audit_chain_healthy:
+            return self._response(request_id, "rejected", ["audit_chain_unavailable"])
         if not self._consume_request_marker(raw_request_id, fallback_key, envelope):
             return self._response(request_id, "rejected", ["replayed_request"])
 
@@ -305,9 +354,21 @@ class ShadowReplayService:
         if not isinstance(payload, dict):
             return self._response(request_id, "rejected", ["malformed_payload"])
         handler = getattr(self, f"_action_{action}")
+        if action in _MUTATING_ACTIONS and action_state is not None:
+            action_state["started"] = True
         try:
             result = handler(payload, envelope)
+            if action in _MUTATING_ACTIONS and action_state is not None:
+                action_state["completed"] = True
+                action_state["result"] = result
         except (RuntimeGateError, PackageValidationError, ValueError) as exc:
+            if action in _MUTATING_ACTIONS:
+                return self._response(
+                    request_id,
+                    "rejected",
+                    ["shadow_validation_failed", exc.__class__.__name__, "shadow_action_may_have_run"],
+                    {"runtime_action_state": "unknown"},
+                )
             return self._response(
                 request_id,
                 "rejected",
@@ -499,6 +560,19 @@ class _ShadowRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_REQUEST_BODY_BYTES:
+                # Do not read an attacker-sized body into memory or leave its
+                # bytes to be parsed as another request on a keep-alive socket.
+                self.close_connection = True
+                envelope = None
+                response = self.service.handle(envelope)
+                encoded = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                return
             body = self.rfile.read(length) if length > 0 else b""
             envelope = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, RecursionError):
