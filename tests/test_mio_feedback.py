@@ -1230,3 +1230,323 @@ def test_after_reset_a_read_only_bundle_reports_reset_and_not_active(world):
     assert bundle["runtime_materialization"]["environment_state"] == "reset"
     assert bundle["runtime_materialization"]["effect_observation"]["status"] != "active"
     assert mio_deception_context(bundle, **_kw(world, chain))["lifecycle_state"] != "active"
+
+
+# --- addendum 2: replay, races, MAC, key hygiene, coverage honesty -------------------
+# Written ahead of the implementation; names follow DESIGN.md "addendum 2".
+
+import inspect
+import os
+import stat
+import threading
+
+from azazel_deception.runtime import mio_feedback as _mf
+
+
+def _consumers():
+    return (knowledge_ingest_payload, mio_deception_context, mio_frame_inputs)
+
+
+def _drift(world, chain):
+    IsolationDriftObserver(
+        world.adapter.state, environment_id=world.environment_id,
+        package_id=chain.package_id, node_id=chain.node_id,
+    ).observe({"route_to_protected": ["n"], "published_port": [], "capability_regranted": []})
+
+
+def test_r1_bundle_older_than_a_later_drift_is_stale_everywhere(world):
+    _, plan, _, _, _, chain = _bind(world)
+    old = _bundle(world, chain)
+    _drift(world, chain)  # evidence appended after the bundle was made
+    for fn in (verify_feedback_bundle, *_consumers()):
+        with pytest.raises(BindingRefused) as refused:
+            fn(old, **_kw(world, chain))
+        assert refused.value.code == "stale", fn.__name__
+
+
+def test_r1_bundle_older_than_a_later_lure_contact_is_stale(world):
+    _, plan, _, _, _, chain = _bind(world)
+    old = _bundle(world, chain)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="credential_lure")
+    for fn in (verify_feedback_bundle, *_consumers()):
+        with pytest.raises(BindingRefused) as refused:
+            fn(old, **_kw(world, chain))
+        assert refused.value.code == "stale", fn.__name__
+
+
+def test_r1_historical_audit_refuses_a_bundle_that_claims_live_and_consumers_cannot_ask(world):
+    _, plan, _, _, _, chain = _bind(world)
+    old = _bundle(world, chain)
+    _drift(world, chain)
+    with pytest.raises(BindingRefused):
+        verify_feedback_bundle(old, allow_historical=True, **_kw(world, chain))
+    for fn in _consumers():
+        assert "allow_historical" not in inspect.signature(fn).parameters
+        with pytest.raises(TypeError):
+            fn(old, allow_historical=True, **_kw(world, chain))
+
+
+def test_r1_historical_audit_accepts_a_bundle_that_does_not_claim_live(world):
+    _, plan, _, _, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    world.terminate()
+    ended = _bundle(world, chain)
+    assert ended["runtime_materialization"]["effect_observation"]["status"] != "active"
+    world.adapter.reset_environment(world.environment_id)  # appends evidence: ended is now historical
+    verify_feedback_bundle(ended, allow_historical=True, **_kw(world, chain))
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(ended, **_kw(world, chain))
+    assert refused.value.code == "stale"
+
+
+def test_r2_terminate_during_bind_is_not_overwritten(world, monkeypatch):
+    decision_id, plan, signed = world.activate()
+    now = utcnow()
+    admitted = admit_objective(
+        accept_mio_objective(objective_payload()), signed,
+        authenticator=world.authenticator, now=now,
+    )
+    original = _mf._coerce_effect
+    fired = []
+
+    def terminate_midway(value):
+        if not fired:
+            fired.append(world.terminate())
+        return original(value)
+
+    monkeypatch.setattr(_mf, "_coerce_effect", terminate_midway)
+    try:
+        bind_reference_chain(
+            admitted=admitted, signed_activation_decision=signed,
+            defensive_effect_ref=edge_effect_payload(decision_id, now),
+            adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+        )
+    except BindingRefused:
+        pass  # refusing is fine; resurrecting or rewriting state is not
+    assert fired and fired[0]["status"] == "terminated"
+    assert world.adapter.collect_status(world.environment_id)["state"] == "terminated"
+    assert world.adapter.verify_evidence(world.environment_id) is True
+
+
+def test_r2_two_effects_bound_concurrently_exactly_one_wins(world, monkeypatch):
+    decision_id, plan, signed = world.activate()
+    now = utcnow()
+    admitted = admit_objective(
+        accept_mio_objective(objective_payload()), signed,
+        authenticator=world.authenticator, now=now,
+    )
+    original = _mf._coerce_effect
+    barrier = threading.Barrier(2, timeout=10)
+
+    def meet(value):
+        result = original(value)
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return result
+
+    monkeypatch.setattr(_mf, "_coerce_effect", meet)
+    outcomes: list = []
+
+    def attempt(effect_id):
+        try:
+            outcomes.append(("ok", bind_reference_chain(
+                admitted=admitted, signed_activation_decision=signed,
+                defensive_effect_ref=edge_effect_payload(decision_id, now, effect_id=effect_id),
+                adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+            )))
+        except BindingRefused as exc:
+            outcomes.append(("refused", exc.code))
+
+    threads = [threading.Thread(target=attempt, args=(f"effect:race-{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    kinds = sorted(kind for kind, _ in outcomes)
+    assert kinds == ["ok", "refused"], outcomes
+    assert [v for k, v in outcomes if k == "refused"] == ["effect_rejected"]
+    winner = next(v for k, v in outcomes if k == "ok")
+
+    # the same effect again is accepted; the loser's is not
+    monkeypatch.setattr(_mf, "_coerce_effect", original)
+    again = bind_reference_chain(
+        admitted=admitted, signed_activation_decision=signed,
+        defensive_effect_ref=edge_effect_payload(decision_id, now, effect_id=winner.effect_ref),
+        adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+    )
+    assert again.effect_ref == winner.effect_ref
+
+
+def test_r2_binding_marker_is_private_and_not_in_runtime_state(world):
+    _, plan, _, _, _, chain = _bind(world)
+    assert "mio_bound_effect_ref" not in world.adapter.collect_status(world.environment_id)
+    directory = world.adapter.state.root / "mio_bindings"
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    files = list(directory.iterdir())
+    assert len(files) == 1 and stat.S_IMODE(files[0].stat().st_mode) == 0o600
+
+
+def test_mb_concurrent_observers_never_duplicate_ids_and_the_bundle_verifies(world):
+    _, plan, _, _, _, chain = _bind(world)
+    ids: list[str] = []
+    errors: list[Exception] = []
+    start = threading.Barrier(4, timeout=10)
+
+    def work():
+        try:
+            observer = _observer(world, chain, plan)
+            start.wait()
+            for _ in range(15):
+                ids.append(observer.record(
+                    observation_class="interaction", surface="service").observation_id)
+        except Exception as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not errors, errors
+    assert len(ids) == 60 and len(set(ids)) == 60
+    bundle = _bundle(world, chain)
+    verify_feedback_bundle(bundle, **_kw(world, chain))
+    assert len(bundle["interactions"]) == 60
+    assert world.adapter.verify_evidence(world.environment_id) is True
+
+
+def test_ma_rewritten_caller_declared_is_caught_by_the_mac(world):
+    """Declare a gap away: add the missing telemetry and an isolation assertion, in a
+    self-consistent way. The rebuild would agree; only the MAC can disagree."""
+
+    _, plan, _, _, _, chain = _bind(world)
+    honest = _bundle(
+        world, chain, observed_telemetry=("interaction_log",), isolation_assertion_refs=()
+    )
+    assert honest["outcome"]["coverage_complete"] is False
+    forged = copy.deepcopy(honest)
+    forged["caller_declared"]["observed_telemetry"] = ["interaction_log", "process_events", "network"]
+    forged["caller_declared"]["isolation_assertion_refs"] = ["isolation-net-none"]
+    forged["outcome"]["coverage_complete"] = True
+    forged["outcome"]["telemetry_gaps"] = []
+    forged["isolation"]["status"] = "asserted"
+    forged["isolation"]["assertion_refs"] = ["isolation-net-none"]
+    forged["limitations"] = [x for x in forged["limitations"] if not x.startswith("telemetry_gap:")
+                             and x != "isolation_not_asserted"]
+    assert "caller_declared_mac" in honest
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(forged, **_kw(world, chain))
+    assert refused.value.code == "evidence_tampered"
+    # the MAC alone, on an otherwise untouched bundle
+    only_mac = copy.deepcopy(honest)
+    only_mac["caller_declared_mac"] = "0" * 64
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(only_mac, **_kw(world, chain))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_freshness_observed_at_alone_cannot_be_rewritten(world):
+    _, plan, _, _, _, chain = _bind(world)
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    bundle = _bundle(world, chain)
+    forged = copy.deepcopy(bundle)
+    forged["freshness"]["observed_at"] = (utcnow() - timedelta(hours=3)).isoformat()
+    with pytest.raises(BindingRefused):
+        verify_feedback_bundle(forged, **_kw(world, chain))
+    assert bundle["freshness"]["anchor_kind"] in {"last_interaction", "activation"}
+    quiet = _bind_fresh_activation_anchor(world)
+    assert quiet == "activation"
+
+
+def _bind_fresh_activation_anchor(world):
+    world.terminate()
+    world.adapter.reset_environment(world.environment_id)
+    _, plan, _, _, _, chain = _bind(world)
+    return _bundle(world, chain)["freshness"]["anchor_kind"]
+
+
+def test_la_caller_cannot_assert_outside_lease(world):
+    _, plan, _, _, _, chain = _bind(world)
+    with pytest.raises(ValueError):
+        _observer(world, chain, plan).record(
+            observation_class="interaction", surface="service", metadata={"outside_lease": True}
+        )
+    with pytest.raises(ValueError):
+        _observer(world, chain, plan).record(
+            observation_class="interaction", surface="service", metadata={"outside_lease": False}
+        )
+
+
+def _key_file(world):
+    keys = sorted((world.adapter.state.root / "mio_feedback_keys").glob("*.key"))
+    assert keys, "no session key file was created"
+    return keys[-1]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda path: path.write_text(""),
+        lambda path: os.chmod(path, 0o644),
+        lambda path: path.write_text("ab" * 8),
+        lambda path: path.write_text("ab" * 40),
+    ],
+    ids=["empty", "mode_0644", "short", "long"],
+)
+def test_lb_damaged_session_key_is_evidence_tampered(world, damage):
+    _, plan, _, _, _, chain = _bind(world)
+    _observer(world, chain, plan).record(
+        observation_class="interaction", surface="service", untrusted_text="probe"
+    )
+    bundle = _bundle(world, chain)
+    key = _key_file(world)
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert stat.S_IMODE(key.parent.stat().st_mode) == 0o700
+    damage(key)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(bundle, **_kw(world, chain))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_lb_session_key_survives_reset_for_later_digest_checks(world):
+    _, plan, _, _, _, chain = _bind(world)
+    _observer(world, chain, plan).record(
+        observation_class="interaction", surface="service", untrusted_text="probe"
+    )
+    key = _key_file(world)
+    world.terminate()
+    world.adapter.reset_environment(world.environment_id)
+    reset_feedback(world.adapter, chain, now=utcnow())
+    assert key.exists()
+
+
+def test_mc_coverage_distinguishes_confounded_outside_lease_and_unmapped(world):
+    _, plan, _, objective, _, chain = _bind(world)
+    observer = _observer(world, chain, plan)
+    observer.record(
+        observation_class="interaction", surface="service", confounder_tags=["scanner_noise"]
+    )
+    late = chain.lease_end + timedelta(seconds=1)
+    bound_observer(world.adapter, chain, world.package, plan, now_fn=lambda: late).record(
+        observation_class="interaction", surface="credential_lure"
+    )
+    bundle = _bundle(
+        world, chain, now=late, objective=objective,
+        surface_telemetry={"service": "interaction_log", "credential_lure": "process_events"},
+    )
+    status = {(e["observation_class"], e["surface"]): e for e in bundle["objective_coverage"]["entries"]}
+    service = status[("interaction", "service")]
+    lure = status[("interaction", "credential_lure")]
+    assert service["status"] == "observed_confounded_only"
+    assert service["observed_count"] >= 1 and service["confounded_count"] >= 1
+    assert lure["status"] == "observed_outside_lease_only"
+    assert lure["outside_lease_count"] >= 1
+
+    unmapped = _bundle(world, chain, now=late, objective=objective, surface_telemetry={})
+    for entry in unmapped["objective_coverage"]["entries"]:
+        if entry["observed_count"] == 0:
+            assert entry["status"] == f"undeterminable_unmapped_surface:{entry['surface']}"
+    assert "desired_observations_not_hypothesis_specific" in bundle["limitations"]
+    assert "tactical" not in json.dumps(bundle["objective_coverage"]).lower()

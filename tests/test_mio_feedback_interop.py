@@ -529,3 +529,27 @@ def test_mio_frame_carries_deception_unknowns_from_mio_frame_inputs(scenario):
     handoff = build_no_model_handoff(frame, reason="dependency_unavailable").to_dict()
     assert handoff["counts"]["unknowns"] >= len(inputs["explicit_unknowns"])
     assert handoff["model_contribution"] == "none"
+
+
+def test_mio_frame_carries_desired_observation_known_facts(scenario):
+    """mio_frame_inputs known_facts (addendum 2) reach the MIO frame unchanged.
+
+    The key name `known_facts` is provisional until the implementation report.
+    """
+
+    from azazel_mio.frame_builder import MioSituationFrameBuilder
+
+    world, chain, bundle = scenario
+    inputs = mio_frame_inputs(bundle, **_kw(world, chain))
+    facts = inputs["known_facts"]
+    assert all(f.startswith("DECEPTION_DESIRED_") for f in facts)
+    now = utcnow().isoformat().replace("+00:00", "Z")
+    frame = MioSituationFrameBuilder().build(
+        events=[{"event_id": "ev:az06-1", "ts": now, "severity": 10}],
+        noc_evaluation={}, soc_evaluation={}, current_defensive_state="OBSERVE",
+        mission="az06-conformance", trace_id=chain.trace_id, frame_id="frame-55-facts",
+        created_at=now, deception_context=inputs["deception_context"],
+        explicit_unknowns=inputs["explicit_unknowns"],
+    )
+    for fact in facts:
+        assert fact in frame.known_facts, f"MIO dropped {fact}"
