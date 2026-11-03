@@ -518,7 +518,15 @@ class DockerComposeAdapter:
         if current is None:
             return {"environment_id": environment_id, "status": "absent"}
 
-        if self.live_enabled and current.get("state") == "active":
+        if current.get("state") in _MAYBE_RUNNING_STATES and not self.live_enabled:
+            # Fail closed: a maybe-running environment cannot be confirmed down
+            # without compose. The one-shot decision is already consumed above;
+            # state and evidence are left untouched.
+            raise RuntimeGateError(
+                "live execution disabled; cannot confirm maybe-running environment is down"
+            )
+
+        if self.live_enabled and current.get("state") in _MAYBE_RUNNING_STATES:
             try:
                 self._compose(environment_id, "down", "--remove-orphans")
             except RuntimeGateError as exc:
@@ -672,9 +680,18 @@ class DockerComposeAdapter:
         }
 
     def reset_environment(self, environment_id: str) -> dict[str, Any]:
-        current = self.state.read(environment_id)
-        if current and current.get("state") == "active":
-            raise RuntimeGateError("active environment must be terminated before reset")
+        try:
+            current = self.state.read(environment_id)
+        except (OSError, ValueError):
+            # Fail closed: an unreadable state may still describe a running
+            # decoy, so reset is refused and the evidence chain is left intact.
+            raise RuntimeGateError(
+                "runtime state unreadable; environment must be terminated before reset"
+            ) from None
+        if current and current.get("state") in _MAYBE_RUNNING_STATES:
+            raise RuntimeGateError(
+                "active or failed environment must be terminated before reset"
+            )
 
         evidence = str(self.state.evidence_path(environment_id))
         reset_event = {

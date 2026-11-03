@@ -292,7 +292,9 @@ def test_termination_decision_is_one_shot(tmp_path):
         },
     )
     decision = _termination()
-    assert adapter.terminate_environment("env-1", decision)["status"] == "terminated"
+    # "active" is maybe-running; with live disabled termination must refuse, not claim terminated.
+    with pytest.raises(RuntimeGateError, match="cannot confirm maybe-running"):
+        adapter.terminate_environment("env-1", decision)
     with pytest.raises(RuntimeGateError, match="already consumed"):
         adapter.terminate_environment("env-1", decision)
 
@@ -316,3 +318,92 @@ def test_reset_clears_runtime_state_but_preserves_evidence(tmp_path):
     events = adapter.export_evidence("env-1")
     assert events[0]["event"] == "before-reset"
     assert events[-1]["event_type"] == "reset_completed"
+
+
+def _failed_live_activation(tmp_path, monkeypatch):
+    package = _verified_reference_package()
+    plan = build_placement_plan(package, _host(), "lite", edge_decision_id="edge-decision-1")
+    adapter = DockerComposeAdapter(
+        COMPOSE, tmp_path, live_enabled=True, package_verifier=_accept_all_test_verifier
+    )
+
+    def fail_up(*args, **kwargs):
+        raise RuntimeGateError("synthetic compose up failure after partial start")
+
+    monkeypatch.setattr(adapter, "_compose", fail_up)
+    with pytest.raises(RuntimeGateError, match="synthetic compose up failure"):
+        adapter.activate_environment("env-1", package, plan, _decision(package, plan))
+    assert adapter.collect_status("env-1")["state"] == "failed"
+    return adapter
+
+
+def test_failed_activation_then_terminate_runs_compose_down(tmp_path, monkeypatch):
+    adapter = _failed_live_activation(tmp_path, monkeypatch)
+    calls = []
+
+    def record_down(environment_id, *args):
+        calls.append(args)
+        return None
+
+    monkeypatch.setattr(adapter, "_compose", record_down)
+    result = adapter.terminate_environment("env-1", _termination())
+    assert calls == [("down", "--remove-orphans")]
+    assert result["status"] == "terminated"
+    assert adapter.collect_status("env-1")["state"] == "terminated"
+
+
+def test_failed_terminate_does_not_record_terminated(tmp_path, monkeypatch):
+    adapter = _failed_live_activation(tmp_path, monkeypatch)
+
+    def fail_down(*args, **kwargs):
+        raise RuntimeGateError("synthetic compose down failure")
+
+    monkeypatch.setattr(adapter, "_compose", fail_down)
+    with pytest.raises(RuntimeGateError, match="synthetic compose down failure"):
+        adapter.terminate_environment("env-1", _termination())
+    assert adapter.collect_status("env-1")["state"] == "failed"
+    assert adapter.collect_status("env-1")["failure_stage"] == "termination"
+
+
+@pytest.mark.parametrize("state_name", ["failed", "kill_switch_failed"])
+def test_reset_refuses_failed_states_and_preserves_evidence(tmp_path, state_name):
+    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=False)
+    adapter.state.write(
+        "env-1",
+        {"environment_id": "env-1", "state": state_name, "package_id": "municipal-linux-v1"},
+    )
+    adapter.state.append_evidence("env-1", {"event": "before-reset"})
+    evidence_before = adapter.export_evidence("env-1")
+    with pytest.raises(RuntimeGateError, match="must be terminated before reset"):
+        adapter.reset_environment("env-1")
+    assert adapter.collect_status("env-1")["state"] == state_name
+    assert adapter.export_evidence("env-1") == evidence_before
+
+
+def test_reset_refuses_unreadable_state_and_preserves_evidence(tmp_path):
+    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=False)
+    adapter.state.append_evidence("env-1", {"event": "before-reset"})
+    adapter.state._state_path("env-1").write_text("{not json", encoding="utf-8")
+    evidence_before = adapter.export_evidence("env-1")
+    with pytest.raises(RuntimeGateError, match="unreadable"):
+        adapter.reset_environment("env-1")
+    assert adapter.state._state_path("env-1").read_text(encoding="utf-8") == "{not json"
+    assert adapter.export_evidence("env-1") == evidence_before
+
+
+def test_terminate_refuses_maybe_running_state_when_live_disabled(tmp_path):
+    adapter = DockerComposeAdapter(COMPOSE, tmp_path, live_enabled=False)
+    adapter.state.write(
+        "env-1",
+        {"environment_id": "env-1", "state": "failed", "package_id": "municipal-linux-v1"},
+    )
+    adapter.state.append_evidence("env-1", {"event": "before-terminate"})
+    evidence_before = adapter.export_evidence("env-1")
+    decision = _termination()
+    with pytest.raises(RuntimeGateError, match="cannot confirm maybe-running"):
+        adapter.terminate_environment("env-1", decision)
+    assert adapter.collect_status("env-1")["state"] == "failed"
+    assert adapter.export_evidence("env-1") == evidence_before
+    # The one-shot decision marker is consumed by this refusal.
+    with pytest.raises(RuntimeGateError, match="already consumed"):
+        adapter.terminate_environment("env-1", decision)
