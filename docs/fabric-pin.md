@@ -257,8 +257,10 @@ never authority.
 
 ## Release status
 
-Current Deception `main` (`9cd7987f55d3837c4a8142769e6e0b47e5d3887b`) pins
-`v0.9.0rc5`, the latest published Azazel-Fabric prerelease. Its tag peels to
+As of source commit `9cd7987f55d3837c4a8142769e6e0b47e5d3887b` (Deception
+`main` at that commit), the pin is `v0.9.0rc5`, the latest published
+Azazel-Fabric prerelease. This documentation candidate is a later, docs-only
+commit; it does not change the pin. Its tag peels to
 source commit `450d9502884ba533653210056a6fb85012b96b84` and the GitHub Release
 was published 2026-09-20 as a **prerelease**. Fabric's `release.yml` classifies
 anything that is not exactly `vMAJOR.MINOR.PATCH` as a prerelease, so a
@@ -272,12 +274,14 @@ is cut.
 
 In series status vocabulary
 (`Azazel/docs/roadmaps/third-party-development-handoff.md` §7) the pin is
-**verified** for AZ-06's software suite on Deception `main` at `9cd7987`. All
-three GitHub Actions runs on that exact commit succeeded:
+**verified** for AZ-06's software suite as of source commit `9cd7987`, the
+Deception `main` commit the evidence below was run against. All three cited
+GitHub Actions runs apply to source commit `9cd7987`, not to this later,
+docs-only documentation candidate.
 
 - [CI run `40181193506`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193506): Python 3.10 and 3.12.
 - [Portability run `40181193444`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193444): Linux arm64, Linux amd64 and macOS arm64.
-- [Executed Evidence run `40181193459`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193459).
+- [Executed Evidence run `40181193459`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193459): the workflow `.github/workflows/executed-evidence.yml` defines four jobs at `9cd7987`: `docker-lifecycle` (Real-container lifecycle (Docker)), `virtual-lab` (Virtual Phase-1 Lab report), `so08-virtual-lab` (SO-08 isolation-drift virtual lab, regression, not a gate) and `cross-repo-heartbeat-e2e` (Networked Edge→AZ-06 heartbeat E2E). The per-job outcomes of this run are not recorded in the repository text, so this document does not state which jobs passed or were skipped; the run-level status is as stated above.
 
 These are software evidence only. They are not a claim about field or HIL
 properties, and they do not close the combined networked Edge→AZ-06 gate or any
