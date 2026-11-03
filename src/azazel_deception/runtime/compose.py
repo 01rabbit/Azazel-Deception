@@ -204,6 +204,10 @@ class DockerComposeAdapter:
 
         if not isinstance(environment_id, str) or not is_legacy_environment_id(environment_id):
             self._require_environment_id(environment_id)
+            if compose:
+                # A strict ID addresses "az06-<id>"; a persisted legacy ID may
+                # already own that project, so Compose must not be reached.
+                self._require_no_legacy_alias(environment_id)
             return
         try:
             if compose:
@@ -218,7 +222,7 @@ class DockerComposeAdapter:
             ) from exc
 
     def _require_no_legacy_alias(self, environment_id: str) -> None:
-        """Refuse a new activation whose Compose project a legacy ID may hold."""
+        """Refuse any Compose use of a strict ID whose project a legacy ID holds."""
 
         aliases = self.state.project_aliases(
             f"az06-{environment_id}", excluding=environment_id
@@ -226,7 +230,11 @@ class DockerComposeAdapter:
         if aliases:
             raise RuntimeGateError(
                 "environment_id shares a Compose project with persisted legacy "
-                f"environment(s) {sorted(aliases)}; decommission them first"
+                f"environment(s) {sorted(aliases)}; no Compose operation was run. "
+                "Stop each legacy deployment safely and remove its legacy "
+                "state file by hand before reusing this Compose project. If "
+                "the runtime refuses an ambiguous or truncated legacy ID, "
+                "stop that deployment with Docker directly first"
             )
 
     def _project_name(self, environment_id: str) -> str:
@@ -237,6 +245,7 @@ class DockerComposeAdapter:
             self._require_serviceable_environment_id(environment_id, compose=True)
             return old_project_name(environment_id)
         self._require_environment_id(environment_id)
+        self._require_no_legacy_alias(environment_id)
         return f"az06-{environment_id}"
 
     def _compose(self, environment_id: str, *args: str) -> subprocess.CompletedProcess[str]:

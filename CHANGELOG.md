@@ -115,19 +115,30 @@ are not proven (see `docs/live-gate-checklist.md`).
     stopped with the operator kill switch. Compose operations use the old
     lower-cased/filtered project name and are refused when that name was
     truncated or is shared with any other persisted ID (`legacy_ambiguous`).
-    A new strict activation whose project a legacy ID holds is refused until the
-    legacy environment is decommissioned. `reset_environment` and record
-    deletion accept strict IDs only; remove legacy records by hand.
+    A strict ID whose Compose project a legacy ID holds is refused for activation
+    and every Compose operation until the legacy deployment is stopped and its
+    state record is removed by hand. `reset_environment` and record deletion
+    accept strict IDs only.
   - *Invalid old IDs are reported, not hidden.* `health()` adds `id_status`
     (`supported`, `legacy`, `legacy_ambiguous`, `unsupported`) plus
     `legacy_environment_ids` / `unsupported_environment_ids`; `reconcile_with_edge`
     adds the same lists. A persisted ID that is not path-safe is never opened,
     reports state `unsupported_id`, and makes `consistent` false because it may
     hide a running deployment. Stop such deployments with Docker directly.
-  - *Permissions are no longer rewritten.* Opening or reading state/evidence
-    never chmods and no longer requires service-user ownership; shared
-    (group-readable) layouts keep working. Newly created directories and files
-    are `0700`/`0600`. Symlinked record files are still refused.
+  - *Permissions are no longer rewritten on read or append.* Opening or reading
+    state/evidence never chmods and no longer requires service-user ownership;
+    shared (group-readable) layouts keep working, and an existing evidence file
+    keeps its mode when appended to. Existing state JSON is rewritten by atomic
+    replace, so a rewritten state file becomes `0600`. Newly created directories
+    and files are `0700`/`0600`. Symlinked record files and non-regular files
+    (such as a FIFO, which is opened nonblocking and refused) are refused.
+  - *Edge decision IDs* accept Unicode alphanumerics plus `-`, `_`, `.` and are
+    not normalized; IDs that collide on a case- or normalization-folding
+    filesystem fail closed as already consumed.
+  - *Strict ID vs. legacy alias.* Terminate, kill switch and any Compose call on
+    a strict ID are refused (no Compose command run) while a persisted legacy ID
+    holds the same `az06-<id>` project. Ambiguous legacy IDs are recovered by
+    stopping the deployment with Docker and removing the legacy state by hand.
   - *State root.* The configured root is never chmod'ed. It may be a symlink
     (for example to a mounted volume) if it resolves to an existing directory
     the service user can read, write and traverse. The `environments`,

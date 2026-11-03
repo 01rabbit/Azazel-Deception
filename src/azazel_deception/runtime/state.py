@@ -38,6 +38,7 @@ _PRIVATE_DIR_MODE = 0o700
 # of following it. The store is POSIX-only (Linux, macOS): without O_NOFOLLOW
 # the symlink guarantees cannot be given, so construction fails closed.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 # Environment IDs persisted before the strict grammar existed. They are only
 # ever *recognised* so already-running deployments can be read, reported,
@@ -80,12 +81,16 @@ def _open_regular(path: Path, flags: int) -> int:
     New files are created ``0600``. Existing files keep their permissions, so a
     shared (group-readable) deployment stays readable and a read has no side
     effects. Access is governed by the file's own permissions.
+
+    The open is nonblocking so a planted FIFO cannot hang the caller before the
+    regular-file check; the descriptor is returned to blocking mode afterwards.
     """
 
-    fd = os.open(path, flags | _O_NOFOLLOW, _PRIVATE_FILE_MODE)
+    fd = os.open(path, flags | _O_NOFOLLOW | _O_NONBLOCK, _PRIVATE_FILE_MODE)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"refusing non-regular record file: {path}")
+        os.set_blocking(fd, True)
     except BaseException:
         os.close(fd)
         raise
@@ -325,12 +330,18 @@ class RuntimeStateStore:
         if len(project) >= _PROJECT_MAX_LENGTH:
             # The old derivation truncated to 63 characters: the name may
             # collide with a longer ID's, so it is never addressed.
-            raise EnvironmentIdError("legacy environment_id project name was truncated")
+            raise EnvironmentIdError(
+                "legacy environment_id project name was truncated; stop the "
+                "deployment with Docker directly and remove the legacy state "
+                "file by hand"
+            )
         aliases = self.project_aliases(project, excluding=environment_id)
         if aliases:
             raise EnvironmentIdError(
                 "legacy environment_id shares a Compose project with another "
-                f"persisted environment: {sorted(aliases)}"
+                f"persisted environment: {sorted(aliases)}; the runtime cannot "
+                "tell their deployments apart, so stop the deployment with "
+                "Docker directly and remove the legacy state file(s) by hand"
             )
         return project
 

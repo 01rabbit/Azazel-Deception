@@ -539,3 +539,58 @@ def test_dangling_symlink_root_is_refused(tmp_path):
     with pytest.raises(OSError):
         RuntimeStateStore(link)
     assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("legacy_id", ["ENV-1", "Env.1"])
+def test_strict_id_compose_ops_refused_while_legacy_alias_persisted(mocked, legacy_id):
+    adapter, calls = mocked
+    strict = "env-1" if legacy_id == "ENV-1" else "env1"
+    _persist(adapter, legacy_id)  # old project az06-<strict>
+    _persist(adapter, strict)
+    with pytest.raises(RuntimeGateError, match="shares a Compose project"):
+        adapter.terminate_environment(strict, _termination(strict))
+    with pytest.raises(RuntimeGateError, match="shares a Compose project"):
+        adapter.emergency_stop(strict, operator="op", reason="r")
+    assert calls == []
+    assert adapter.state.read(strict)["state"] == "active"
+    assert not adapter.state.decision_consumed("dec-term-1")
+
+
+def test_ambiguous_legacy_recovery_text_is_accurate(mocked):
+    adapter, calls = mocked
+    _persist(adapter, "Env.1")
+    _persist(adapter, "ENV1")
+    with pytest.raises(RuntimeGateError) as exc:
+        adapter.emergency_stop("Env.1", operator="op", reason="r")
+    assert "Docker directly" in str(exc.value) and "by hand" in str(exc.value)
+    _persist(adapter, "env1")
+    with pytest.raises(RuntimeGateError) as exc:
+        adapter.terminate_environment("env1", _termination("env1"))
+    assert "Docker directly" in str(exc.value) and "by hand" in str(exc.value)
+    assert calls == []
+
+
+def test_fifo_record_is_refused_without_blocking(tmp_path):
+    import signal
+
+    adapter = _adapter(tmp_path)
+    fifo = adapter.state.root / "environments" / "env-fifo.json"
+    os.mkfifo(fifo)
+    evidence = adapter.state.evidence_path("env-fifo")
+    os.mkfifo(evidence)
+
+    def _timeout(signum, frame):
+        raise AssertionError("FIFO open blocked")
+
+    old = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(5)
+    try:
+        with pytest.raises(OSError):
+            adapter.state.read("env-fifo")
+        with pytest.raises(OSError):
+            adapter.state.read_evidence_snapshot("env-fifo")
+        with pytest.raises(OSError):
+            adapter.state.append_evidence("env-fifo", {"event_id": "e"})
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)

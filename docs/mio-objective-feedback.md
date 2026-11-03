@@ -92,23 +92,34 @@ Runtime `environment_id` values for new activations and writes are accepted
 only in the strict form `[a-z0-9][a-z0-9_-]{0,57}`. Values are rejected without
 lowercasing, filtering or truncation because the identifier is also used in
 state/evidence paths and as the Compose project suffix. Edge decision IDs use a
-different grammar (alphanumerics plus `-`, `_`, `.`; any case) and are stored as
-`decisions/<decision_id>.json`; the two grammars are independent.
+different grammar (Unicode alphanumerics plus `-`, `_`, `.`; any case) and are
+stored as `decisions/<decision_id>.json`; the two grammars are independent.
+Decision IDs are not normalized or case-folded. On a filesystem that folds case
+or Unicode normalization forms, two IDs that map to the same file collide; the
+second is treated as already consumed (fail closed), never as a new decision.
 
 Environments persisted under older, wider IDs (for example `Env.1`) are not
 renamed. If the ID is path-safe and its exact state file exists, it can be read,
 terminated with an Edge decision, or stopped with the operator kill switch, but
 never activated. Compose operations on it are refused when its old project name
 (`az06-` + lower-cased, filtered ID, 63 characters max) was truncated or is
-shared by another persisted ID. `health()` and `reconcile_with_edge()` list such
+shared by another persisted ID. The same guard applies to a strict ID: while a
+persisted legacy ID holds `az06-<id>`, terminate, kill switch and every other
+Compose call for the strict ID are refused before any Compose command runs.
+Recovery for an ambiguous or truncated legacy ID: stop its deployment with
+Docker directly, then remove its legacy state file by hand. `health()` and `reconcile_with_edge()` list such
 IDs (`legacy`, `legacy_ambiguous`) and any non-path-safe ones (`unsupported`,
 state `unsupported_id`, never opened, reconcile reports inconsistent).
 
 The state store is POSIX-only (Linux, macOS); it fails closed on other
 platforms and Windows is not supported. The runtime never changes the mode of an
 existing state root, directory or record. New directories are `0700` and new
-state, evidence, decision and temp files are `0600`; existing files keep their
-permissions and need only be readable by the service user. A configured root may
+state, evidence, decision and temp files are `0600`. Reading never changes a
+file's mode, and evidence appends write to the existing file in place, so an
+existing evidence file keeps its permissions. State JSON is rewritten by atomic
+replace, so a rewritten state file becomes `0600` regardless of its earlier mode.
+Record files are opened nonblocking and must be regular files; a FIFO or other
+special file is refused rather than read. A configured root may
 be a symlink to an existing, accessible directory; `environments`, `evidence`
 and `decisions` inside it must not be symlinks. Decision files are created by
 the service user.
