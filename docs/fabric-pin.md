@@ -257,22 +257,35 @@ never authority.
 
 ## Release status
 
-The `v0.9.0rc2` tag exists on `01rabbit/Azazel-Fabric` and its GitHub Release is
-published as a **prerelease** (2026-09-20) — Fabric's `release.yml` classifies
+As of source commit `9cd7987f55d3837c4a8142769e6e0b47e5d3887b` (Deception
+`main` at that commit), the pin is `v0.9.0rc5`, the latest published
+Azazel-Fabric prerelease. This documentation candidate is a later, docs-only
+commit; it does not change the pin. Its tag peels to
+source commit `450d9502884ba533653210056a6fb85012b96b84` and the GitHub Release
+was published 2026-09-20 as a **prerelease**. Fabric's `release.yml` classifies
 anything that is not exactly `vMAJOR.MINOR.PATCH` as a prerelease, so a
 candidate cannot appear where a consumer looks for the latest stable release.
 
-The superseded `v0.8.0` tag exists and its GitHub Release is
-published (not draft, not prerelease, published 2026-08-22). Fabric cuts tags
-through its tag-driven `release.yml` workflow, which enforces that the tag
-matches `azazel_fabric.__version__` and that the test suite passes before the
-release is cut.
+The latest stable Azazel-Fabric release is `v0.8.0`, at commit
+`b2fd983d411489457e719d018f06172846f115e1`. Fabric cuts tags through its
+tag-driven `release.yml` workflow, which enforces that the tag matches
+`azazel_fabric.__version__` and that the test suite passes before the release
+is cut.
 
 In series status vocabulary
 (`Azazel/docs/roadmaps/third-party-development-handoff.md` §7) the pin is
-**verified** for AZ-06's software suite: `pytest` is green against the installed
-`azazel_fabric 0.9.0rc2` on `main`, on Linux amd64, Linux arm64 and macOS arm64
-CI runners. It is not a claim about field or HIL properties.
+**verified** for AZ-06's software suite as of source commit `9cd7987`, the
+Deception `main` commit the evidence below was run against. All three cited
+GitHub Actions runs apply to source commit `9cd7987`, not to this later,
+docs-only documentation candidate.
+
+- [CI run `40181193506`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193506): Python 3.10 and 3.12.
+- [Portability run `40181193444`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193444): Linux arm64, Linux amd64 and macOS arm64.
+- [Executed Evidence run `40181193459`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193459): `docker-lifecycle` (Real-container lifecycle (Docker)), `virtual-lab` (Virtual Phase-1 Lab report), `so08-virtual-lab` (SO-08 isolation-drift virtual lab, regression, not a gate), and `cross-repo-heartbeat-e2e` (Networked Edge→AZ-06 heartbeat E2E) all completed successfully on the cited source commit.
+
+These are software evidence only. They are not a claim about field or HIL
+properties, and they do not close the combined networked Edge→AZ-06 gate or any
+HIL gate; those remain open in [`live-gate-checklist.md`](live-gate-checklist.md).
 
 ## Pin policy
 

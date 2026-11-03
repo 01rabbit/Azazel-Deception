@@ -1,6 +1,6 @@
 # AZ-06 Implementation Status
 
-Last updated: 2026-09-19
+Last updated: 2026-11-03
 
 This document separates **implemented software properties** from **field/HIL
 properties that are not yet proven**. A green unit/CI suite is not a claim of
@@ -11,10 +11,11 @@ safe live deception deployment.
 ### Canonical contracts
 
 AZ-06 consumes the Azazel-Fabric `azazel_fabric.deception_contracts`
-family through an exact stable release tag. The pinned tag is stated in exactly
-one place — the `azazel-fabric` requirement in `pyproject.toml`, described in
-[`docs/fabric-pin.md`](fabric-pin.md). This document deliberately does not
-restate the version, so it cannot drift out of date behind a pin bump.
+family through an exact published release tag, which may be a prerelease. The
+pinned tag is stated in exactly one place — the `azazel-fabric` requirement in
+`pyproject.toml`, described in [`docs/fabric-pin.md`](fabric-pin.md). This
+document deliberately does not restate the version, so it cannot drift out of
+date behind a pin bump.
 
 Implemented canonical boundaries include:
 
@@ -370,9 +371,10 @@ at the required assurance level.
 
 ## Current issue map
 
-Issue states below were read from GitHub on 2026-09-19. **Open trackers are
-`#3`, `#6`, `#28`, `#30`, `#31`, `#35`.** `#1`, `#2`, `#4` and `#5` are closed
-and are listed only as history — do not route work to them.
+Issue states below were read from GitHub on 2026-11-03. **Open trackers are
+`#55`, `#41`, `#39`, `#35`, `#31`, `#30`, `#6`, `#3`.** `#50`, `#38`, `#28`,
+`#5`, `#4`, `#2` and `#1` are closed and are listed only as history — do not
+route work to them.
 
 ### Open
 
@@ -385,8 +387,12 @@ and are listed only as history — do not route work to them.
   demonstrated on both architectures.
 - `Azazel-Deception#6` — Phase 2. Intentionally not started; gated by the phase
   gate above.
-- `Azazel-Deception#28` — separate Deception lifecycle state from Edge/Gadget
-  Defensive State (integration).
+- `Azazel-Deception#55` — bind advisory observation objectives to approved
+  deception and provenance-preserving feedback (integration; see GitHub).
+- `Azazel-Deception#41` — SO-08 isolation-drift evidence (owned by AZ-06; see
+  [`so08-isolation-drift.md`](so08-isolation-drift.md)).
+- `Azazel-Deception#39` — external network-device observability and controlled
+  deception-exposure adapters (integration; see GitHub).
 - `Azazel-Deception#30` — Presented Terrain engine research: transition,
   fingerprint, and outcome-evidence discipline.
 - `Azazel-Deception#31` — static Presented Terrain vertical slice. **The v0
@@ -408,6 +414,13 @@ and are listed only as history — do not route work to them.
 
 ### Closed (history only)
 
+- `Azazel-Deception#50` — carry trace, synthetic-identity, and credential
+  references into `PresentedTerrainRef` (Fabric prerelease adoption; see
+  [`fabric-pin.md`](fabric-pin.md)). Closed; close date not recorded here.
+- `Azazel-Deception#38` — gate/checklist-to-code drift and executed gate proofs.
+  Closed; close date not recorded here.
+- `Azazel-Deception#28` — separate Deception lifecycle state from Edge/Gadget
+  Defensive State (integration). Closed; close date not recorded here.
 - `Azazel-Deception#1` — canonical Fabric contract migration. Closed
   2026-08-22.
 - `Azazel-Deception#2` — feature-disabled Docker Compose lifecycle adapter.
