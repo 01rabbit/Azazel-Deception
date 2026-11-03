@@ -92,6 +92,17 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Fixed
 
+- **Deception#55 reference-chain integrity** — the local per-session seal now
+  covers the canonical Edge effect payload as well as the chain fields. Replacing
+  a bound effect or another chain field is refused by the observer, bundle,
+  verification and reset consumers. The seal is local and does not change the
+  Fabric bundle schema or grant execution authority.
+- **Runtime environment identifiers and private records** — filesystem and
+  Compose use now share one strict, non-normalizing environment-ID grammar;
+  ambiguous, traversing and overlong IDs are rejected before state changes or
+  Compose calls. State, evidence and decision directories/files are kept
+  owner-only, existing state/evidence files are tightened when opened, and
+  symlinked record paths are refused. Existing persisted IDs are not renamed.
 - **Deception#55 objective digest binding** — `bind_reference_chain` now derives
   content binding from the authenticated Edge decision. A caller-constructed
   `AdmittedObjective` cannot turn a signed objective digest into reference-only

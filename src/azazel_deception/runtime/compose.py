@@ -42,7 +42,11 @@ from azazel_deception.runtime.observation import (
     build_runtime_context,
 )
 from azazel_deception.runtime.observation_export import export_observations
-from azazel_deception.runtime.state import RuntimeStateStore
+from azazel_deception.runtime.state import (
+    EnvironmentIdError,
+    RuntimeStateStore,
+    validate_environment_id,
+)
 from azazel_deception.runtime.transport import (
     DEFAULT_SIGNATURE_FIELD,
     DecisionAuthenticationError,
@@ -171,11 +175,24 @@ class DockerComposeAdapter:
             edge_decision_id=edge_decision_id,
         )
 
+    @staticmethod
+    def _require_environment_id(environment_id: str) -> None:
+        """Reject a malformed environment_id before any state, file, or compose use.
+
+        Validation is strict and never normalizes: see
+        :func:`azazel_deception.runtime.state.validate_environment_id`.
+        """
+
+        try:
+            validate_environment_id(environment_id)
+        except EnvironmentIdError as exc:
+            raise RuntimeGateError(str(exc)) from exc
+
     def _project_name(self, environment_id: str) -> str:
-        safe = "".join(ch for ch in environment_id.lower() if ch.isalnum() or ch in "-_")
-        if not safe:
-            raise RuntimeGateError("environment_id cannot produce an empty compose project name")
-        return f"az06-{safe}"[:63]
+        # The validated grammar is injective and bounded to 58 characters, so
+        # "az06-<id>" is a unique project name of at most 63 characters.
+        self._require_environment_id(environment_id)
+        return f"az06-{environment_id}"
 
     def _compose(self, environment_id: str, *args: str) -> subprocess.CompletedProcess[str]:
         if not self.compose_file.exists():
@@ -333,6 +350,7 @@ class DockerComposeAdapter:
         placement_data: dict[str, Any],
         decision_data: dict[str, Any],
     ) -> dict[str, Any]:
+        self._require_environment_id(environment_id)
         package = self.validate_package(raw_package)
         placement = PlacementPlan.model_validate(placement_data)
         decision = EnvironmentActivationDecision.model_validate(
@@ -417,6 +435,7 @@ class DockerComposeAdapter:
         live consumption of the same decision.
         """
 
+        self._require_environment_id(environment_id)
         package = self.validate_package(raw_package)
         placement = PlacementPlan.model_validate(placement_data)
         decision = EnvironmentActivationDecision.model_validate(
@@ -446,6 +465,7 @@ class DockerComposeAdapter:
     ) -> dict[str, Any]:
         """Validate a termination decision without executing anything."""
 
+        self._require_environment_id(environment_id)
         decision = EnvironmentTerminationDecision.model_validate(
             self._decision_contract(decision_data)
         )
@@ -465,6 +485,7 @@ class DockerComposeAdapter:
         }
 
     def collect_status(self, environment_id: str) -> dict[str, Any]:
+        self._require_environment_id(environment_id)
         state = self.state.read(environment_id)
         return state or {"environment_id": environment_id, "state": "absent"}
 
@@ -485,6 +506,7 @@ class DockerComposeAdapter:
         assert effectiveness — AZ-06 emits facts, Knowledge infers.
         """
 
+        self._require_environment_id(environment_id)
         runtime_context = build_runtime_context(
             package,
             placement,
@@ -504,6 +526,7 @@ class DockerComposeAdapter:
         environment_id: str,
         decision_data: dict[str, Any],
     ) -> dict[str, Any]:
+        self._require_environment_id(environment_id)
         decision = EnvironmentTerminationDecision.model_validate(
             self._decision_contract(decision_data)
         )
@@ -575,6 +598,7 @@ class DockerComposeAdapter:
         knows the workload may still be running.
         """
 
+        self._require_environment_id(environment_id)
         if not operator or not reason:
             raise RuntimeGateError("operator kill switch requires operator and reason")
 
@@ -680,6 +704,7 @@ class DockerComposeAdapter:
         }
 
     def reset_environment(self, environment_id: str) -> dict[str, Any]:
+        self._require_environment_id(environment_id)
         try:
             current = self.state.read(environment_id)
         except (OSError, ValueError):
@@ -717,6 +742,7 @@ class DockerComposeAdapter:
     def verify_evidence(self, environment_id: str) -> bool:
         """Return True iff the environment's evidence hash chain is intact."""
 
+        self._require_environment_id(environment_id)
         return self.state.verify_evidence_chain(environment_id)
 
     def _environment_state(self, environment_id: str) -> str | None:
@@ -768,6 +794,7 @@ class DockerComposeAdapter:
         }
 
     def export_evidence(self, environment_id: str) -> list[dict[str, Any]]:
+        self._require_environment_id(environment_id)
         snapshot = self.state.read_evidence_snapshot(environment_id)
         if snapshot is None:
             return []
@@ -788,4 +815,5 @@ class DockerComposeAdapter:
         Edge; AZ-06 itself performs no Knowledge push.
         """
 
+        self._require_environment_id(environment_id)
         return export_observations(self.state, environment_id)

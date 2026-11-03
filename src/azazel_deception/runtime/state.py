@@ -10,9 +10,104 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import stat
 import threading
 from pathlib import Path
 from typing import Any
+
+# environment_id is used verbatim in filesystem paths (state JSON, evidence
+# JSONL) and, prefixed with ``az06-``, as a Docker Compose project name. The
+# accepted grammar is deliberately strict and is never normalized: lowercase
+# ASCII letters/digits and single ``-``/``_`` separators, starting with a letter
+# or digit, at most 58 characters so ``az06-<id>`` stays within Compose's
+# 63-character project-name limit. Rejecting (rather than lowercasing or
+# truncating) keeps the mapping from ID to path and project one-to-one: two
+# different IDs can never alias to the same state, evidence file, or project.
+_ENVIRONMENT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,57}")
+ENVIRONMENT_ID_MAX_LENGTH = 58
+
+# Records are private operator/evidence material; create them owner-only.
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIR_MODE = 0o700
+# O_NOFOLLOW makes open() refuse a symlink in the final path component instead
+# of following it; O_DIRECTORY makes it refuse anything that is not a directory.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _secure_dir(path: Path) -> None:
+    """Force an existing directory to owner-only (0700) without following symlinks.
+
+    Opens the directory with O_NOFOLLOW|O_DIRECTORY, so a symlink planted at the
+    location raises OSError rather than re-moding its target, then fchmods the
+    descriptor. Directory contents are not changed.
+    """
+
+    fd = os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid():
+            raise OSError(f"refusing directory owned by another user: {path}")
+        if stat.S_IMODE(info.st_mode) != _PRIVATE_DIR_MODE:
+            os.fchmod(fd, _PRIVATE_DIR_MODE)
+    finally:
+        os.close(fd)
+
+
+def _open_private(path: Path, flags: int) -> int:
+    """Open a regular file owner-only, refusing symlinks, and tighten its mode.
+
+    A pre-existing file (for example one created 0644 by another process) is
+    fchmod'ed to 0600 through the descriptor. Its contents are left untouched.
+    """
+
+    fd = os.open(path, flags | _O_NOFOLLOW, _PRIVATE_FILE_MODE)
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise OSError(f"refusing non-regular record file: {path}")
+        if os.fstat(fd).st_uid != os.getuid():
+            raise OSError(f"refusing record file owned by another user: {path}")
+        if stat.S_IMODE(mode) != _PRIVATE_FILE_MODE:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_private_text(path: Path) -> str:
+    fd = _open_private(path, os.O_RDONLY)
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _refuse_symlink(path: Path) -> None:
+    if os.path.islink(path):
+        raise OSError(f"refusing to follow symlink: {path}")
+
+
+class EnvironmentIdError(ValueError):
+    """Raised for an environment_id outside the strict grammar."""
+
+
+def validate_environment_id(environment_id: object) -> str:
+    """Return ``environment_id`` unchanged if it matches the strict grammar.
+
+    This is the single gate for every filesystem and Compose use of an
+    environment identifier. It never rewrites the value.
+    """
+
+    if not isinstance(environment_id, str) or not _ENVIRONMENT_ID_PATTERN.fullmatch(
+        environment_id
+    ):
+        raise EnvironmentIdError(
+            "environment_id must be 1-58 characters of lowercase ASCII letters, "
+            "digits, '-' or '_', starting with a letter or digit"
+        )
+    return environment_id
+
 
 # Evidence records carry a tamper-evident hash chain. These reserved keys hold
 # the chain metadata and are excluded from an event's own hash computation.
@@ -83,12 +178,15 @@ class RuntimeStateStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "environments").mkdir(exist_ok=True)
-        (self.root / "evidence").mkdir(exist_ok=True)
-        (self.root / "decisions").mkdir(exist_ok=True)
+        _secure_dir(self.root)
+        for name in ("environments", "evidence", "decisions"):
+            child = self.root / name
+            child.mkdir(mode=_PRIVATE_DIR_MODE, exist_ok=True)
+            _secure_dir(child)
 
     def _state_path(self, environment_id: str) -> Path:
-        return self.root / "environments" / f"{environment_id}.json"
+        safe = validate_environment_id(environment_id)
+        return self.root / "environments" / f"{safe}.json"
 
     def _decision_path(self, decision_id: str) -> Path:
         safe = "".join(ch for ch in decision_id if ch.isalnum() or ch in "-_.")
@@ -98,9 +196,10 @@ class RuntimeStateStore:
 
     def read(self, environment_id: str) -> dict[str, Any] | None:
         path = self._state_path(environment_id)
+        _refuse_symlink(path)
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_read_private_text(path))
         if not isinstance(data, dict):
             raise ValueError("runtime state root must be a mapping")
         return data
@@ -108,13 +207,25 @@ class RuntimeStateStore:
     def write(self, environment_id: str, state: dict[str, Any]) -> None:
         path = self._state_path(environment_id)
         tmp = path.with_suffix(".tmp")
+        # Never reuse a stale or planted temp file: unlink it first (this removes
+        # a symlink itself, not its target), then create the temp exclusively,
+        # refusing symlinks, with owner-only mode.
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
         payload = json.dumps(state, sort_keys=True, indent=2) + "\n"
         # Durable atomic replace: fsync the temp file's data before the rename,
         # then fsync the parent directory so the rename itself is durable --
         # otherwise a crash can leave the state reverted/truncated (the classic
         # rename-without-fsync hazard), which could let a tracked environment's
         # state regress and permit a second activation attempt.
-        with open(tmp, "w", encoding="utf-8") as handle:
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            _PRIVATE_FILE_MODE,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -166,14 +277,15 @@ class RuntimeStateStore:
         processes). A failed write/fsync is rolled back to the prior EOF.
         """
 
-        path = self.root / "evidence" / f"{environment_id}.jsonl"
+        path = self.evidence_path(environment_id)
         with _evidence_lock(path):
+            _refuse_symlink(path)
             prev_hash = ""
             seq = 0
             if path.exists():
                 lines = [
                     line
-                    for line in path.read_text(encoding="utf-8").splitlines()
+                    for line in _read_private_text(path).splitlines()
                     if line.strip()
                 ]
                 if lines:
@@ -188,7 +300,7 @@ class RuntimeStateStore:
             data = (json.dumps(record, sort_keys=True, default=str) + "\n").encode("utf-8")
             resolved_path = Path(os.path.realpath(path))
             created = not resolved_path.exists()
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+            fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
             try:
                 offset = os.lseek(fd, 0, os.SEEK_END)
                 try:
@@ -228,9 +340,10 @@ class RuntimeStateStore:
 
         path = self.evidence_path(environment_id)
         with _evidence_lock(path):
+            _refuse_symlink(path)
             if not path.exists():
                 return None
-            return path.read_text(encoding="utf-8")
+            return _read_private_text(path)
 
     def evidence_head_hash(self, environment_id: str) -> str | None:
         """Return the hash of the last evidence record, or None if empty.
@@ -262,11 +375,12 @@ class RuntimeStateStore:
         path = self.evidence_path(environment_id)
         try:
             with _evidence_lock(path):
+                _refuse_symlink(path)
                 if not path.exists():
                     return True
                 prev_hash = ""
                 expected_seq = 0
-                for line in path.read_text(encoding="utf-8").splitlines():
+                for line in _read_private_text(path).splitlines():
                     if not line.strip():
                         continue
                     try:
@@ -290,7 +404,8 @@ class RuntimeStateStore:
             return False
 
     def evidence_path(self, environment_id: str) -> Path:
-        return self.root / "evidence" / f"{environment_id}.jsonl"
+        safe = validate_environment_id(environment_id)
+        return self.root / "evidence" / f"{safe}.jsonl"
 
     def clear_runtime_state(self, environment_id: str) -> None:
         path = self._state_path(environment_id)
