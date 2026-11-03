@@ -282,3 +282,15 @@ separation or host-restart behavior; those gates stay open in
 - **Build and consume together.** Because the bundle's head must be the chain's
   current head, build the bundle and hand it to its consumer straight away;
   anything appended in between makes it `stale`.
+- **Telemetry names and limitation tokens.** Names in `expected_telemetry`,
+  `observed_telemetry` and `surface_telemetry` must fully match
+  `[A-Za-z0-9._-]{1,64}` (no `:`), and are refused (`telemetry_missing`) when
+  any segment, split on `_ - . ~ :` and lower-cased, is one of the shared command
+  words (`activate activation deactivate execute exec run start stop open allow
+  authorize authorized approve approved enable extend terminate withdraw block
+  isolate quarantine redirect expose command shell sudo deploy install delete
+  kill override enforce grant granted bypass`). Whole segments only:
+  `redirection` and `isolation` are fine. With this, every limitation token
+  (including `telemetry_gap:<name>`, `unbound_interactions_excluded:<n>` and
+  `interactions_outside_lease:<n>`) fits `[a-z][a-z0-9_]{2,63}(:[A-Za-z0-9._-]{1,64})?`
+  and contains no command word; a smoke test checks the tokens a real bundle emits.
