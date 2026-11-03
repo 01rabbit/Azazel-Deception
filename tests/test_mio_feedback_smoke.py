@@ -30,6 +30,7 @@ from azazel_deception.runtime.mio_feedback import (
     build_feedback_bundle,
     knowledge_ingest_payload,
     mio_deception_context,
+    mio_frame_inputs,
     reset_feedback,
     verify_feedback_bundle,
 )
@@ -190,9 +191,10 @@ def test_full_lifecycle_bundle_and_consumers(lifecycle):
     assert bundle["interactions"][0]["metadata"]["untrusted_text_len"] == len(INJECTION)
     verify_feedback_bundle(bundle, expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300)
 
-    payload = knowledge_ingest_payload(bundle)
+    kw = dict(expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300)
+    payload = knowledge_ingest_payload(bundle, **kw)
     assert payload["environment_id"] == ENV and len(payload["items"]) == 1
-    context = mio_deception_context(bundle)
+    context = mio_deception_context(bundle, **kw)
     assert context["lifecycle_state"] == "active" and len(context["observation_refs"]) == 1
 
 
@@ -213,14 +215,20 @@ def test_silence_carries_a_limitation_and_stale_bundle_is_refused(lifecycle):
     assert info.value.code == "stale"
 
 
-def test_lease_expiry_refuses_observation(lifecycle):
+def test_observation_outside_lease_is_marked_not_authorized(lifecycle):
     lc = lifecycle
     _, chain = _activate(lc)
     late = lc["now"] + timedelta(minutes=6)
     observer = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: late)
-    with pytest.raises(BindingRefused) as info:
-        observer.record(observation_class="interaction", surface="service")
-    assert info.value.code == "lease_expired"
+    recorded = observer.record(observation_class="interaction", surface="service")
+    assert recorded.metadata["outside_lease"] is True
+    bundle = build_feedback_bundle(
+        lc["adapter"], chain, now=late, max_age=300,
+        expected_telemetry=["service"], observed_telemetry=["service"],
+    )
+    assert "lease_expired" in bundle["limitations"]
+    effect = bundle["runtime_materialization"]["effect_observation"]
+    assert effect["status"] == "failed"  # a live claim past the lease is never made
 
 
 def test_effect_for_another_decision_is_refused(lifecycle):
@@ -337,4 +345,126 @@ def test_isolation_drift_is_recorded_as_failed_fact_and_withdraws_nothing(lifecy
     assert observation["termination_reason"] == "isolation_drift_observed"
     assert bundle["isolation"]["status"] == "drift_observed"
     assert lc["adapter"].state.read(ENV)["state"] == "active"
-    assert mio_deception_context(bundle)["lifecycle_state"] == "unknown"
+    now = lc["now"] + timedelta(seconds=5)
+    kw = dict(expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300)
+    assert mio_deception_context(bundle, **kw)["lifecycle_state"] == "unknown"
+
+
+# --- regressions for the review findings (H1-H4) ---------------------------
+
+
+def _built(lc, chain, **kw):
+    now = lc["now"] + timedelta(seconds=10)
+    kw.setdefault("expected_telemetry", ["service", "network"])
+    kw.setdefault("observed_telemetry", ["service", "network"])
+    kw.setdefault("isolation_assertion_refs", ["isolation-net-none"])
+    return now, build_feedback_bundle(lc["adapter"], chain, now=now, max_age=300, **kw)
+
+
+def _verify(lc, chain, bundle, now, **kw):
+    verify_feedback_bundle(
+        bundle, expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300, **kw
+    )
+
+
+def test_h1_rewriting_the_bundle_to_hide_drift_or_data_is_refused(lifecycle):
+    import copy
+
+    from azazel_deception.runtime.isolation_drift import IsolationDriftObserver
+
+    lc = lifecycle
+    _, chain = _activate(lc)
+    observer = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    observer.record(observation_class="interaction", surface="service")
+    IsolationDriftObserver(
+        lc["adapter"].state, environment_id=ENV, package_id=chain.package_id, node_id=chain.node_id
+    ).observe({"route_to_protected": ["10.0.0.0/8"], "published_port": [], "capability_regranted": []})
+    now, bundle = _built(lc, chain)
+    _verify(lc, chain, bundle, now)
+
+    def refused(mutate):
+        tampered = copy.deepcopy(bundle)
+        mutate(tampered)
+        with pytest.raises(BindingRefused):
+            _verify(lc, chain, tampered, now)
+
+    refused(lambda b: b["isolation"].update(status="asserted", drift_count=0))
+    refused(lambda b: b["limitations"].remove("isolation_drift_observed"))
+    refused(lambda b: b["freshness"].update(observed_at=(now + timedelta(days=1)).isoformat()))
+    refused(lambda b: b.__setitem__("interactions", []))
+    refused(lambda b: b["evidence"].update(head_hash=None))
+    refused(lambda b: b.__setitem__("observed_mechanism", {"status": "observed"}))
+    refused(lambda b: b["outcome"].update(coverage_complete=False, telemetry_gaps=["x"]))
+    # the consumers do not emit what verify refuses
+    bad = copy.deepcopy(bundle)
+    bad["isolation"].update(status="asserted", drift_count=0)
+    with pytest.raises(BindingRefused):
+        mio_deception_context(
+            bad, expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300
+        )
+
+
+def test_h2_two_observers_do_not_collide(lifecycle):
+    lc = lifecycle
+    _, chain = _activate(lc)
+    first = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    second = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    a = first.record(observation_class="interaction", surface="service")
+    b = second.record(observation_class="interaction", surface="service")
+    assert a.observation_id != b.observation_id
+    now, bundle = _built(lc, chain)
+    _verify(lc, chain, bundle, now)
+
+
+def test_h3_observed_at_must_sit_inside_the_session(lifecycle):
+    lc = lifecycle
+    _, chain = _activate(lc)
+    observer = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    with pytest.raises(BindingRefused):
+        observer.record(
+            observation_class="interaction", surface="service",
+            observed_at=lc["now"] + timedelta(days=3),
+        )
+    with pytest.raises(BindingRefused):
+        observer.record(
+            observation_class="interaction", surface="service",
+            observed_at=lc["now"] - timedelta(days=3),
+        )
+
+
+def test_h4_attacker_shaped_metadata_is_refused_or_bounded(lifecycle):
+    lc = lifecycle
+    _, chain = _activate(lc)
+    observer = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    big = INJECTION * 4000
+    with pytest.raises(ValueError):
+        observer.record(observation_class="interaction", surface="service", metadata={"cmd": big})
+    with pytest.raises(ValueError):
+        observer.record(observation_class="interaction", surface="service", metadata={"port": big})
+    with pytest.raises(ValueError):
+        observer.record(observation_class="interaction", surface="credential_lure", lure_id=big)
+    recorded = observer.record(
+        observation_class="interaction", surface="credential_lure", untrusted_text=INJECTION
+    )
+    # a lure surface keeps the length only, never a digest of the text
+    assert recorded.metadata == {"untrusted_text_len": len(INJECTION)}
+
+
+def test_objective_coverage_and_frame_inputs(lifecycle):
+    lc = lifecycle
+    _, chain = _activate(lc)
+    observer = bound_observer(lc["adapter"], chain, lc["package"], lc["plan"], now_fn=lambda: lc["now"])
+    observer.record(observation_class="interaction", surface="service")
+    now, bundle = _built(
+        lc, chain, objective=lc["objective"], observed_telemetry=["service"],
+        surface_telemetry={"service": "service", "file": "network"},
+    )
+    entries = bundle["objective_coverage"]["entries"]
+    assert entries[0]["status"] == "observed" and entries[0]["observation_ids"]
+    assert entries[1]["status"] == "undeterminable_telemetry_gap:network"
+    assert bundle["objective_coverage"]["coverage_basis"] == "caller_declared"
+    inputs = mio_frame_inputs(
+        bundle, expected_chain=chain, state=lc["adapter"].state, now=now, max_age=300
+    )
+    assert "DECEPTION_TELEMETRY_GAP_NETWORK" in inputs["unknowns"]
+    assert inputs["deception_context"]["lifecycle_state"] == "active"
