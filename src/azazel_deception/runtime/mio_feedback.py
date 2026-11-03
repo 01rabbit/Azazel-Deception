@@ -48,6 +48,7 @@ import re
 import secrets
 import stat
 import threading
+import dataclasses
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -492,6 +493,11 @@ class ReferenceChain:
     #: against it. Not part of identity or the serialized chain. Note the
     #: effect's ``trace_id`` is not authenticated by the decision HMAC.
     effect: Any = field(default=None, repr=False, compare=False)
+    #: Keyed seal (HMAC, per-session key) over ``to_dict()``, set only by
+    #: ``bind_reference_chain``. Every consumer re-derives it, so a chain whose
+    #: fields were changed by ``dataclasses.replace`` or direct construction is
+    #: refused. Not part of the serialized chain or the wire format.
+    seal: str = field(default="", repr=False, compare=False)
 
     def evidence_refs(self) -> tuple[str, ...]:
         refs = (
@@ -687,7 +693,7 @@ def bind_reference_chain(
         raise BindingRefused("effect_decision_mismatch", "effect names another decision")
     _bind_effect_once(adapter.state, decision.decision_id, effect.effect_id)
 
-    return ReferenceChain(
+    chain = ReferenceChain(
         objective_ref=admitted.objective.objective_ref,
         hypothesis_refs=admitted.objective.hypothesis_refs,
         frame_ref=admitted.objective.frame_ref,
@@ -707,6 +713,36 @@ def bind_reference_chain(
         objective_content_bound=content_bound,
         effect=effect,
     )
+    seal = _chain_seal(adapter.state, chain, create=True)
+    return dataclasses.replace(chain, seal=seal)
+
+
+def _chain_seal(store: RuntimeStateStore, chain: ReferenceChain, *, create: bool) -> str:
+    """HMAC of the chain's serialized fields under the per-session protected key."""
+
+    effect = chain.effect.model_dump(mode="json") if chain.effect is not None else None
+    payload = "mio_chain_seal_v1\n" + _canon({"chain": chain.to_dict(), "effect": effect})
+    key = _untrusted_key(store, chain, create=create)
+    return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _require_sealed(store: RuntimeStateStore, chain: Any) -> None:
+    """Refuse any chain not exactly as ``bind_reference_chain`` sealed it.
+
+    Covers caller-mutated fields (``dataclasses.replace`` keeps the old seal),
+    hand-built chains (no seal), and a missing session key. Fail closed.
+    """
+
+    if not isinstance(chain, ReferenceChain) or not isinstance(chain.seal, str) or not chain.seal:
+        raise BindingRefused("evidence_tampered", "reference chain is not sealed")
+    try:
+        expected = _chain_seal(store, chain, create=False)
+    except BindingRefused:
+        raise
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise BindingRefused("evidence_tampered", "reference chain cannot be verified") from exc
+    if not hmac.compare_digest(expected, chain.seal):
+        raise BindingRefused("evidence_tampered", "reference chain was altered")
 
 
 def _private_dir(path: Path, *, create: bool = True) -> None:
@@ -902,6 +938,7 @@ class BoundObserver:
     def __init__(
         self, adapter: Any, chain: ReferenceChain, observer: Any, now_fn: Any, lure_ids: frozenset[str]
     ) -> None:
+        _require_sealed(adapter.state, chain)
         self._adapter = adapter
         self._chain = chain
         self._observer = observer
@@ -1010,6 +1047,7 @@ def bound_observer(
         def now_fn() -> datetime:
             return datetime.now(timezone.utc)
 
+    _require_sealed(adapter.state, chain)
     if isinstance(package, Mapping):
         package = adapter.validate_package(dict(package))
     if isinstance(placement, Mapping):
@@ -1578,6 +1616,7 @@ def build_feedback_bundle(
             "telemetry_missing", "expected_telemetry must say what coverage was expected"
         )
     store: RuntimeStateStore = adapter.state
+    _require_sealed(store, chain)
     _require_chain_intact(store, chain.environment_id)
     records = _read_records(store, chain.environment_id)
     # Identity against the runtime state while it exists; after reset it is gone.
@@ -1671,6 +1710,7 @@ def verify_feedback_bundle(
 
     now = _aware(now)
     store: RuntimeStateStore = getattr(state, "state", state)
+    _require_sealed(store, expected_chain)
     try:
         if not isinstance(bundle, Mapping) or bundle.get("schema") != BUNDLE_SCHEMA:
             raise BindingRefused("evidence_tampered", "not a feedback bundle")
@@ -1950,6 +1990,7 @@ def reset_feedback(adapter: Any, chain: ReferenceChain, *, now: datetime) -> dic
     """
 
     now = _aware(now)
+    _require_sealed(adapter.state, chain)
     _require_chain_intact(adapter.state, chain.environment_id)
     records = _evidence(adapter, chain.environment_id)
     after = [r for r in records if _seq(r) > chain.generation]

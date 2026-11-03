@@ -13,9 +13,10 @@ Docker is not needed. The semantics under test (docs: DESIGN of #55):
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1315,6 +1316,78 @@ import stat
 import threading
 
 from azazel_deception.runtime import mio_feedback as _mf
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"lease_end": datetime(2099, 1, 1, tzinfo=timezone.utc)},
+        {"objective_content_bound": True},
+        {"objective_digest": "sha256:" + "0" * 64},
+        {"node_id": "other-node"},
+        {"package_digest": "sha256:" + "1" * 64},
+        {"decision_id": "dec-other"},
+        {"generation": 999},
+    ],
+)
+def test_caller_mutated_reference_chain_is_refused_everywhere(world, mutation):
+    """F1: dataclasses.replace keeps the sealed value, so any changed field is refused."""
+
+    _, plan, _, _, _, chain = _bind(world)
+    forged = dataclasses.replace(chain, **mutation)
+    assert forged != chain
+    with pytest.raises(BindingRefused) as refused:
+        _bundle(world, forged)
+    assert refused.value.code == "evidence_tampered"
+    with pytest.raises(BindingRefused) as refused:
+        bound_observer(world.adapter, forged, world.package, plan)
+    assert refused.value.code == "evidence_tampered"
+    with pytest.raises(BindingRefused) as refused:
+        reset_feedback(world.adapter, forged, now=utcnow())
+    assert refused.value.code == "evidence_tampered"
+    genuine = _bundle(world, chain)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(genuine, **_kw(world, forged))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_caller_replaced_effect_is_refused_everywhere(world):
+    """The seal covers the effect object consumed by downstream projections."""
+
+    _, plan, _, _, _, chain = _bind(world)
+    altered_effect = chain.effect.model_copy(update={"policy_ref": "policy:other"})
+    forged = dataclasses.replace(chain, effect=altered_effect)
+    assert forged.seal == chain.seal
+    with pytest.raises(BindingRefused) as refused:
+        _bundle(world, forged)
+    assert refused.value.code == "evidence_tampered"
+    with pytest.raises(BindingRefused) as refused:
+        bound_observer(world.adapter, forged, world.package, plan)
+    assert refused.value.code == "evidence_tampered"
+    with pytest.raises(BindingRefused) as refused:
+        reset_feedback(world.adapter, forged, now=utcnow())
+    assert refused.value.code == "evidence_tampered"
+    genuine = _bundle(world, chain)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(genuine, **_kw(world, forged))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_hand_built_reference_chain_without_seal_is_refused(world):
+    _, plan, _, _, _, chain = _bind(world)
+    unsealed = dataclasses.replace(chain, seal="")
+    with pytest.raises(BindingRefused) as refused:
+        _bundle(world, unsealed)
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_genuine_sealed_chain_still_works_end_to_end(world):
+    _, plan, _, _, _, chain = _bind(world)
+    assert chain.seal
+    _observer(world, chain, plan).record(observation_class="interaction", surface="service")
+    bundle = _bundle(world, chain)
+    verify_feedback_bundle(bundle, **_kw(world, chain))
+    assert dataclasses.replace(chain).to_dict() == chain.to_dict()
 
 
 def _consumers():

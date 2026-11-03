@@ -47,6 +47,13 @@ the canonical decision bytes, so the listing is bound by the signature.
    `decision_ref` is `decision:<decision_id>`. The result is a
    `ReferenceChain`.
 
+`ReferenceChain` is a local handle, not a Fabric wire object. Its per-session
+HMAC seal covers the chain fields and the canonical Edge effect payload. The
+observer, bundle builder, verifier and reset path recheck that seal, so replacing
+the lease, environment, package, generation or effect on a returned chain is
+refused. The seal conveys no authority and is not serialized into the feedback
+bundle. Callers must use `bind_reference_chain`; hand-built chains are refused.
+
 `BindingRefused.code` is one of: `decision_unauthenticated`,
 `decision_not_consumed`, `decision_mismatch`, `lease_expired`,
 `lease_not_started`, `environment_mismatch`, `package_mismatch`,
@@ -80,6 +87,15 @@ accepts the empty observation list. Live-claim checks in `verify_feedback_bundle
 `environment_state` is `active`, drift is absent, and the lease is not overrun.
 
 ## Session and generation
+
+Runtime `environment_id` values are accepted only in the strict form
+`[a-z0-9][a-z0-9_-]{0,57}`. Values are rejected without lowercasing, filtering
+or truncation because the identifier is also used in state/evidence paths and
+as the Compose project suffix. Existing deployments using uppercase, dots,
+slashes or longer values must plan an explicit remap before updating; this
+change does not rename existing records. Runtime state directories use mode
+`0700`; state, evidence,
+decision and temporary files use `0600` and must be owned by the service user.
 
 `session_ref` is `session:` plus the evidence hash of the `activated` record,
 and `generation` is that record's evidence sequence number. Observation ids are
