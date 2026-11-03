@@ -1,6 +1,6 @@
 # AZ-06 Implementation Status
 
-Last updated: 2026-09-19
+Last updated: 2026-11-03
 
 This document separates **implemented software properties** from **field/HIL
 properties that are not yet proven**. A green unit/CI suite is not a claim of
