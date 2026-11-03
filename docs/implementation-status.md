@@ -343,6 +343,18 @@ It returns only `would_accept` / `would_reject` and fixes
 `enforcement_applied=false`. It contains no Docker, VM, nftables, tc, route,
 or other execution logic.
 
+### MIO objective feedback (Deception#55)
+
+`runtime/mio_feedback.py` binds an advisory MIO observation objective to an
+authenticated Edge activation decision (objective refs carried in the signed
+decision's `evidence_refs`), records interactions under that reference chain,
+and builds a local, verdict-free feedback bundle plus the Knowledge and MIO
+projections. It does not activate or terminate anything, adds no wire schema,
+substitutes `node_id` + `trace_id` for the tenant the pinned Fabric lacks, and
+always reports tactical assessment as `not_assessed`. The semantics, lease and
+requests to other teams are in `docs/mio-objective-feedback.md`. It is
+software evidence only; no hardware-only gate is closed by it.
+
 ## Not yet proven / deliberately disabled
 
 The following are still open gates:
