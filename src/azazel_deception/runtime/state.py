@@ -34,12 +34,13 @@ _EVIDENCE_LOCKS: dict[str, threading.Lock] = {}
 def _evidence_lock(path: Path) -> threading.Lock:
     """Return the process-wide lock serializing appends to one evidence file.
 
-    Keyed by absolute path so every RuntimeStateStore instance in this process
-    that targets the same file shares one lock. This does not coordinate
-    separate processes.
+    Keyed by the resolved real path so every RuntimeStateStore instance in this
+    process that targets the same file through a symlinked path shares one
+    lock. Hard links, differently-cased path aliases, and separate processes
+    are not coordinated.
     """
 
-    key = os.path.abspath(path)
+    key = os.path.realpath(path)
     with _EVIDENCE_LOCKS_GUARD:
         lock = _EVIDENCE_LOCKS.get(key)
         if lock is None:
@@ -185,6 +186,8 @@ class RuntimeStateStore:
             record[_EVIDENCE_PREV] = prev_hash
             record[_EVIDENCE_HASH] = _evidence_hash(record)
             data = (json.dumps(record, sort_keys=True, default=str) + "\n").encode("utf-8")
+            resolved_path = Path(os.path.realpath(path))
+            created = not resolved_path.exists()
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
             try:
                 offset = os.lseek(fd, 0, os.SEEK_END)
@@ -204,7 +207,15 @@ class RuntimeStateStore:
                         pass
                     raise
             finally:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                finally:
+                    if created:
+                        # Sync even if the first append failed and rolled back:
+                        # an empty file remains, so later appends must not be
+                        # the first attempt to persist its directory entry.
+                        # realpath also handles an evidence-file symlink target.
+                        _fsync_dir(resolved_path.parent)
         return path
 
     def evidence_head_hash(self, environment_id: str) -> str | None:

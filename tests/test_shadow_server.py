@@ -418,10 +418,94 @@ def test_lone_surrogate_request_id_gets_signed_rejection_and_audit(service, tmp_
     response = service.handle(envelope)
     assert response["status"] == "rejected"
     assert response["request_id"] == "unparsable"
+    # The envelope is unauthenticated (zeroed signature), so HMAC verification
+    # rejects it before request-ID ledger validation runs. It is therefore
+    # authentication_failed, not malformed_envelope.
+    assert response["reason_codes"] == ["authentication_failed"]
     _assert_signed_response(response)
     events = _audit_events(tmp_path)
     assert len(events) == 1
     assert events[0]["status"] == "rejected"
+    assert events[0]["reason_codes"] == ["authentication_failed"]
+
+
+def test_evidence_lock_is_shared_across_symlink_and_real_roots(tmp_path):
+    real_root = tmp_path / "real"
+    link_root = tmp_path / "link"
+    real_root.mkdir()
+    link_root.symlink_to(real_root, target_is_directory=True)
+    store_real = RuntimeStateStore(real_root)
+    store_link = RuntimeStateStore(link_root)
+    env_id = "lock-alias-env"
+    assert store_real.evidence_path(env_id).resolve() == store_link.evidence_path(env_id).resolve()
+    import azazel_deception.runtime.state as state_module
+
+    assert state_module._evidence_lock(store_real.evidence_path(env_id)) is state_module._evidence_lock(
+        store_link.evidence_path(env_id)
+    )
+
+    stores = [store_real, store_link] * 4
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(len(stores))
+
+    def append(index, store):
+        try:
+            barrier.wait()
+            store.append_evidence(env_id, {"index": index})
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=append, args=(i, s)) for i, s in enumerate(stores)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert store_real.verify_evidence_chain(env_id) is True
+    lines = store_real.evidence_path(env_id).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(stores)
+    seqs = [json.loads(line)["_evidence_seq"] for line in lines]
+    assert sorted(seqs) == list(range(len(stores)))
+
+
+def test_evidence_dir_fsync_only_on_file_creation(tmp_path, monkeypatch):
+    # Monkeypatched: this asserts the helper is requested, not OS power-loss safety.
+    import azazel_deception.runtime.state as state_module
+
+    calls: list[Path] = []
+    monkeypatch.setattr(state_module, "_fsync_dir", lambda directory: calls.append(Path(directory)))
+    store = RuntimeStateStore(tmp_path / "state")
+    env_id = "dir-sync-env"
+    store.append_evidence(env_id, {"n": 1})
+    assert calls == [store.root / "evidence"]
+    store.append_evidence(env_id, {"n": 2})
+    assert calls == [store.root / "evidence"]
+
+
+def test_evidence_dir_fsync_follows_failed_first_append(tmp_path, monkeypatch):
+    # The first failed append leaves an empty file after rollback; its directory
+    # entry still needs a sync because later successful appends see it as present.
+    import azazel_deception.runtime.state as state_module
+
+    calls: list[Path] = []
+    monkeypatch.setattr(state_module, "_fsync_dir", lambda directory: calls.append(Path(directory)))
+    store = RuntimeStateStore(tmp_path / "state")
+    env_id = "failed-first-append-env"
+    original_write_all = state_module._write_all
+
+    def fail_first_write(fd, data):
+        monkeypatch.setattr(state_module, "_write_all", original_write_all)
+        raise OSError("injected first append failure")
+
+    monkeypatch.setattr(state_module, "_write_all", fail_first_write)
+    with pytest.raises(OSError, match="injected first append failure"):
+        store.append_evidence(env_id, {"n": 1})
+    assert store.evidence_path(env_id).read_bytes() == b""
+    assert calls == [store.root / "evidence"]
+
+    store.append_evidence(env_id, {"n": 2})
+    assert calls == [store.root / "evidence"]
+    assert store.verify_evidence_chain(env_id) is True
 
 
 def test_deeply_nested_json_body_gets_signed_rejection_and_audit(service, tmp_path):
