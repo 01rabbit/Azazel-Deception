@@ -492,6 +492,15 @@ def test_failed_shadow_activation_reports_unknown_runtime_state(service, tmp_pat
     assert events[0]["reason_codes"] == ["internal_error", "shadow_action_may_have_run"]
 
 
+def test_missing_activation_fields_do_not_report_possible_runtime_change(service):
+    response = service.handle(_envelope("activate", {}))
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["ValueError", "shadow_validation_failed"]
+    assert response["result"] == {"detail": "activate request requires environment_id"}
+    assert "shadow_action_may_have_run" not in response["reason_codes"]
+    _assert_signed_response(response)
+
+
 def test_corrupt_audit_chain_rejects_before_consuming_or_mutating(service, tmp_path, monkeypatch):
     store = RuntimeStateStore(tmp_path / "state")
     store.append_evidence(AUDIT_ENVIRONMENT_ID, {"event": "prior"})

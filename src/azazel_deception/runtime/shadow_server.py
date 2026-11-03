@@ -74,6 +74,10 @@ _ACTIONS = frozenset(
     }
 )
 _MUTATING_ACTIONS = frozenset({"activate", "terminate"})
+_MUTATING_REQUIRED_FIELDS = {
+    "activate": ("environment_id", "package", "placement", "decision"),
+    "terminate": ("environment_id", "decision"),
+}
 _MAX_ECHO_REQUEST_ID_CHARS = 1024
 
 
@@ -365,6 +369,17 @@ class ShadowReplayService:
             return self._response(request_id, "rejected", ["malformed_payload"])
         handler = getattr(self, f"_action_{action}")
         if action in _MUTATING_ACTIONS and action_state is not None:
+            missing = next(
+                (field for field in _MUTATING_REQUIRED_FIELDS[action] if field not in payload),
+                None,
+            )
+            if missing is not None:
+                return self._response(
+                    request_id,
+                    "rejected",
+                    ["shadow_validation_failed", "ValueError"],
+                    {"detail": f"{action} request requires {missing}"},
+                )
             action_state["started"] = True
         try:
             result = handler(payload, envelope)
