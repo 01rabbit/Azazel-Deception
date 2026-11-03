@@ -39,10 +39,10 @@ jobs:
       - name: Run the gated real-container lifecycle suite
         env:
           AZAZEL_DECEPTION_DOCKER_TESTS: '1'
-        run: pytest tests/test_docker_integration.py -q --junitxml=artifacts/ci/docker-integration.xml
+        run: pytest tests/test_docker_integration.py tests/test_mio_feedback_docker.py -q --junitxml=artifacts/ci/docker-integration.xml
       - name: Assert the suite executed rather than skipping
         if: always()
-        run: python scripts/ci/assert_executed.py artifacts/ci/docker-integration.xml --min-tests 8
+        run: python scripts/ci/assert_executed.py artifacts/ci/docker-integration.xml --min-tests 9
       - uses: actions/upload-artifact@v4
         if: always()
         with:
