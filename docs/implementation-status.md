@@ -414,7 +414,8 @@ route work to them.
 
 ### Closed (history only)
 
-- `Azazel-Deception#50` — Fabric prerelease pin (see
+- `Azazel-Deception#50` — carry trace, synthetic-identity, and credential
+  references into `PresentedTerrainRef` (Fabric prerelease adoption; see
   [`fabric-pin.md`](fabric-pin.md)). Closed; close date not recorded here.
 - `Azazel-Deception#38` — gate/checklist-to-code drift and executed gate proofs.
   Closed; close date not recorded here.
