@@ -582,18 +582,19 @@ def test_telemetry_names_exclude_colon_and_command_words(lifecycle):
     lc = lifecycle
     _, chain = _activate(lc)
     now = lc["now"] + timedelta(seconds=5)
-    for bad in ("net:flow", "run-sensor", "Redirect.log", "a_b~shell", "x" * 65, ""):
+    for bad in ("net:flow", "run-sensor", "Redirect.log", "a_b.shell", "x" * 65, ""):
         with pytest.raises(BindingRefused) as info:
             build_feedback_bundle(
                 lc["adapter"], chain, now=now, max_age=300,
                 expected_telemetry=[bad], observed_telemetry=[],
             )
         assert info.value.code == "telemetry_missing"
-    with pytest.raises(BindingRefused):
+    with pytest.raises(BindingRefused) as info:
         build_feedback_bundle(
             lc["adapter"], chain, now=now, max_age=300, expected_telemetry=["ok"],
             observed_telemetry=["ok"], surface_telemetry={"service": "stop"},
         )
+    assert info.value.code == "telemetry_missing"
     # near-misses are fine: segments are compared whole
     build_feedback_bundle(
         lc["adapter"], chain, now=now, max_age=300,

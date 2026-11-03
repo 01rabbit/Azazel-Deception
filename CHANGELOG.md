@@ -27,7 +27,7 @@ are not proven (see `docs/live-gate-checklist.md`).
   - Consumer freshness is measured at consumption time. Caller-declared telemetry coverage cannot turn an unobserved objective into a known fact, and the local evidence/MAC checks do not protect against a same-user rewrite of the state root.
   - Real-consumer checks: pinned MIO and Knowledge source revisions, run locally with `scripts/dev/mio_feedback_interop.sh`. The private Knowledge revision is supplied through a local environment variable and is omitted from this public record. They are not CI-gated because Knowledge is private.
   - Real-container check: `tests/test_mio_feedback_docker.py` in the executed-evidence Docker job.
-  - Telemetry names are `[A-Za-z0-9._-]{1,64}` and may not contain a shared command word as a segment, so `telemetry_gap:<name>` always fits the shared limitation-token grammar.
+  - Telemetry names are `[A-Za-z0-9._-]{1,64}` and may not contain a shared command word as a segment, so `telemetry_gap:<name>` always fits the shared limitation-token grammar. Bundles built earlier with names that break this rule (for example one containing `:` or `exec`) are now refused by `verify_feedback_bundle`, including with `allow_historical=True`.
   - Requests to other teams are listed in `docs/mio-objective-feedback.md`. No HIL gate is closed.
 - **Presented Terrain `v0.9.0rc5` integration test** (Deception#31) —
   `tests/test_presented_terrain_rc5_integration.py` adds the test #31 promised

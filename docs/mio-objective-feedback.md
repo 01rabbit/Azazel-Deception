@@ -294,3 +294,5 @@ separation or host-restart behavior; those gates stay open in
   (including `telemetry_gap:<name>`, `unbound_interactions_excluded:<n>` and
   `interactions_outside_lease:<n>`) fits `[a-z][a-z0-9_]{2,63}(:[A-Za-z0-9._-]{1,64})?`
   and contains no command word; a smoke test checks the tokens a real bundle emits.
+  Verification re-checks the stored names with the same rule, so a bundle built
+  before this rule with such a name is refused, even with `allow_historical=True`.
