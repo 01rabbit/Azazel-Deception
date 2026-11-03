@@ -293,3 +293,48 @@ def test_terminate_reset_closes_the_session(lifecycle):
     with pytest.raises(BindingRefused) as info:
         observer.record(observation_class="interaction", surface="service")
     assert info.value.code == "session_reset"
+
+
+def test_mechanism_and_surfaces_project_a_terrain_without_claiming_diversion(lifecycle):
+    from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
+
+    lc = lifecycle
+    _, chain = _activate(lc)
+    mechanism = ProducerRedirectionEvidence(
+        producer_product="azazel-edge", producer_node="edge-1", trace_id="trace-1",
+        decision_ref="decision:edge-decision-1", execution_ref="execution-1",
+        mechanism_observation_ref="mechanism-1", evidence_refs=["edge-nft-1"],
+    )
+    bundle = build_feedback_bundle(
+        lc["adapter"], chain, now=lc["now"] + timedelta(seconds=5), max_age=300,
+        expected_telemetry=["service"], observed_telemetry=["service"],
+        mechanism=mechanism, isolation_assertion_refs=["isolation-net-none"],
+        active_surface_refs=["surface:http:8080"],
+    )
+    terrain = bundle["runtime_materialization"]["presented_terrain"]
+    assert terrain["source_effect_ref"] == "effect:e1"
+    assert terrain["active_surface_refs"] == ["surface:http:8080"]
+    assert bundle["observed_mechanism"]["status"] == "observed"
+    assert "redirection_does_not_imply_diversion" in bundle["limitations"]
+    assert bundle["isolation"]["status"] == "asserted"
+
+
+def test_isolation_drift_is_recorded_as_failed_fact_and_withdraws_nothing(lifecycle):
+    from azazel_deception.runtime.isolation_drift import IsolationDriftObserver
+
+    lc = lifecycle
+    _, chain = _activate(lc)
+    IsolationDriftObserver(
+        lc["adapter"].state, environment_id=ENV, package_id=chain.package_id, node_id=chain.node_id
+    ).observe({"route_to_protected": ["10.0.0.0/8"], "published_port": [], "capability_regranted": []})
+    bundle = build_feedback_bundle(
+        lc["adapter"], chain, now=lc["now"] + timedelta(seconds=5), max_age=300,
+        expected_telemetry=["service"], observed_telemetry=["service"],
+        isolation_assertion_refs=["isolation-net-none"],
+    )
+    observation = bundle["runtime_materialization"]["effect_observation"]
+    assert observation["status"] == "failed"
+    assert observation["termination_reason"] == "isolation_drift_observed"
+    assert bundle["isolation"]["status"] == "drift_observed"
+    assert lc["adapter"].state.read(ENV)["state"] == "active"
+    assert mio_deception_context(bundle)["lifecycle_state"] == "unknown"
