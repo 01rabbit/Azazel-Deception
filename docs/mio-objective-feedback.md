@@ -230,6 +230,14 @@ separation or host-restart behavior; those gates stay open in
 
 ## Operating notes
 
+- **Test scope.** `tests/test_mio_feedback_docker.py` is opt-in real-container
+  coverage (`AZAZEL_DECEPTION_DOCKER_TESTS=1`) locally; in CI it is executed by
+  the `docker-lifecycle` job of `.github/workflows/executed-evidence.yml`, which
+  sets that variable and rejects a skipped result. Its redirection input is a
+  synthetic `ProducerRedirectionEvidence`, not production Edge interop. The
+  MIO/Knowledge cross-repo interop (`scripts/dev/mio_feedback_interop.sh`,
+  `tests/test_mio_feedback_interop.py`) is manual: no CI workflow or Makefile
+  target runs it.
 - **Private directories.** `mio_feedback_keys/` and `mio_bindings/` under the
   state root must be plain directories owned by the service user with mode
   0700; key and binding files must be 0600. A refusal names which of owner or

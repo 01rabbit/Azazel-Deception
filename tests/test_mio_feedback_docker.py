@@ -25,6 +25,7 @@ from azazel_deception.runtime.compose import DockerComposeAdapter
 from azazel_deception.runtime.effect_projection import accept_defensive_effect_ref
 from azazel_deception.runtime.mio_feedback import (
     BindingRefused,
+    PresentedTerrainRef,
     accept_mio_objective,
     admit_objective,
     bind_reference_chain,
@@ -33,6 +34,7 @@ from azazel_deception.runtime.mio_feedback import (
     reset_feedback,
     verify_feedback_bundle,
 )
+from azazel_deception.runtime.presented_terrain import ProducerRedirectionEvidence
 from azazel_deception.runtime.transport import HmacDecisionAuthenticator, sign_decision
 
 from tests._mio_feedback_support import (
@@ -94,14 +96,31 @@ def test_real_container_lifecycle_keeps_the_reference_chain(tmp_path):
         bound_observer(adapter, chain, package, plan).record(
             observation_class="interaction", surface="service"
         )
+        # SYNTHETIC test input, not production Edge interop or diversion: a
+        # hand-built ProducerRedirectionEvidence stands in for the Edge mechanism
+        # observation. It proves only that AZ-06 carries and projects it.
+        mechanism = ProducerRedirectionEvidence(
+            producer_product="azazel-edge", producer_node="edge-1",
+            trace_id=chain.trace_id, decision_ref=f"decision:{decision_id}",
+            execution_ref="execution-1", mechanism_observation_ref="mechanism-1",
+            evidence_refs=["edge-nft-1"],
+        )
         bundle = build_feedback_bundle(
             adapter, chain, now=utcnow(), max_age=300.0,
-            expected_telemetry=EXPECTED, observed_telemetry=EXPECTED, mechanism=None,
+            expected_telemetry=EXPECTED, observed_telemetry=EXPECTED, mechanism=mechanism,
             isolation_assertion_refs=("isolation-net-none",), active_surface_refs=(SURFACE,),
         )
+        assert bundle["observed_mechanism"]["status"] == "observed"
+        assert bundle["observed_mechanism"]["trace_id"] == chain.trace_id
+        assert "redirection_does_not_imply_diversion" in bundle["limitations"]
+        assert "virtual_or_local_evidence_not_hil" in bundle["limitations"]
+        assert bundle["tactical_assessment"]["status"] == "not_assessed"
+        terrain = bundle["runtime_materialization"]["presented_terrain"]
+        assert terrain is not None, "synthetic mechanism did not project a PresentedTerrainRef"
+        PresentedTerrainRef.model_validate(terrain)
         verify_feedback_bundle(
             bundle, expected_chain=chain, state=adapter.state, now=utcnow(),
-            max_age=300.0,
+            max_age=300.0, mechanism=mechanism,
         )
 
         termination = _termination(f"edge-terminate-{environment_id}")
