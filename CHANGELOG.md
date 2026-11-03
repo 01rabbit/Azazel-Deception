@@ -25,7 +25,7 @@ are not proven (see `docs/live-gate-checklist.md`).
   - The bundle separates decision, execution request, materialization, mechanism, interaction, outcome and a tactical assessment fixed at `not_assessed`.
   - The module adds no activation, termination, withdrawal or routing path.
   - Consumer freshness is measured at consumption time. Caller-declared telemetry coverage cannot turn an unobserved objective into a known fact, and the local evidence/MAC checks do not protect against a same-user rewrite of the state root.
-  - Real-consumer checks: MIO `7a35288` and Knowledge `6b590f3`, run locally with `scripts/dev/mio_feedback_interop.sh`. They are not CI-gated because Knowledge is private.
+  - Real-consumer checks: pinned MIO and Knowledge source revisions, run locally with `scripts/dev/mio_feedback_interop.sh`. The private Knowledge revision is supplied through a local environment variable and is omitted from this public record. They are not CI-gated because Knowledge is private.
   - Real-container check: `tests/test_mio_feedback_docker.py` in the executed-evidence Docker job.
   - Requests to other teams are listed in `docs/mio-objective-feedback.md`. No HIL gate is closed.
 - **Presented Terrain `v0.9.0rc5` integration test** (Deception#31) —
@@ -99,6 +99,7 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Changed
 
+- **MIO objective feedback interop runner** — `scripts/dev/mio_feedback_interop.sh` pins exact MIO `main` (`ce9c2c9f242d2f9476f8d49d4b237fb6208c5a7c`) and requires an exact full Knowledge commit through a local environment variable. It validates both revisions as commit objects, keys virtual environments by both revisions and the resolved Python interpreter, and records the Deception tree and actual executed count in the local log. The full Knowledge commit ID appears only in the local log, not in public files. CPython 3.12.14 exact-candidate run: **15 passed, 0 skipped**. One static scenario follows the deterministic MIO objective through a test-only synthetic Edge mapping/decision, Deception's existing activation and evidence gates, a real local Knowledge API process, and MIO's no-model explanation. The harness records the service interaction; it is not an independent runtime observation and does not prove attacker belief, deception success, or delay. This does not establish a production Edge issuer/withdrawal path, Nexus handoff, hardware isolation, or HIL; the private Knowledge run remains local-only and is not CI-gated. The earlier `7a35288` MIO/Knowledge run remains historical.
 - **Azazel-Fabric pin `v0.9.0rc4` → `v0.9.0rc5`; `trace_id` and the synthetic
   identity / credential references reach `PresentedTerrainRef`**
   (Deception#50, Azazel-Fabric#51) — the three fields leave
