@@ -702,23 +702,34 @@ def bind_reference_chain(
     )
 
 
-def _private_dir(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = os.lstat(path)
-    if (
-        stat.S_ISLNK(info.st_mode)
-        or not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        raise BindingRefused("evidence_tampered", "private directory has unexpected ownership or mode")
+def _private_dir(path: Path, *, create: bool = True) -> None:
+    if create:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise BindingRefused("evidence_tampered", f"private directory missing: {path.name}") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise BindingRefused("evidence_tampered", f"{path.name} is not a plain directory")
+    if info.st_uid != os.getuid():
+        raise BindingRefused(
+            "evidence_tampered", f"{path.name} is owned by another user (chown it to the service user)"
+        )
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise BindingRefused(
+            "evidence_tampered",
+            f"{path.name} mode is {oct(stat.S_IMODE(info.st_mode))}, expected 0o700 (chmod 700)",
+        )
 
 
 def _create_once(path: Path, data: bytes) -> bool:
     """Atomically create ``path`` (0600) with complete content; False if it exists."""
 
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise BindingRefused("evidence_tampered", f"cannot create private file: {exc.strerror}") from None
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -729,6 +740,10 @@ def _create_once(path: Path, data: bytes) -> bool:
         except FileExistsError:
             return False
         return True
+    except OSError as exc:
+        raise BindingRefused(
+            "evidence_tampered", f"cannot create private file (hard links required): {exc.strerror}"
+        ) from None
     finally:
         try:
             os.unlink(tmp)
@@ -803,7 +818,7 @@ def _check_live_session(adapter: Any, chain: ReferenceChain) -> Mapping[str, Any
 # bound observer
 
 
-def _untrusted_key(store: RuntimeStateStore, chain: ReferenceChain) -> bytes:
+def _untrusted_key(store: RuntimeStateStore, chain: ReferenceChain, *, create: bool = True) -> bytes:
     """Per-session random key, kept beside (not in) the evidence chain.
 
     Created atomically with complete content, read back only if it is a regular
@@ -814,9 +829,14 @@ def _untrusted_key(store: RuntimeStateStore, chain: ReferenceChain) -> bytes:
     if not _SAFE_ENV.fullmatch(chain.environment_id):
         raise ValueError("environment id is not usable as a key file name")
     directory = store.root / "mio_feedback_keys"
-    _private_dir(directory)
+    if not create and not directory.exists():
+        raise BindingRefused("evidence_tampered", "session key missing")
+    _private_dir(directory, create=create)
     path = directory / f"{chain.environment_id}.s{chain.generation}.key"
-    _create_once(path, secrets.token_hex(32).encode("ascii"))
+    if create:
+        _create_once(path, secrets.token_hex(32).encode("ascii"))
+    elif not path.exists():
+        raise BindingRefused("evidence_tampered", "session key missing")
     raw = _read_private(path).strip()
     try:
         key = bytes.fromhex(raw.decode("ascii"))
@@ -1199,7 +1219,9 @@ def _objective_coverage(
     return section
 
 
-def _declared_mac(store: RuntimeStateStore, chain: ReferenceChain, declared: Mapping[str, Any]) -> str:
+def _declared_mac(
+    store: RuntimeStateStore, chain: ReferenceChain, declared: Mapping[str, Any], *, create: bool = True
+) -> str:
     """HMAC over the caller's declarations, under the session key.
 
     It detects a declaration rewritten after build. It cannot say the
@@ -1207,7 +1229,7 @@ def _declared_mac(store: RuntimeStateStore, chain: ReferenceChain, declared: Map
     """
 
     canonical = json.dumps(declared, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hmac.new(_untrusted_key(store, chain), canonical, hashlib.sha256).hexdigest()
+    return hmac.new(_untrusted_key(store, chain, create=create), canonical, hashlib.sha256).hexdigest()
 
 
 def _derive(
@@ -1682,7 +1704,7 @@ def verify_feedback_bundle(
         caller = bundle["caller_declared"]
         mac = bundle.get("caller_declared_mac")
         if not isinstance(mac, str) or not hmac.compare_digest(
-            mac, _declared_mac(store, expected_chain, caller)
+            mac, _declared_mac(store, expected_chain, caller, create=False)
         ):
             raise BindingRefused("evidence_tampered", "caller_declared was changed after build")
         coverage = bundle["objective_coverage"]

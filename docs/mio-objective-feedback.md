@@ -205,3 +205,25 @@ lifecycle, a container on a development host, or a virtual lab is not HIL
 proof of protected-network isolation, denied decoy egress, physical NIC/VLAN
 separation or host-restart behavior; those gates stay open in
 `docs/implementation-status.md`.
+
+## Operating notes
+
+- **Private directories.** `mio_feedback_keys/` and `mio_bindings/` under the
+  state root must be plain directories owned by the service user with mode
+  0700; key and binding files must be 0600. A refusal names which of owner or
+  mode is wrong (`evidence_tampered`). To migrate an existing state root:
+  `chown` the directories and files to the service user and `chmod 700` the
+  directories (`chmod 600` the files).
+- **Keys are created only when recording or building.** Verification only reads
+  an existing key; a missing key is refused as `evidence_tampered` ("session
+  key missing") and nothing is created.
+- **Filesystem.** Private files are created with a temporary file and
+  `os.link`, so the state root must be on a filesystem with hard links. Any
+  `OSError` there is reported as `evidence_tampered` with the reason.
+- **Locks are per process.** The numbering lock and the evidence lock work only
+  inside one process, the same limit as `state.py`. Across processes an
+  observation id can repeat; the bundle is then refused, so the failure is
+  safe (it can deny service, it cannot forge a bundle).
+- **Build and consume together.** Because the bundle's head must be the chain's
+  current head, build the bundle and hand it to its consumer straight away;
+  anything appended in between makes it `stale`.

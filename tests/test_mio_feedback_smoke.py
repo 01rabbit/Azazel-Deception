@@ -515,3 +515,17 @@ def test_r2_bind_does_not_write_state_and_binds_one_effect(lifecycle):
             defensive_effect_ref=other, adapter=lc["adapter"], environment_id=ENV, now=lc["now"],
         )
     assert info.value.code == "effect_rejected"
+
+
+def test_l1_verify_never_creates_a_session_key(lifecycle):
+    import shutil
+
+    lc = lifecycle
+    _, chain = _activate(lc)
+    now, bundle = _built(lc, chain)
+    keys = lc["adapter"].state.root / "mio_feedback_keys"
+    shutil.rmtree(keys)
+    with pytest.raises(BindingRefused) as info:
+        _verify(lc, chain, bundle, now)
+    assert info.value.code == "evidence_tampered" and "session key missing" in str(info.value)
+    assert not keys.exists()
