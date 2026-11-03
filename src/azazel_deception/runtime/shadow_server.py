@@ -35,6 +35,7 @@ endpoint being reachable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from datetime import datetime, timezone
@@ -73,6 +74,42 @@ _ACTIONS = frozenset(
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _echo_request_id(envelope: Any) -> str:
+    """Return a printable request_id for responses and audit, never raising.
+
+    Valid non-empty string IDs are echoed verbatim. Absent/empty IDs keep the
+    legacy ``missing`` placeholder; any other type is reported as
+    ``unparsable`` so a hostile payload cannot shape the response.
+    """
+
+    if not isinstance(envelope, dict):
+        return "unparsable"
+    value = envelope.get("request_id")
+    if value is None or value == "":
+        return "missing"
+    if isinstance(value, str):
+        return value
+    return "unparsable"
+
+
+def _ledger_key(request_id: str) -> str | None:
+    """Derive the SHA-256 fallback one-shot ledger key for a request_id.
+
+    This is only used when the raw ``shadow-request-<request_id>`` marker is
+    rejected by state-store path validation (unsafe filesystem characters).
+    Older builds always wrote the raw marker, so they could never have written
+    such an ID; the SHA key therefore cannot be missed by a rollback. Returns
+    ``None`` for strings that cannot be encoded as UTF-8 (lone surrogates),
+    which the caller rejects as malformed.
+    """
+
+    try:
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        return None
+    return f"shadow-request-{digest}"
 
 
 class ShadowReplayService:
@@ -174,14 +211,55 @@ class ShadowReplayService:
     # -- request handling ----------------------------------------------------
 
     def handle(self, envelope: Any) -> dict[str, Any]:
-        response = self._handle_inner(envelope)
-        self._audit(envelope, response)
+        try:
+            response = self._handle_inner(envelope)
+        except Exception:  # fail closed; details stay out of the response
+            response = self._response(
+                _echo_request_id(envelope), "rejected", ["internal_error"]
+            )
+        try:
+            self._audit(envelope, response)
+        except Exception:
+            # Not persisted, so do not claim otherwise and do not retry here.
+            return self._response(
+                _echo_request_id(envelope), "rejected", ["audit_write_failed"]
+            )
         return response
+
+    def _consume_request_marker(
+        self, request_id: str, fallback_key: str, envelope: dict[str, Any]
+    ) -> bool:
+        """Atomically consume the one-shot marker for a request_id.
+
+        The primary key is the raw ``shadow-request-<request_id>`` marker, the
+        same key older builds wrote, so a rollback sees and honours markers
+        written by this build. ``consume_decision`` is atomic on that key, so
+        old and new markers are checked without a separate pre-check. Only a
+        ``ValueError`` from path validation (unsafe filesystem characters) falls
+        back to ``fallback_key``, the SHA-256 key.
+        """
+
+        raw_key = f"shadow-request-{request_id}"
+
+        def _record(key: str) -> dict[str, Any]:
+            return {
+                "decision_id": key,
+                "kind": "shadow_request",
+                "edge_node_id": str(envelope.get("edge_node_id")),
+                "consumed_at": _utcnow().isoformat(),
+            }
+
+        try:
+            return self.state.consume_decision(raw_key, _record(raw_key))
+        except ValueError:
+            # Unsafe path characters: old builds could not have written this ID.
+            pass
+        return self.state.consume_decision(fallback_key, _record(fallback_key))
 
     def _handle_inner(self, envelope: Any) -> dict[str, Any]:
         if not isinstance(envelope, dict):
             return self._response("unparsable", "rejected", ["malformed_envelope"])
-        request_id = str(envelope.get("request_id") or "missing")
+        request_id = _echo_request_id(envelope)
         if envelope.get("schema_version") != REQUEST_SCHEMA:
             return self._response(request_id, "rejected", ["unsupported_schema"])
         if not self._envelope_authenticator(envelope):
@@ -197,15 +275,15 @@ class ShadowReplayService:
         action = envelope.get("action")
         if action not in _ACTIONS:
             return self._response(request_id, "rejected", ["unsupported_action"])
-        if envelope.get("request_id") in (None, "") or not self.state.consume_decision(
-            f"shadow-request-{request_id}",
-            {
-                "decision_id": f"shadow-request-{request_id}",
-                "kind": "shadow_request",
-                "edge_node_id": str(envelope.get("edge_node_id")),
-                "consumed_at": _utcnow().isoformat(),
-            },
-        ):
+        raw_request_id = envelope.get("request_id")
+        fallback_key = (
+            _ledger_key(raw_request_id)
+            if isinstance(raw_request_id, str) and raw_request_id
+            else None
+        )
+        if fallback_key is None:
+            return self._response(request_id, "rejected", ["malformed_envelope"])
+        if not self._consume_request_marker(raw_request_id, fallback_key, envelope):
             return self._response(request_id, "rejected", ["replayed_request"])
 
         payload = envelope.get("payload")

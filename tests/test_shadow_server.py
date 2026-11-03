@@ -17,6 +17,7 @@ from azazel_deception.runtime.shadow_server import (
     AUDIT_ENVIRONMENT_ID,
     ShadowReplayHTTPServer,
     ShadowReplayService,
+    _ledger_key,
 )
 from azazel_deception.runtime.state import RuntimeStateStore
 from azazel_deception.runtime.transport import (
@@ -294,3 +295,95 @@ def test_http_round_trip(service):
             response = json.loads(raw.read().decode("utf-8"))
     assert response["status"] == "ok"
     _assert_signed_response(response)
+
+
+def _audit_events(tmp_path):
+    store = RuntimeStateStore(tmp_path / "state")
+    path = store.evidence_path(AUDIT_ENVIRONMENT_ID)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+@pytest.mark.parametrize("bad_id", [123, ["req"], {"id": "x"}, ""])
+def test_malformed_request_id_is_rejected_signed_and_audited(service, tmp_path, bad_id):
+    response = service.handle(_envelope("capabilities", request_id=bad_id))
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["malformed_envelope"]
+    _assert_signed_response(response)
+    events = _audit_events(tmp_path)
+    assert [event["status"] for event in events] == ["rejected"]
+    assert events[0]["reason_codes"] == ["malformed_envelope"]
+
+
+def test_slash_request_id_is_echoed_and_replay_is_still_rejected(service):
+    request_id = "tenant/a:../b c"
+    envelope = _envelope("capabilities", request_id=request_id)
+    first = service.handle(envelope)
+    assert first["status"] == "ok"
+    assert first["request_id"] == request_id
+    _assert_signed_response(first)
+    replay = service.handle(envelope)
+    assert replay["status"] == "rejected"
+    assert replay["reason_codes"] == ["replayed_request"]
+    assert replay["request_id"] == request_id
+
+
+def test_ordinary_request_writes_legacy_compatible_raw_marker(service, tmp_path):
+    # Rollback safety: an ordinary safe request_id must be consumed under the
+    # raw marker older builds check, not only under the SHA key.
+    request_id = "ordinary-req-1"
+    envelope = _envelope("capabilities", request_id=request_id)
+    response = service.handle(envelope)
+    assert response["status"] == "ok"
+    store = RuntimeStateStore(tmp_path / "state")
+    assert store.decision_consumed(f"shadow-request-{request_id}")
+    sha_key = _ledger_key(request_id)
+    assert not store.decision_consumed(sha_key)
+
+
+def test_legacy_raw_marker_consumed_by_old_build_rejects_as_replay(service, tmp_path):
+    request_id = "legacy-req-7"
+    # Pre-seed the raw marker exactly as the pre-hash implementation wrote it.
+    store = RuntimeStateStore(tmp_path / "state")
+    assert store.consume_decision(
+        f"shadow-request-{request_id}",
+        {"decision_id": f"shadow-request-{request_id}", "kind": "shadow_request"},
+    )
+    envelope = _envelope("capabilities", request_id=request_id)
+    response = service.handle(envelope)
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["replayed_request"]
+    assert response["request_id"] == request_id
+    _assert_signed_response(response)
+    events = _audit_events(tmp_path)
+    assert events[-1]["status"] == "rejected"
+    assert events[-1]["reason_codes"] == ["replayed_request"]
+
+
+def test_unexpected_action_exception_is_fail_closed_and_audited(service, tmp_path, monkeypatch):
+    def boom(payload, envelope):
+        raise RuntimeError("secret-internal-detail")
+
+    monkeypatch.setattr(service, "_action_capabilities", boom)
+    response = service.handle(_envelope("capabilities"))
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["internal_error"]
+    assert response["result"] == {}
+    assert "secret-internal-detail" not in json.dumps(response)
+    _assert_signed_response(response)
+    events = _audit_events(tmp_path)
+    assert [event["status"] for event in events] == ["rejected"]
+    assert events[0]["reason_codes"] == ["internal_error"]
+
+
+def test_audit_store_failure_returns_signed_audit_write_failed(service, tmp_path, monkeypatch):
+    def fail_write(environment_id, event):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service.state, "append_evidence", fail_write)
+    response = service.handle(_envelope("capabilities"))
+    assert response["status"] == "rejected"
+    assert response["reason_codes"] == ["audit_write_failed"]
+    _assert_signed_response(response)
+    assert _audit_events(tmp_path) == []
