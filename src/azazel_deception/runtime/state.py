@@ -218,6 +218,20 @@ class RuntimeStateStore:
                         _fsync_dir(resolved_path.parent)
         return path
 
+    def read_evidence_snapshot(self, environment_id: str) -> str | None:
+        """Read one complete in-process snapshot relative to evidence appends.
+
+        The same lock used by :meth:`append_evidence` prevents a thread from
+        observing a partially written JSONL record. This is not a cross-process
+        lock; concurrent processes still require external serialization.
+        """
+
+        path = self.evidence_path(environment_id)
+        with _evidence_lock(path):
+            if not path.exists():
+                return None
+            return path.read_text(encoding="utf-8")
+
     def evidence_head_hash(self, environment_id: str) -> str | None:
         """Return the hash of the last evidence record, or None if empty.
 
