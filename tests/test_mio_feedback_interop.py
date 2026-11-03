@@ -10,6 +10,10 @@ Environment
   (azazel_mio must be importable: the script installs the pinned commit)
   AZAZEL_DECEPTION_KNOWLEDGE_PYTHON     python of a separate venv with Knowledge[api]
   AZAZEL_DECEPTION_KNOWLEDGE_SRC        extracted Knowledge source dir (config/, azctl)
+  AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP
+                                        1 = run the MIO objective producer conformance
+                                        test (default in the runner); plain pytest with
+                                        unset or 0 skips it. The runner accepts only 0/1.
 
 The test process provisions, starts (127.0.0.1, free port), drains and stops its own
 Knowledge server; pointing it at an already-running one is not supported because
@@ -137,7 +141,7 @@ def world_with_objective(tmp_path, monkeypatch):
     return world, chain, bundle
 
 
-# =========================== MIO (Azazel-MIO 7a35288) ======================
+# =========================== MIO (Azazel-MIO ce9c2c9) ======================
 
 
 def test_mio_context_frame_and_no_model_handoff(scenario):
@@ -200,7 +204,7 @@ def test_mio_refuses_a_context_with_an_address_in_it(scenario):
     assert coerced is None or coerced.node_id == ""
 
 
-# ====================== Knowledge (Azazel-Knowledge 6b590f3) ===============
+# ====================== Knowledge (local pinned source) ======================
 
 
 def _free_port() -> int:
@@ -595,7 +599,7 @@ def test_mio_frame_carries_desired_observation_known_facts(world_with_objective)
     assert handoff["model_contribution"] == "none"
 
 
-# ====== MIO objective producer (Azazel-MIO 453b4d3, PR #37) -> Deception admit ======
+# ====== MIO objective producer (Azazel-MIO ce9c2c9, main) -> Deception admit ======
 #
 # GAP, stated plainly: MIO's producer emits `MioObservationObjective` (MIO ids,
 # no Fabric types). Deception's receiver accepts a different closed shape
@@ -630,10 +634,10 @@ def _synthetic_edge_adapter(objective, gap_capability: str) -> dict:
 
 @pytest.mark.skipif(
     os.environ.get("AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP") != "1",
-    reason="requires explicit opt-in with the pinned MIO #37 candidate",
+    reason="requires explicit opt-in (the runner sets it by default) with the pinned MIO ce9c2c9 producer",
 )
-def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_and_refuses_mismatches(
-    tmp_path, monkeypatch
+def test_mio_ce9c2c9_objective_producer_through_synthetic_adapter_binds_content_and_refuses_mismatches(
+    tmp_path, monkeypatch, knowledge
 ):
     import dataclasses
 
@@ -698,7 +702,8 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
     with pytest.raises(ObjectiveRejected, match="outside the advisory shape"):
         accept_mio_objective(mio_data)
 
-    # 2. Test-only synthetic adapter -> Deception's closed receiver payload.
+    # 2. Test-only SYNTHETIC adapter (not product integration) -> Deception's
+    #    closed receiver payload. Edge has no such production mapping yet.
     payload = _synthetic_edge_adapter(mio_objective, gap.capability)
     assert set(payload) == {"objective_ref", "hypothesis_refs", "frame_ref",
                             "desired_observations", "authority", "executable"}
@@ -729,8 +734,9 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
     digest_ref = "advisory:mio-objective-digest-" + digest.split(":", 1)[1][:32]
     generated = [*accepted.advisory_refs(), digest_ref]
     decision_id = world.next_id()
-    plan = world.plan(decision_id)
-    signed = world.signed_decision(decision_id, plan, evidence_refs=generated)
+    # SYNTHETIC: the signed decision is activated through the real adapter gates
+    # (HMAC, one-shot activation) so step 5 can consume it as the activation.
+    _, plan, signed = world.activate(decision_id, evidence_refs=generated)
     admitted = admit_objective(accepted, signed, authenticator=world.authenticator, now=utcnow())
     assert isinstance(admitted, AdmittedObjective)
     assert admitted.decision_id == decision_id and admitted.objective == accepted
@@ -758,3 +764,174 @@ def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_
     assert refused([*generated[:-1], wrong_digest]) == "objective_not_in_authenticated_decision"
     assert refused(generated, sign=False) == "decision_unauthenticated"
     assert admit_objective(accepted, None, authenticator=world.authenticator, now=utcnow()).reason == "no_decision"
+
+    # 5. SYNTHETIC continuation (test-only; not product Edge integration). The
+    #    activated decision from step 3 is consumed by the Deception runtime
+    #    adapter, the reference chain is bound, ONE service interaction is
+    #    recorded, and the bundle is verified and projected by the existing
+    #    Knowledge/MIO functions. The harness records a service interaction; the
+    #    credential_lure surface is caller-declared "not observed", never verified.
+    chain = bind_reference_chain(
+        admitted=admitted, signed_activation_decision=signed,
+        defensive_effect_ref=accept_defensive_effect_ref(edge_effect_payload(decision_id, utcnow())),
+        adapter=world.adapter, environment_id=world.environment_id, now=utcnow(),
+    )
+    assert chain.decision_id == decision_id
+    assert chain.environment_id == world.environment_id
+    assert chain.objective_ref == accepted.objective_ref
+    assert chain.objective_digest == digest
+    assert chain.objective_content_bound is True
+    assert tuple(chain.hypothesis_refs) == tuple(accepted.hypothesis_refs)
+    assert chain.frame_ref == accepted.frame_ref
+
+    bound_observer(world.adapter, chain, world.package, plan).record(
+        observation_class="interaction", surface="service"
+    )
+    bundle = build_feedback_bundle(
+        world.adapter, chain, now=utcnow(), max_age=MAX_AGE,
+        expected_telemetry=EXPECTED, observed_telemetry=EXPECTED, mechanism=None,
+        isolation_assertion_refs=("isolation-net-none",), active_surface_refs=(SURFACE,),
+        objective=accepted,
+        surface_telemetry={"service": "interaction_log", "credential_lure": "process_events"},
+    )
+    verify_feedback_bundle(bundle, expected_chain=chain, state=world.adapter, now=utcnow(), max_age=MAX_AGE)
+
+    # Binding: the bundle names the same decision, environment, package, node and session.
+    ref = bundle["reference_chain"]
+    assert bundle["decision"]["decision_ref"] == f"decision:{decision_id}"
+    assert bundle["execution_request"]["activated_evidence_seq"] == chain.generation
+    assert ref["decision_id"] == decision_id and ref["environment_id"] == world.environment_id
+    assert ref["session_ref"] == chain.session_ref and ref["objective_digest"] == digest
+    assert ref["objective_ref"] == accepted.objective_ref
+    # No tactical verdict: the bundle declares it is not assessed here.
+    assert bundle["tactical_assessment"] == {"status": "not_assessed", "owner": "outside_az06"}
+    # Runtime state is only the persisted "active" evidence; no independent
+    # reverification, so no effect observation is claimed (honest unknown).
+    assert bundle["runtime_materialization"]["environment_state"] == "active"
+    assert bundle["runtime_materialization"]["effect_observation"] is None
+    assert "runtime_state_not_independently_reverified" in bundle["limitations"]
+    assert "effect_observation_withheld_not_independently_verified" in bundle["limitations"]
+    assert bundle["observed_mechanism"] == {"status": "not_observed_by_az06"}
+
+    # One bounded interaction, bound to the chain and the environment.
+    (interaction,) = bundle["interactions"]
+    assert interaction["environment_id"] == world.environment_id
+    assert interaction["node_id"] == chain.node_id and interaction["package_id"] == chain.package_id
+    assert interaction["observation_class"] == "interaction" and interaction["surface"] == "service"
+    assert set(chain.evidence_refs()) <= set(interaction["evidence_refs"])
+    assert bundle["outcome"]["impact_observations"]["interaction_count"] == 1
+    assert bundle["outcome"]["decision_ref"] == f"decision:{decision_id}"
+    assert bundle["outcome"]["environment_ref"] == f"environment:{world.environment_id}"
+
+    # Verified coverage only where an interaction exists (service). The
+    # credential_lure entries are caller-declared "not observed", not observed.
+    coverage = bundle["objective_coverage"]
+    assert coverage["status"] == "evaluated"
+    assert coverage["coverage_basis"] == "caller_declared"
+    assert coverage["objective_ref"] == accepted.objective_ref
+    assert len(coverage["entries"]) == len(accepted.hypothesis_refs) * len(accepted.desired_observations)
+    for entry in coverage["entries"]:
+        if entry["surface"] == "service":
+            assert entry["status"] == "observed" and entry["observed_count"] == 1
+        else:
+            assert entry["surface"] == "credential_lure"
+            assert entry["status"] == "not_observed_with_coverage"
+            assert entry["observed_count"] == 0
+    assert bundle["outcome"]["coverage_complete"] is True
+    assert bundle["outcome"]["telemetry_gaps"] == []
+
+    # Existing Knowledge and MIO projections, each verifying the bundle first.
+    ctx = dict(expected_chain=chain, state=world.adapter, now=utcnow(), max_age=MAX_AGE)
+    knowledge_payload = knowledge_ingest_payload(bundle, **ctx)
+    assert knowledge_payload["environment_id"] == world.environment_id
+    (item,) = knowledge_payload["items"]
+    assert item["surface"] == "service" and item["observation_class"] == "interaction"
+
+    context = mio_deception_context(bundle, **ctx)
+    assert context["environment_id"] == world.environment_id
+    assert context["package_id"] == chain.package_id and context["node_id"] == chain.node_id
+    assert context["observation_refs"] == [item["observation_id"]]
+    # Honest unknown: lifecycle is not claimed as "active" without independent reverification.
+    assert context["lifecycle_state"] == "unknown"
+
+    inputs = mio_frame_inputs(bundle, **ctx)
+    assert inputs["deception_status"] == "available"
+    assert "DECEPTION_DESIRED_OBSERVED_INTERACTION_SERVICE" in inputs["known_facts"]
+    assert not any("CREDENTIAL_LURE" in fact for fact in inputs["known_facts"])
+    assert "DECEPTION_DESIRED_NOT_OBSERVED_CALLER_DECLARED_COVERAGE_INTERACTION_CREDENTIAL_LURE" in inputs["unknowns"]
+    assert "DECEPTION_NO_INTERACTION_NOT_SAFETY" not in inputs["unknowns"]
+    assert "DECEPTION_OBJECTIVE_CONTENT_NOT_BOUND" not in inputs["unknowns"]
+
+    # 6. Same verified bundle -> REAL Knowledge server -> REAL MIO explain.
+    #    The Edge mapping and the Edge decision above are SYNTHETIC (test-only,
+    #    not production integration). Knowledge (ingest, worker drain, advisory
+    #    read) and MIO (ReportedKnowledgeContext, AssistantCore.explain) run as
+    #    real local processes/libraries at the runner's pinned revisions. The
+    #    advisory -> ReportedKnowledgeContext conversion is the harness's own
+    #    (same pattern as test_knowledge_advisory_reaches_mio_reevaluation_still_advisory_only):
+    #    claims = the advisory's `assessment`, record refs = its `advisory_id`
+    #    and `observation_refs`, nothing invented.
+    from azazel_mio.assistant import AssistantCore, ReportedKnowledgeContext
+    from azazel_mio.frame_builder import MioSituationFrameBuilder
+
+    status, _ = knowledge.post(knowledge_payload)
+    assert status == 202
+    knowledge.drain()
+    advisory = _get_advisory(knowledge, world.environment_id)
+
+    # Advisory matches the same environment and the same observed interaction id.
+    assert advisory["authority"] == "advisory_only" and advisory["executable"] is False
+    assert advisory["environment_id"] == world.environment_id
+    assert advisory["observation_refs"] == [interaction["observation_id"]]
+
+    # MIO frame built from the Deception context (synthetic-chain bundle), carrying
+    # the same explicit unknowns that mio_frame_inputs reported above.
+    frame_now = utcnow().isoformat().replace("+00:00", "Z")
+    frame = MioSituationFrameBuilder().build(
+        events=[{"event_id": "ev:az06-1", "ts": frame_now, "severity": 10}],
+        noc_evaluation={}, soc_evaluation={}, current_defensive_state="OBSERVE",
+        mission="az06-conformance", trace_id=chain.trace_id, frame_id="frame-55-objective",
+        created_at=frame_now, deception_context=context,
+        explicit_unknowns=inputs["explicit_unknowns"],
+    )
+    reported = ReportedKnowledgeContext(
+        source="azazel-knowledge", generation="interop-55-objective",
+        as_of=advisory["produced_at"],
+        expires_at=(utcnow() + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+        reported_claims=(advisory["assessment"],),
+        record_refs=(advisory["advisory_id"], *advisory["observation_refs"]),
+    )
+    result = AssistantCore().explain(frame, reported_knowledge=[reported], now=frame_now).to_dict()
+
+    # MIO takes both peers into the re-evaluation, and marks Knowledge's claim
+    # as reported and unverified (advisory-only, not a belief).
+    assert result["dependency_outcome"] == {"knowledge": "available", "deception": "available"}
+    (knowledge_item,) = result["knowledge"]
+    assert knowledge_item["claim_status"] == "reported_unverified"
+    assert "not_verified" in knowledge_item["trust"]
+    assert knowledge_item["reported_claims"] == [advisory["assessment"]]
+    assert advisory["advisory_id"] in knowledge_item["record_refs"]
+    assert set(advisory["observation_refs"]) <= set(knowledge_item["record_refs"])
+
+    # Honest unknowns survive: lifecycle stays "unknown" (not claimed active), and
+    # the caller-declared not-observed credential_lure coverage is still an unknown.
+    assert context["lifecycle_state"] == "unknown"
+    for marker in inputs["explicit_unknowns"]:
+        assert marker in frame.unknowns, f"MIO dropped {marker}"
+    assert "DECEPTION_DESIRED_NOT_OBSERVED_CALLER_DECLARED_COVERAGE_INTERACTION_CREDENTIAL_LURE" in frame.unknowns
+    assert "DECEPTION_NO_INTERACTION_NOT_SAFETY" not in frame.unknowns
+
+    # Authorizes nothing: no model contribution, no action, no recommendation,
+    # no executable output, and no command-like key in the explanation.
+    handoff = result["handoff"]
+    assert handoff["model_contribution"] == "none"
+    assert handoff["current_action"] is None
+    assert handoff["current_defensive_state"] == "OBSERVE"
+    assert any("authorizes nothing" in line for line in handoff["operator_guidance"])
+    assert all(h["verification"] in {"unverified", "model_proposed_unverified"}
+               for h in result["hypotheses"])
+    text = json.dumps(result)
+    assert CANARY not in text
+    assert "recommendation" not in result
+    assert '"executable": true' not in text.lower()
+    assert not {"action", "command", "label", "decision"} & set(result)

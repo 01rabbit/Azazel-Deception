@@ -8,8 +8,9 @@
 #
 # Usage: scripts/dev/mio_feedback_interop.sh [WORKDIR]
 # Env:   MIO_REPO KNOWLEDGE_REPO (default: sibling of this checkout, else one level up)
-#        MIO_COMMIT (7a35288)  KNOWLEDGE_COMMIT (6b590f3)  PYTHON (python3.12)
-# Knowledge is private: its output goes to the log file in WORKDIR, never to stdout.
+#        MIO_COMMIT (full public pin)  KNOWLEDGE_COMMIT (required, local full commit)
+#        PYTHON (python3.12)  AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP (default 1; 0 skips it)
+# Knowledge is private: provide its exact commit locally; its output stays in WORKDIR/interop.log, never stdout.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -23,10 +24,41 @@ find_repo() { # name: sibling of this checkout first, then one level further up
 }
 MIO_REPO="${MIO_REPO:-$(find_repo Azazel-MIO MIO_REPO)}"
 KNOWLEDGE_REPO="${KNOWLEDGE_REPO:-$(find_repo Azazel-Knowledge KNOWLEDGE_REPO)}"
-MIO_COMMIT="${MIO_COMMIT:-7a35288}"
-KNOWLEDGE_COMMIT="${KNOWLEDGE_COMMIT:-6b590f3}"
+MIO_COMMIT="${MIO_COMMIT:-ce9c2c9f242d2f9476f8d49d4b237fb6208c5a7c}"
+if [[ -z "${KNOWLEDGE_COMMIT:-}" ]]; then
+  echo "KNOWLEDGE_COMMIT must be set to a full local commit ID" >&2
+  exit 2
+fi
+for commit in "$MIO_COMMIT" "$KNOWLEDGE_COMMIT"; do
+  if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "MIO_COMMIT and KNOWLEDGE_COMMIT must be full 40-character commit IDs" >&2
+    exit 2
+  fi
+done
 PYTHON="${PYTHON:-python3.12}"
+check_commit() {
+  name="$1"; repo="$2"; commit="$3"
+  if ! git -C "$repo" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    echo "$name must contain the requested commit object" >&2
+    exit 2
+  fi
+}
+check_commit MIO_COMMIT "$MIO_REPO" "$MIO_COMMIT"
+check_commit KNOWLEDGE_COMMIT "$KNOWLEDGE_REPO" "$KNOWLEDGE_COMMIT"
 log="$work/interop.log"
+python_identity="$($PYTHON -c 'import sys; print(sys.version + " | " + sys.executable)')"
+venv_key="$($PYTHON -c 'import hashlib,sys; print(hashlib.sha256("\0".join(sys.argv[1:]).encode()).hexdigest())' "$MIO_COMMIT" "$KNOWLEDGE_COMMIT" "$python_identity")"
+mio_venv="$work/venv-mio-$venv_key"
+knowledge_venv="$work/venv-knowledge-$venv_key"
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+{
+  printf '\nrun_id=%s\n' "$run_id"
+  printf 'deception_head=%s\n' "$(git -C "$here" rev-parse HEAD)"
+  printf 'deception_tree=%s\n' "$(git -C "$here" rev-parse 'HEAD^{tree}')"
+  printf 'mio_commit=%s\n' "$MIO_COMMIT"
+  printf 'knowledge_commit=%s\n' "$KNOWLEDGE_COMMIT"
+  printf 'python_identity=%s\n' "$python_identity"
+} >>"$log"
 
 extract() { # repo commit dest
   if [ ! -e "$3/.extracted-$2" ]; then
@@ -38,17 +70,17 @@ extract() { # repo commit dest
 extract "$MIO_REPO" "$MIO_COMMIT" "$work/mio"
 extract "$KNOWLEDGE_REPO" "$KNOWLEDGE_COMMIT" "$work/knowledge"
 
-if [ ! -x "$work/venv-mio/bin/python" ]; then
-  uv venv --python "$PYTHON" "$work/venv-mio" -q
-  uv pip install -q --python "$work/venv-mio/bin/python" -e "$work/mio" -e "$here" pytest
+if [ ! -x "$mio_venv/bin/python" ]; then
+  uv venv --python "$PYTHON" "$mio_venv" -q
+  uv pip install -q --python "$mio_venv/bin/python" -e "$work/mio" -e "$here" pytest
 fi
-if [ ! -x "$work/venv-knowledge/bin/python" ]; then
-  uv venv --python "$PYTHON" "$work/venv-knowledge" -q
-  uv pip install -q --python "$work/venv-knowledge/bin/python" -e "$work/knowledge[api]" >>"$log" 2>&1
+if [ ! -x "$knowledge_venv/bin/python" ]; then
+  uv venv --python "$PYTHON" "$knowledge_venv" -q
+  uv pip install -q --python "$knowledge_venv/bin/python" -e "$work/knowledge[api]" >>"$log" 2>&1
 fi
 
 cleanup() { # no stray uvicorn from this work dir may outlive the run
-  pkill -f "$work/venv-knowledge/bin/python -m uvicorn" 2>/dev/null || true
+  pkill -f "$knowledge_venv/bin/python -m uvicorn" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -56,18 +88,47 @@ report="$work/interop-junit.xml"
 rm -f "$report"
 cd "$here"
 export AZAZEL_DECEPTION_MIO_INTEROP=1
-export AZAZEL_DECEPTION_KNOWLEDGE_PYTHON="$work/venv-knowledge/bin/python"
+export AZAZEL_DECEPTION_KNOWLEDGE_PYTHON="$knowledge_venv/bin/python"
 export AZAZEL_DECEPTION_KNOWLEDGE_SRC="$work/knowledge"
 pytest_args=(tests/test_mio_feedback_interop.py -p no:cacheprovider)
-if [ "${AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP:-0}" != "1" ]; then
-  # The MIO observation-objective producer is still a Draft candidate. Keep
-  # the default main-to-main suite independent of that not-yet-merged API.
-  pytest_args+=(-k 'not test_mio_453b4d3_objective_producer')
+# The runner runs the MIO objective producer conformance test by default. The
+# ordinary pytest suite (run without this runner) still skips it unless opted in.
+export AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP="${AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP:-1}"
+case "$AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP" in
+  1) expected_tests=15 ;;
+  0) expected_tests=14; pytest_args+=(-k 'not test_mio_ce9c2c9_objective_producer') ;;
+  *) echo "AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP must be 0 or 1, got '$AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP'" >&2; exit 2 ;;
+esac
+if "$mio_venv/bin/python" -m pytest "${pytest_args[@]}" \
+  --junitxml "$report" -rs >>"$log" 2>&1; then
+  status=0
+else
+  status=$?
 fi
-set +e
-"$work/venv-mio/bin/python" -m pytest "${pytest_args[@]}" \
-  --junitxml "$report" -rs 2>&1 | tee -a "$log"
-status=${PIPESTATUS[0]}
-set -e
 [ "$status" -eq 0 ] || { echo "interop pytest failed (rc=$status); log: $log" >&2; exit "$status"; }
-"$work/venv-mio/bin/python" scripts/ci/assert_executed.py "$report" --min-tests 14
+if "$mio_venv/bin/python" scripts/ci/assert_executed.py "$report" --min-tests "$expected_tests" >>"$log" 2>&1; then
+  :
+else
+  status=$?
+  echo "interop: skip/error check failed (rc=$status); log: $log" >&2
+  exit "$status"
+fi
+# assert_executed.py only enforces a minimum; the runner requires the exact count.
+if ran="$($mio_venv/bin/python -I -c '
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
+ran = sum(int(s.get("tests", 0)) for s in suites)
+want = int(sys.argv[2])
+if ran != want:
+    sys.exit(f"interop: expected exactly {want} executed tests, report has {ran}")
+print(ran)
+' "$report" "$expected_tests")"; then
+  :
+else
+  status=$?
+  echo "interop: exact-count check failed (rc=$status); log: $log" >&2
+  exit "$status"
+fi
+printf 'executed_tests=%s\n' "$ran" >>"$log"
+printf 'interop: %s tests executed, 0 skipped, 0 failed; local log: %s\n' "$ran" "$log"

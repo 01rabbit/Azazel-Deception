@@ -1854,7 +1854,7 @@ def mio_deception_context(
     max_age: float,
     mechanism: Any = None,
 ) -> dict[str, Any]:
-    """A mapping ``MioDeceptionContext.coerce`` accepts (MIO 7a35288 vocabulary).
+    """A mapping ``MioDeceptionContext.coerce`` accepts (MIO ce9c2c9 vocabulary).
 
     Lifecycle is conservative: anything AZ-06 cannot vouch for (drift, a stale
     bundle, an overrun lease, a failed environment) is ``unknown``, never
@@ -1878,7 +1878,7 @@ def mio_frame_inputs(
     max_age: float,
     mechanism: Any = None,
 ) -> dict[str, Any]:
-    """Inputs for ``MioSituationFrameBuilder.build`` (MIO 7a35288), verified first.
+    """Inputs for ``MioSituationFrameBuilder.build`` (MIO ce9c2c9), verified first.
 
     The builder takes ``deception_context`` and ``explicit_unknowns`` (the
     ``unknowns`` key carries the same list for ``MioSituationFrame.build``);
