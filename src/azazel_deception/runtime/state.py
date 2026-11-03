@@ -246,29 +246,34 @@ class RuntimeStateStore:
         """
 
         path = self.evidence_path(environment_id)
-        with _evidence_lock(path):
-            if not path.exists():
+        try:
+            with _evidence_lock(path):
+                if not path.exists():
+                    return True
+                prev_hash = ""
+                expected_seq = 0
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        return False
+                    if not isinstance(record, dict):
+                        return False
+                    if int(record.get(_EVIDENCE_SEQ, -1)) != expected_seq:
+                        return False
+                    if str(record.get(_EVIDENCE_PREV, "")) != prev_hash:
+                        return False
+                    if _evidence_hash(record) != record.get(_EVIDENCE_HASH):
+                        return False
+                    prev_hash = str(record[_EVIDENCE_HASH])
+                    expected_seq += 1
                 return True
-            prev_hash = ""
-            expected_seq = 0
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    return False
-                if not isinstance(record, dict):
-                    return False
-                if int(record.get(_EVIDENCE_SEQ, -1)) != expected_seq:
-                    return False
-                if str(record.get(_EVIDENCE_PREV, "")) != prev_hash:
-                    return False
-                if _evidence_hash(record) != record.get(_EVIDENCE_HASH):
-                    return False
-                prev_hash = str(record[_EVIDENCE_HASH])
-                expected_seq += 1
-            return True
+        except (OSError, TypeError, ValueError, OverflowError, UnicodeDecodeError):
+            # Unreadable files, malformed JSON value types, and invalid UTF-8
+            # cannot prove chain integrity, so report a fail-closed result.
+            return False
 
     def evidence_path(self, environment_id: str) -> Path:
         return self.root / "evidence" / f"{environment_id}.jsonl"

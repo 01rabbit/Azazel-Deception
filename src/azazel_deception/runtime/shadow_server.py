@@ -74,6 +74,7 @@ _ACTIONS = frozenset(
     }
 )
 _MUTATING_ACTIONS = frozenset({"activate", "terminate"})
+_MAX_ECHO_REQUEST_ID_CHARS = 1024
 
 
 def _utcnow() -> datetime:
@@ -83,10 +84,11 @@ def _utcnow() -> datetime:
 def _echo_request_id(envelope: Any) -> str:
     """Return a printable request_id for responses and audit, never raising.
 
-    Valid non-empty string IDs are echoed verbatim. Absent/empty IDs keep the
-    legacy ``missing`` placeholder; any other type is reported as
-    ``unparsable`` (including strings that are not encodable as UTF-8) so a
-    hostile payload cannot shape or break the signed response.
+    Valid non-empty string IDs up to the response cap are echoed verbatim;
+    longer IDs are represented by a SHA-256 reference. Absent/empty IDs keep
+    the legacy ``missing`` placeholder; any other type is reported as
+    ``unparsable`` so a hostile payload cannot shape or break the signed
+    response.
     """
 
     if not isinstance(envelope, dict):
@@ -100,6 +102,8 @@ def _echo_request_id(envelope: Any) -> str:
         except UnicodeEncodeError:
             # Lone surrogates cannot be signed (canonical bytes are UTF-8).
             return "unparsable"
+        if len(value) > _MAX_ECHO_REQUEST_ID_CHARS:
+            return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
         return value
     return "unparsable"
 
@@ -210,10 +214,16 @@ class ShadowReplayService:
                 return text[: _MAX_AUDIT_LABEL_CHARS - len(suffix)] + suffix
             return text
 
+        def bounded_request_id(value: Any) -> str:
+            text = str(value)
+            if len(text) <= _MAX_AUDIT_LABEL_CHARS:
+                return text
+            return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
         summary = {
             "schema_version": "az06-shadow-audit/v0.1",
             "observed_at": _utcnow().isoformat(),
-            "request_id": str(response.get("request_id")),
+            "request_id": bounded_request_id(response.get("request_id")),
             "edge_node_id": (
                 bounded_label(envelope.get("edge_node_id"))
                 if isinstance(envelope, dict)
@@ -565,16 +575,9 @@ class _ShadowRequestHandler(BaseHTTPRequestHandler):
                 # bytes to be parsed as another request on a keep-alive socket.
                 self.close_connection = True
                 envelope = None
-                response = self.service.handle(envelope)
-                encoded = json.dumps(response).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
-                return
-            body = self.rfile.read(length) if length > 0 else b""
-            envelope = json.loads(body.decode("utf-8"))
+            else:
+                body = self.rfile.read(length) if length > 0 else b""
+                envelope = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, RecursionError):
             # Unparsable body (incl. pathologically nested JSON): let handle()
             # reject it as a malformed envelope, signed and audited.
@@ -584,6 +587,8 @@ class _ShadowRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(encoded)
 

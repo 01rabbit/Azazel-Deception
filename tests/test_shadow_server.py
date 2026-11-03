@@ -331,6 +331,30 @@ def test_untrusted_audit_labels_are_bounded(service, tmp_path):
     assert event["edge_node_id"].endswith("[truncated]")
 
 
+def test_long_request_id_is_hashed_in_response_and_audit(service, tmp_path):
+    request_id = "request-" + "x" * 10_000
+    response = service.handle(_envelope("capabilities", request_id=request_id))
+    assert response["status"] == "ok"
+    assert response["request_id"] == "sha256:" + hashlib.sha256(request_id.encode()).hexdigest()
+    event = _audit_events(tmp_path)[0]
+    assert event["request_id"] == response["request_id"]
+    assert len(event["request_id"]) <= 256
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        b'{"_evidence_seq":"not-an-int"}\n',
+        b"\xff\xfe",
+    ],
+)
+def test_verify_evidence_chain_returns_false_for_malformed_record(tmp_path, corrupt):
+    store = RuntimeStateStore(tmp_path / "state")
+    path = store.evidence_path("corrupt-env")
+    path.write_bytes(corrupt)
+    assert store.verify_evidence_chain("corrupt-env") is False
+
+
 def test_http_rejects_request_body_above_limit(service, tmp_path):
     with ShadowReplayHTTPServer(service) as server:
         host, port = server.address
