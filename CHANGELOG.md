@@ -95,17 +95,49 @@ are not proven (see `docs/live-gate-checklist.md`).
 - **Deception#55 reference-chain integrity** — the local per-session seal now
   covers the canonical Edge effect payload as well as the chain fields. Replacing
   a bound effect or another chain field is refused by the observer, bundle,
-  verification and reset consumers. The seal is local and does not change the
-  Fabric bundle schema or grant execution authority.
-- **Runtime environment identifiers and private records** — filesystem and
-  Compose use now share one strict, non-normalizing environment-ID grammar;
-  ambiguous, traversing and overlong IDs are rejected before state changes or
-  Compose calls. State, evidence and decision directories/files are kept
-  owner-only, existing state/evidence files are tightened when opened, and
-  symlinked record paths are refused. Existing persisted IDs are not renamed.
-  Uppercase, dotted, whitespace, path-containing and overlong IDs that were
-  previously accepted by some entry points are now rejected; operators must
-  explicitly remap those IDs before using the new runtime.
+  verification and reset consumers. The bound effect must be exactly Fabric's
+  `DefensiveEffectRef`; subclasses and duck-typed stand-ins are refused. The seal
+  is local and does not change the Fabric bundle schema or grant execution
+  authority.
+- **Runtime environment identifiers and state-root handling** — filesystem and
+  Compose use share one strict, non-normalizing environment-ID grammar
+  (`[a-z0-9][a-z0-9_-]{0,57}`); traversing, ambiguous and overlong IDs are
+  rejected before state changes or Compose calls. Compatibility and migration
+  effects:
+  - *New activation and every write create only strict IDs.* Uppercase, dotted,
+    whitespace, path-containing and overlong IDs that older versions accepted
+    can no longer be activated; remap them explicitly. Persisted records are
+    never renamed.
+  - *Already-persisted legacy IDs are decommission-only.* An ID that is
+    path-safe (ASCII, alphanumeric start, no `..`, at most 128 characters) and
+    whose exact state file exists can still be read (`collect_status`,
+    `verify_evidence`, `export_evidence`), terminated with an Edge decision, and
+    stopped with the operator kill switch. Compose operations use the old
+    lower-cased/filtered project name and are refused when that name was
+    truncated or is shared with any other persisted ID (`legacy_ambiguous`).
+    A new strict activation whose project a legacy ID holds is refused until the
+    legacy environment is decommissioned. `reset_environment` and record
+    deletion accept strict IDs only; remove legacy records by hand.
+  - *Invalid old IDs are reported, not hidden.* `health()` adds `id_status`
+    (`supported`, `legacy`, `legacy_ambiguous`, `unsupported`) plus
+    `legacy_environment_ids` / `unsupported_environment_ids`; `reconcile_with_edge`
+    adds the same lists. A persisted ID that is not path-safe is never opened,
+    reports state `unsupported_id`, and makes `consistent` false because it may
+    hide a running deployment. Stop such deployments with Docker directly.
+  - *Permissions are no longer rewritten.* Opening or reading state/evidence
+    never chmods and no longer requires service-user ownership; shared
+    (group-readable) layouts keep working. Newly created directories and files
+    are `0700`/`0600`. Symlinked record files are still refused.
+  - *State root.* The configured root is never chmod'ed. It may be a symlink
+    (for example to a mounted volume) if it resolves to an existing directory
+    the service user can read, write and traverse. The `environments`,
+    `evidence` and `decisions` directories inside the root must be real
+    directories; a symlink there is refused (previously followed), so layouts
+    that symlink those subdirectories must mount the target at the root instead.
+  - *Temp files.* State writes use a unique `O_EXCL` temp name and clean up only
+    their own temp; a pre-existing `<id>.tmp` is no longer deleted.
+  - *Platform.* The state store is POSIX-only (Linux, macOS) and fails closed
+    elsewhere; Windows is not supported.
 - **Deception#55 objective digest binding** — `bind_reference_chain` now derives
   content binding from the authenticated Edge decision. A caller-constructed
   `AdmittedObjective` cannot turn a signed objective digest into reference-only

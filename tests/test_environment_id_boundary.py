@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import stat
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -185,68 +186,90 @@ def _mode(path: Path) -> int:
 
 
 @posix_only
-def test_preexisting_permissive_directories_become_owner_only(tmp_path):
+def test_existing_directories_and_files_keep_their_modes(tmp_path):
+    """F4/F5: opening a shared tree never re-modes it; reads do not mutate."""
+
     root = tmp_path / "state"
     for d in (root, root / "environments", root / "evidence", root / "decisions"):
         d.mkdir(parents=True, exist_ok=True)
         os.chmod(d, 0o755)
     (root / "evidence" / "keep.txt").write_text("untouched", encoding="utf-8")
-    RuntimeStateStore(root)
+    store = RuntimeStateStore(root)
     for d in (root, root / "environments", root / "evidence", root / "decisions"):
-        assert _mode(d) == 0o700, d
-    assert (root / "evidence" / "keep.txt").read_text(encoding="utf-8") == "untouched"
-
-
-@posix_only
-def test_preexisting_0644_evidence_file_is_tightened_and_content_preserved(tmp_path):
-    store = RuntimeStateStore(tmp_path / "state")
+        assert _mode(d) == 0o755, d
+    store.write("env-1", {"state": "active"})
     store.append_evidence("env-1", {"event_id": "env-1-activated"})
-    path = store.evidence_path("env-1")
-    original = path.read_bytes()
-    os.chmod(path, 0o644)
-    store.append_evidence("env-1", {"event_id": "env-1-terminated"})
-    assert _mode(path) == 0o600
-    assert path.read_bytes().startswith(original)
+    for f in (store._state_path("env-1"), store.evidence_path("env-1")):
+        os.chmod(f, 0o644)
+    assert store.read("env-1") == {"state": "active"}
+    assert store.read_evidence_snapshot("env-1") is not None
     assert store.verify_evidence_chain("env-1") is True
+    store.append_evidence("env-1", {"event_id": "env-1-terminated"})
+    for f in (store._state_path("env-1"), store.evidence_path("env-1")):
+        assert _mode(f) == 0o644
 
 
 @posix_only
-def test_preexisting_0644_evidence_file_is_tightened_on_read(tmp_path):
-    store = RuntimeStateStore(tmp_path / "state")
-    store.append_evidence("env-1", {"event_id": "env-1-activated"})
-    path = store.evidence_path("env-1")
-    original = path.read_bytes()
-    os.chmod(path, 0o644)
-    snapshot = store.read_evidence_snapshot("env-1")
-    assert snapshot is not None and snapshot.encode("utf-8") == original
-    assert _mode(path) == 0o600
+def test_new_directories_and_records_are_owner_only(tmp_path):
+    store = RuntimeStateStore(tmp_path / "fresh" / "state")
+    for name in ("", "environments", "evidence", "decisions"):
+        assert _mode(store.root / name) & 0o077 == 0
+    store.write("env-1", {"state": "active"})
+    store.append_evidence("env-1", {"event_id": "x"})
+    assert store.consume_decision("dec.1", {"k": 1})
+    for f in (store._state_path("env-1"), store.evidence_path("env-1"), store.root / "decisions" / "dec.1.json"):
+        assert _mode(f) == 0o600
 
 
 @posix_only
-def test_preexisting_0644_state_file_is_tightened_on_read(tmp_path):
+def test_read_does_not_require_service_user_ownership(tmp_path, monkeypatch):
     store = RuntimeStateStore(tmp_path / "state")
     store.write("env-1", {"state": "active"})
-    path = store._state_path("env-1")
-    original = path.read_bytes()
-    os.chmod(path, 0o644)
+    real_getuid = os.getuid
+    monkeypatch.setattr(os, "getuid", lambda: real_getuid() + 1)
     assert store.read("env-1") == {"state": "active"}
-    assert _mode(path) == 0o600
-    assert path.read_bytes() == original
 
 
 @posix_only
-def test_stale_0644_tmp_is_not_reused_and_state_write_succeeds(tmp_path):
-    store = RuntimeStateStore(tmp_path / "state")
-    tmp = store._state_path("env-1").with_suffix(".tmp")
-    tmp.write_text("STALE-CONTENT", encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    stale_inode = os.stat(tmp).st_ino
+def test_configured_symlink_root_is_supported_and_target_not_modified(tmp_path):
+    real = tmp_path / "volume"
+    real.mkdir()
+    os.chmod(real, 0o755)
+    link = tmp_path / "link"
+    os.symlink(real, link)
+    store = RuntimeStateStore(link)
     store.write("env-1", {"state": "active"})
     assert store.read("env-1") == {"state": "active"}
-    final = store._state_path("env-1")
-    assert _mode(final) == 0o600
-    assert os.stat(final).st_ino != stale_inode
-    assert not tmp.exists()
+    assert _mode(real) == 0o755
+
+
+@posix_only
+def test_unrelated_tmp_file_is_never_deleted_and_write_uses_unique_temp(tmp_path):
+    store = RuntimeStateStore(tmp_path / "state")
+    legacy_tmp = store._state_path("env-1").with_suffix(".tmp")
+    legacy_tmp.write_text("SOMEONE-ELSES", encoding="utf-8")
+    store.write("env-1", {"state": "active"})
+    store.write("env-1", {"state": "terminated"})
+    assert legacy_tmp.read_text(encoding="utf-8") == "SOMEONE-ELSES"
+    assert store.read("env-1") == {"state": "terminated"}
+    leftovers = [p.name for p in store._state_path("env-1").parent.iterdir()]
+    assert sorted(leftovers) == ["env-1.json", "env-1.tmp"]
+
+
+@posix_only
+def test_failed_write_removes_only_its_own_temp(tmp_path, monkeypatch):
+    store = RuntimeStateStore(tmp_path / "state")
+    bystander = store._state_path("env-1").parent / "bystander.tmp"
+    bystander.write_text("keep", encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        store.write("env-1", {"state": "active"})
+    monkeypatch.undo()
+    assert [p.name for p in bystander.parent.iterdir()] == ["bystander.tmp"]
 
 
 @posix_only
@@ -258,12 +281,20 @@ def test_state_write_never_follows_planted_tmp_symlink(tmp_path):
     os.symlink(outside, tmp)
     store.write("env-1", {"state": "active"})
     assert outside.read_text(encoding="utf-8") == "keep-me"
-    assert store.read("env-1") == {"state": "active"}
+    assert os.path.islink(tmp)
     assert not os.path.islink(store._state_path("env-1"))
 
 
+def test_unsupported_platform_fails_closed(tmp_path, monkeypatch):
+    from azazel_deception.runtime import state as state_module
+
+    monkeypatch.setattr(state_module, "_O_NOFOLLOW", 0)
+    with pytest.raises(OSError, match="POSIX"):
+        RuntimeStateStore(tmp_path / "state")
+
+
 @posix_only
-def test_symlinked_state_root_directory_is_refused_and_target_not_modified(tmp_path):
+def test_symlinked_state_subdirectory_is_refused_and_target_not_modified(tmp_path):
     target = tmp_path / "elsewhere"
     target.mkdir()
     os.chmod(target, 0o755)
@@ -273,18 +304,6 @@ def test_symlinked_state_root_directory_is_refused_and_target_not_modified(tmp_p
     with pytest.raises(OSError):
         RuntimeStateStore(root)
     assert _mode(target) == 0o755
-
-
-@posix_only
-def test_symlinked_root_itself_is_refused(tmp_path):
-    real = tmp_path / "real"
-    real.mkdir()
-    os.chmod(real, 0o755)
-    link = tmp_path / "link"
-    os.symlink(real, link)
-    with pytest.raises(OSError):
-        RuntimeStateStore(link)
-    assert _mode(real) == 0o755
 
 
 @posix_only
@@ -308,3 +327,215 @@ def test_symlinked_state_file_read_is_refused(tmp_path):
     os.symlink(outside, store._state_path("env-1"))
     with pytest.raises(OSError):
         store.read("env-1")
+
+
+# --- F2/F3: legacy (pre-grammar) persisted IDs: decommission only, never activate ---
+
+import json as _json
+
+
+def _persist(adapter: DockerComposeAdapter, environment_id: str, state: str = "active") -> None:
+    """Simulate a pre-upgrade deployment: write the state file the old code wrote."""
+
+    path = adapter.state.root / "environments" / f"{environment_id}.json"
+    path.write_text(
+        _json.dumps({"environment_id": environment_id, "state": state, "package_id": "p", "node_id": "n"}),
+        encoding="utf-8",
+    )
+
+
+def _termination(environment_id: str) -> dict:
+    return {"environment_id": environment_id, "decision_id": "dec-term-1"}
+
+
+class _FakeTermination:
+    def __init__(self, environment_id, decision_id="dec-term-1"):
+        self.environment_id = environment_id
+        self.decision_id = decision_id
+        self.expires_at = compose_module._utcnow() + timedelta(hours=1)
+        self.reason = "decommission"
+        self.evidence_refs = []
+
+
+@pytest.fixture
+def mocked(tmp_path, monkeypatch):
+    adapter = _adapter(tmp_path)
+    adapter.live_enabled = True
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return compose_module.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(compose_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        compose_module.EnvironmentTerminationDecision,
+        "model_validate",
+        staticmethod(lambda data: _FakeTermination(data["environment_id"], data["decision_id"])),
+    )
+    monkeypatch.setattr(adapter, "_authenticate_decision", lambda data: None)
+    return adapter, calls
+
+
+def _project_of(command):
+    return command[command.index("-p") + 1]
+
+
+def test_legacy_id_status_and_evidence_remain_readable(tmp_path):
+    adapter = _adapter(tmp_path)
+    _persist(adapter, "Env.1")
+    assert adapter.collect_status("Env.1")["state"] == "active"
+    adapter.state.append_evidence("Env.1", {"event_id": "e"})
+    assert adapter.verify_evidence("Env.1") is True
+    assert len(adapter.export_evidence("Env.1")) == 1
+
+
+def test_legacy_id_terminate_uses_old_project_and_is_edge_authorized(mocked):
+    adapter, calls = mocked
+    _persist(adapter, "Env.1")
+    result = adapter.terminate_environment("Env.1", _termination("Env.1"))
+    assert result["status"] == "terminated"
+    assert [_project_of(c) for c in calls] == ["az06-env1"]
+    assert adapter.state.read("Env.1")["state"] == "terminated"
+    # Edge authority is unchanged: the decision is single-use.
+    _persist(adapter, "Env.1")
+    with pytest.raises(RuntimeGateError):
+        adapter.terminate_environment("Env.1", _termination("Env.1"))
+    # and must name this environment
+    with pytest.raises(RuntimeGateError):
+        adapter.terminate_environment("Env.1", {"environment_id": "other", "decision_id": "d2"})
+
+
+def test_legacy_id_kill_switch_works(mocked):
+    adapter, calls = mocked
+    _persist(adapter, "Env.1")
+    result = adapter.emergency_stop("Env.1", operator="op", reason="decommission")
+    assert result["status"] == "terminated"
+    assert [_project_of(c) for c in calls] == ["az06-env1"]
+    assert adapter.state.read("Env.1")["state"] == "terminated"
+
+
+@pytest.mark.parametrize("environment_id", ["Env.1", "ENV-1", "env.1"])
+def test_legacy_id_can_never_activate_or_shadow_activate(mocked, environment_id):
+    adapter, calls = mocked
+    _persist(adapter, environment_id)
+    for call in (adapter.activate_environment, adapter.shadow_activation):
+        with pytest.raises(RuntimeGateError):
+            call(environment_id, {}, {}, {})
+    assert calls == []
+    assert adapter.state.read(environment_id)["state"] == "active"
+
+
+def test_unpersisted_legacy_shaped_id_is_refused_everywhere(mocked):
+    adapter, calls = mocked
+    for call in (
+        lambda: adapter.collect_status("Env.1"),
+        lambda: adapter.verify_evidence("Env.1"),
+        lambda: adapter.emergency_stop("Env.1", operator="op", reason="r"),
+        lambda: adapter.terminate_environment("Env.1", _termination("Env.1")),
+        lambda: adapter.reset_environment("Env.1"),
+    ):
+        with pytest.raises(RuntimeGateError):
+            call()
+    assert calls == []
+    assert not (adapter.state.root / "environments" / "Env.1.json").exists()
+
+
+@pytest.mark.parametrize(
+    "environment_id",
+    ["../escape", "a/b", "..", "Env 1", "Env\n1", "env-\u00df", ".hidden", "a..b", "X" * 129, "Env.\x00"],
+)
+def test_unsafe_ids_are_refused_even_when_a_file_could_exist(mocked, environment_id):
+    adapter, calls = mocked
+    for call in (
+        lambda: adapter.collect_status(environment_id),
+        lambda: adapter.emergency_stop(environment_id, operator="op", reason="r"),
+        lambda: adapter.terminate_environment(environment_id, _termination(environment_id)),
+        lambda: adapter.verify_evidence(environment_id),
+        lambda: adapter.export_evidence(environment_id),
+    ):
+        with pytest.raises(RuntimeGateError):
+            call()
+    assert calls == []
+
+
+def test_ambiguous_legacy_project_aliases_are_refused_for_compose(mocked):
+    adapter, calls = mocked
+    _persist(adapter, "Env.1")
+    _persist(adapter, "ENV1")  # both map to az06-env1
+    _persist(adapter, "En.v1")
+    for environment_id in ("Env.1", "ENV1", "En.v1"):
+        with pytest.raises(RuntimeGateError, match="shares a Compose project"):
+            adapter.emergency_stop(environment_id, operator="op", reason="r")
+        with pytest.raises(RuntimeGateError, match="shares a Compose project"):
+            adapter.terminate_environment(environment_id, _termination(environment_id))
+        # read-only status does not touch Compose and stays available
+        assert adapter.collect_status(environment_id)["state"] == "active"
+    assert calls == []
+    health = adapter.health()
+    statuses = {e["environment_id"]: e["id_status"] for e in health["environments"]}
+    assert statuses == {
+        "Env.1": "legacy_ambiguous",
+        "ENV1": "legacy_ambiguous",
+        "En.v1": "legacy_ambiguous",
+    }
+
+
+def test_truncated_overlong_legacy_project_is_refused(mocked):
+    adapter, calls = mocked
+    long_id = "A" + "b" * 70
+    _persist(adapter, long_id)
+    with pytest.raises(RuntimeGateError):
+        adapter.emergency_stop(long_id, operator="op", reason="r")
+    assert calls == []
+
+
+def test_new_activation_refused_when_a_legacy_id_holds_its_compose_project(mocked):
+    adapter, calls = mocked
+    _persist(adapter, "ENV-1")  # old project az06-env-1
+    for call in (adapter.activate_environment, adapter.shadow_activation):
+        with pytest.raises(RuntimeGateError, match="shares a Compose project"):
+            call("env-1", {}, {}, {})
+    assert calls == []
+
+
+def test_health_and_reconcile_expose_legacy_and_unsupported_ids(tmp_path):
+    adapter = _adapter(tmp_path)
+    _persist(adapter, "env-1")
+    _persist(adapter, "Env.2")
+    _persist(adapter, "bad id")
+    health = adapter.health()
+    by_id = {e["environment_id"]: e for e in health["environments"]}
+    assert by_id["env-1"]["id_status"] == "supported"
+    assert by_id["Env.2"] == {"environment_id": "Env.2", "state": "active", "id_status": "legacy"}
+    assert by_id["bad id"]["state"] == "unsupported_id"
+    assert by_id["bad id"]["id_status"] == "unsupported"
+    assert health["legacy_environment_ids"] == ["Env.2"]
+    assert health["unsupported_environment_ids"] == ["bad id"]
+    assert "Env.2" in health["active_environments"]
+
+    report = adapter.reconcile_with_edge(["env-1", "Env.2"])
+    assert report["local_only_active"] == []
+    assert report["legacy_environment_ids"] == ["Env.2"]
+    assert report["unsupported_environment_ids"] == ["bad id"]
+    assert report["consistent"] is False  # an unreadable-by-design ID may hide a deployment
+    assert adapter.reconcile_with_edge(["env-1"])["local_only_active"] == ["Env.2"]
+
+
+def test_legacy_id_cannot_be_cleared_or_created_through_the_store(tmp_path):
+    store = RuntimeStateStore(tmp_path)
+    with pytest.raises(EnvironmentIdError):
+        store.write("Env.1", {"state": "active"})
+    (tmp_path / "environments" / "Env.1.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(EnvironmentIdError):
+        store.clear_runtime_state("Env.1")
+    assert (tmp_path / "environments" / "Env.1.json").exists()
+
+
+@posix_only
+def test_dangling_symlink_root_is_refused(tmp_path):
+    link = tmp_path / "link"
+    os.symlink(tmp_path / "missing", link)
+    with pytest.raises(OSError):
+        RuntimeStateStore(link)
+    assert not (tmp_path / "missing").exists()

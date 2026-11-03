@@ -45,6 +45,8 @@ from azazel_deception.runtime.observation_export import export_observations
 from azazel_deception.runtime.state import (
     EnvironmentIdError,
     RuntimeStateStore,
+    is_legacy_environment_id,
+    old_project_name,
     validate_environment_id,
 )
 from azazel_deception.runtime.transport import (
@@ -180,7 +182,8 @@ class DockerComposeAdapter:
         """Reject a malformed environment_id before any state, file, or compose use.
 
         Validation is strict and never normalizes: see
-        :func:`azazel_deception.runtime.state.validate_environment_id`.
+        :func:`azazel_deception.runtime.state.validate_environment_id`. This is
+        the gate for every *new* activation; it admits no legacy ID.
         """
 
         try:
@@ -188,9 +191,51 @@ class DockerComposeAdapter:
         except EnvironmentIdError as exc:
             raise RuntimeGateError(str(exc)) from exc
 
+    def _require_serviceable_environment_id(
+        self, environment_id: str, *, compose: bool
+    ) -> None:
+        """Gate for operating on an environment that may predate the grammar.
+
+        A strict ID passes. A legacy-shaped ID passes only if its state is
+        already persisted (so it can never start anything new) and, when a
+        Compose project would be addressed, its old project name is unambiguous.
+        Anything else is refused before state or Compose is touched.
+        """
+
+        if not isinstance(environment_id, str) or not is_legacy_environment_id(environment_id):
+            self._require_environment_id(environment_id)
+            return
+        try:
+            if compose:
+                self.state.legacy_project_name(environment_id)
+            elif self.state.classify_environment_id(environment_id) == "unsupported":
+                raise EnvironmentIdError("unsupported environment_id")
+            elif not (self.state.root / "environments" / f"{environment_id}.json").is_file():
+                raise EnvironmentIdError("not a persisted legacy environment_id")
+        except EnvironmentIdError as exc:
+            raise RuntimeGateError(
+                f"legacy environment_id {environment_id!r} cannot be used: {exc}"
+            ) from exc
+
+    def _require_no_legacy_alias(self, environment_id: str) -> None:
+        """Refuse a new activation whose Compose project a legacy ID may hold."""
+
+        aliases = self.state.project_aliases(
+            f"az06-{environment_id}", excluding=environment_id
+        )
+        if aliases:
+            raise RuntimeGateError(
+                "environment_id shares a Compose project with persisted legacy "
+                f"environment(s) {sorted(aliases)}; decommission them first"
+            )
+
     def _project_name(self, environment_id: str) -> str:
-        # The validated grammar is injective and bounded to 58 characters, so
-        # "az06-<id>" is a unique project name of at most 63 characters.
+        # A strict ID is injective and bounded to 58 characters, so "az06-<id>"
+        # is a unique project name of at most 63 characters. A persisted legacy
+        # ID addresses its old project, only while that name is unambiguous.
+        if isinstance(environment_id, str) and is_legacy_environment_id(environment_id):
+            self._require_serviceable_environment_id(environment_id, compose=True)
+            return old_project_name(environment_id)
         self._require_environment_id(environment_id)
         return f"az06-{environment_id}"
 
@@ -351,6 +396,7 @@ class DockerComposeAdapter:
         decision_data: dict[str, Any],
     ) -> dict[str, Any]:
         self._require_environment_id(environment_id)
+        self._require_no_legacy_alias(environment_id)
         package = self.validate_package(raw_package)
         placement = PlacementPlan.model_validate(placement_data)
         decision = EnvironmentActivationDecision.model_validate(
@@ -436,6 +482,7 @@ class DockerComposeAdapter:
         """
 
         self._require_environment_id(environment_id)
+        self._require_no_legacy_alias(environment_id)
         package = self.validate_package(raw_package)
         placement = PlacementPlan.model_validate(placement_data)
         decision = EnvironmentActivationDecision.model_validate(
@@ -465,7 +512,7 @@ class DockerComposeAdapter:
     ) -> dict[str, Any]:
         """Validate a termination decision without executing anything."""
 
-        self._require_environment_id(environment_id)
+        self._require_serviceable_environment_id(environment_id, compose=False)
         decision = EnvironmentTerminationDecision.model_validate(
             self._decision_contract(decision_data)
         )
@@ -485,7 +532,7 @@ class DockerComposeAdapter:
         }
 
     def collect_status(self, environment_id: str) -> dict[str, Any]:
-        self._require_environment_id(environment_id)
+        self._require_serviceable_environment_id(environment_id, compose=False)
         state = self.state.read(environment_id)
         return state or {"environment_id": environment_id, "state": "absent"}
 
@@ -526,7 +573,7 @@ class DockerComposeAdapter:
         environment_id: str,
         decision_data: dict[str, Any],
     ) -> dict[str, Any]:
-        self._require_environment_id(environment_id)
+        self._require_serviceable_environment_id(environment_id, compose=True)
         decision = EnvironmentTerminationDecision.model_validate(
             self._decision_contract(decision_data)
         )
@@ -598,7 +645,7 @@ class DockerComposeAdapter:
         knows the workload may still be running.
         """
 
-        self._require_environment_id(environment_id)
+        self._require_serviceable_environment_id(environment_id, compose=True)
         if not operator or not reason:
             raise RuntimeGateError("operator kill switch requires operator and reason")
 
@@ -680,7 +727,11 @@ class DockerComposeAdapter:
             docker_available = False
 
         environments = [
-            {"environment_id": env_id, "state": self._environment_state(env_id)}
+            {
+                "environment_id": env_id,
+                "state": self._environment_state(env_id),
+                "id_status": self.state.classify_environment_id(env_id),
+            }
             for env_id in self.state.list_environments()
         ]
         return {
@@ -697,6 +748,20 @@ class DockerComposeAdapter:
             "architecture": architecture,
             "docker_available": docker_available,
             "environments": environments,
+            # Persisted IDs outside the strict grammar are reported, never
+            # hidden: "legacy" can be read/terminated but not activated;
+            # "legacy_ambiguous" shares an old Compose project with another ID;
+            # "unsupported" is not path-safe and is never opened.
+            "legacy_environment_ids": [
+                item["environment_id"]
+                for item in environments
+                if item["id_status"] in ("legacy", "legacy_ambiguous")
+            ],
+            "unsupported_environment_ids": [
+                item["environment_id"]
+                for item in environments
+                if item["id_status"] == "unsupported"
+            ],
             "active_environments": [
                 item["environment_id"] for item in environments if item["state"] == "active"
             ],
@@ -742,7 +807,7 @@ class DockerComposeAdapter:
     def verify_evidence(self, environment_id: str) -> bool:
         """Return True iff the environment's evidence hash chain is intact."""
 
-        self._require_environment_id(environment_id)
+        self._require_serviceable_environment_id(environment_id, compose=False)
         return self.state.verify_evidence_chain(environment_id)
 
     def _environment_state(self, environment_id: str) -> str | None:
@@ -753,6 +818,8 @@ class DockerComposeAdapter:
         incident; it is reported as ``"unreadable"`` instead of crashing.
         """
 
+        if self.state.classify_environment_id(environment_id) == "unsupported":
+            return "unsupported_id"
         try:
             return (self.state.read(environment_id) or {}).get("state")
         except (OSError, ValueError, json.JSONDecodeError):
@@ -784,9 +851,25 @@ class DockerComposeAdapter:
 
         local_only_active = sorted(local_active - edge_active)
         edge_only_active = sorted(edge_active - local_active)
+        # A persisted ID that is not path-safe is never opened, so its state is
+        # unknown: it may hide a running deployment, so it is never "consistent".
+        unsupported = sorted(
+            env_id
+            for env_id, state in local_states.items()
+            if state == "unsupported_id"
+        )
+        legacy = sorted(
+            env_id
+            for env_id in local_states
+            if self.state.classify_environment_id(env_id) in ("legacy", "legacy_ambiguous")
+        )
         return {
             "authority": "descriptive_only",
-            "consistent": not local_only_active and not edge_only_active,
+            "consistent": not local_only_active
+            and not edge_only_active
+            and not unsupported,
+            "legacy_environment_ids": legacy,
+            "unsupported_environment_ids": unsupported,
             "local_active": sorted(local_active),
             "edge_active": sorted(edge_active),
             "local_only_active": local_only_active,
@@ -794,7 +877,7 @@ class DockerComposeAdapter:
         }
 
     def export_evidence(self, environment_id: str) -> list[dict[str, Any]]:
-        self._require_environment_id(environment_id)
+        self._require_serviceable_environment_id(environment_id, compose=False)
         snapshot = self.state.read_evidence_snapshot(environment_id)
         if snapshot is None:
             return []

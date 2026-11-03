@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import threading
 from pathlib import Path
@@ -27,50 +28,64 @@ from typing import Any
 _ENVIRONMENT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,57}")
 ENVIRONMENT_ID_MAX_LENGTH = 58
 
-# Records are private operator/evidence material; create them owner-only.
+# New records and directories are created owner-only. Existing directories and
+# files are never re-moded: a read must not mutate permissions, and a deployment
+# that deliberately shares the state tree (group-readable evidence, a mounted
+# volume) keeps working. Tighten an existing tree yourself if you want that.
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 # O_NOFOLLOW makes open() refuse a symlink in the final path component instead
-# of following it; O_DIRECTORY makes it refuse anything that is not a directory.
+# of following it. The store is POSIX-only (Linux, macOS): without O_NOFOLLOW
+# the symlink guarantees cannot be given, so construction fails closed.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+# Environment IDs persisted before the strict grammar existed. They are only
+# ever *recognised* so already-running deployments can be read, reported,
+# terminated or killed; they can never start a new activation. Path-safe by
+# construction: one ASCII component, alphanumeric start, no "..", <= 128 chars.
+_LEGACY_ENVIRONMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_PROJECT_PREFIX = "az06-"
+_PROJECT_MAX_LENGTH = 63
 
 
-def _secure_dir(path: Path) -> None:
-    """Force an existing directory to owner-only (0700) without following symlinks.
+def _require_posix() -> None:
+    if os.name != "posix" or not _O_NOFOLLOW:
+        raise OSError(
+            "the runtime state store is supported on POSIX hosts (Linux, macOS) "
+            "only; Windows is not supported"
+        )
 
-    Opens the directory with O_NOFOLLOW|O_DIRECTORY, so a symlink planted at the
-    location raises OSError rather than re-moding its target, then fchmods the
-    descriptor. Directory contents are not changed.
+
+def _require_real_dir(path: Path) -> None:
+    """Create ``path`` owner-only if absent; refuse a symlink or non-directory.
+
+    An existing directory keeps its mode and owner. ``path`` itself must not be
+    a symlink (a planted link under the state root would redirect records).
     """
 
-    fd = os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
-        info = os.fstat(fd)
-        if info.st_uid != os.getuid():
-            raise OSError(f"refusing directory owned by another user: {path}")
-        if stat.S_IMODE(info.st_mode) != _PRIVATE_DIR_MODE:
-            os.fchmod(fd, _PRIVATE_DIR_MODE)
-    finally:
-        os.close(fd)
+        path.mkdir(mode=_PRIVATE_DIR_MODE, exist_ok=True)
+    except FileExistsError:
+        pass
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode):
+        raise OSError(f"refusing symlinked state directory: {path}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"state path is not a directory: {path}")
 
 
-def _open_private(path: Path, flags: int) -> int:
-    """Open a regular file owner-only, refusing symlinks, and tighten its mode.
+def _open_regular(path: Path, flags: int) -> int:
+    """Open a regular file, refusing symlinks; never changes mode or owner.
 
-    A pre-existing file (for example one created 0644 by another process) is
-    fchmod'ed to 0600 through the descriptor. Its contents are left untouched.
+    New files are created ``0600``. Existing files keep their permissions, so a
+    shared (group-readable) deployment stays readable and a read has no side
+    effects. Access is governed by the file's own permissions.
     """
 
     fd = os.open(path, flags | _O_NOFOLLOW, _PRIVATE_FILE_MODE)
     try:
-        mode = os.fstat(fd).st_mode
-        if not stat.S_ISREG(mode):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError(f"refusing non-regular record file: {path}")
-        if os.fstat(fd).st_uid != os.getuid():
-            raise OSError(f"refusing record file owned by another user: {path}")
-        if stat.S_IMODE(mode) != _PRIVATE_FILE_MODE:
-            os.fchmod(fd, _PRIVATE_FILE_MODE)
     except BaseException:
         os.close(fd)
         raise
@@ -78,7 +93,7 @@ def _open_private(path: Path, flags: int) -> int:
 
 
 def _read_private_text(path: Path) -> str:
-    fd = _open_private(path, os.O_RDONLY)
+    fd = _open_regular(path, os.O_RDONLY)
     with os.fdopen(fd, "r", encoding="utf-8") as handle:
         return handle.read()
 
@@ -95,8 +110,10 @@ class EnvironmentIdError(ValueError):
 def validate_environment_id(environment_id: object) -> str:
     """Return ``environment_id`` unchanged if it matches the strict grammar.
 
-    This is the single gate for every filesystem and Compose use of an
-    environment identifier. It never rewrites the value.
+    This is the single gate for every *new* filesystem and Compose use of an
+    environment identifier. It never rewrites the value. Previously persisted
+    IDs outside this grammar are handled only by the narrow legacy path
+    (:meth:`RuntimeStateStore.legacy_project_name`).
     """
 
     if not isinstance(environment_id, str) or not _ENVIRONMENT_ID_PATTERN.fullmatch(
@@ -107,6 +124,28 @@ def validate_environment_id(environment_id: object) -> str:
             "digits, '-' or '_', starting with a letter or digit"
         )
     return environment_id
+
+
+def is_legacy_environment_id(environment_id: object) -> bool:
+    """True for a path-safe ID outside the strict grammar (legacy shape only)."""
+
+    return (
+        isinstance(environment_id, str)
+        and _LEGACY_ENVIRONMENT_ID_PATTERN.fullmatch(environment_id) is not None
+        and ".." not in environment_id
+        and _ENVIRONMENT_ID_PATTERN.fullmatch(environment_id) is None
+    )
+
+
+def old_project_name(environment_id: str) -> str:
+    """The pre-grammar Compose project name (lowercased, filtered, truncated).
+
+    Used only to detect aliasing between persisted IDs and to address an
+    already-running legacy project; never for a new activation.
+    """
+
+    safe = "".join(ch for ch in environment_id.lower() if ch.isalnum() or ch in "-_")
+    return f"{_PROJECT_PREFIX}{safe}"[:_PROJECT_MAX_LENGTH] if safe else ""
 
 
 # Evidence records carry a tamper-evident hash chain. These reserved keys hold
@@ -176,23 +215,124 @@ def _fsync_dir(directory: Path) -> None:
 
 class RuntimeStateStore:
     def __init__(self, root: str | Path) -> None:
+        _require_posix()
+        # The configured root is operator-chosen: it may itself be a symlink
+        # (for example /var/lib/x -> a mounted volume) and keeps its mode.
+        # Only the directories *inside* it are checked for symlinks.
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        _secure_dir(self.root)
+        if self.root.is_symlink():
+            # A configured symlink must resolve to an existing directory the
+            # service user can fully use; it is never created or re-moded.
+            target = self.root.resolve(strict=True)
+            if not target.is_dir() or not os.access(target, os.R_OK | os.W_OK | os.X_OK):
+                raise OSError(f"state root symlink target is not a usable directory: {self.root}")
+        else:
+            self.root.mkdir(mode=_PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+        if not self.root.is_dir():
+            raise OSError(f"state root is not a directory: {self.root}")
         for name in ("environments", "evidence", "decisions"):
-            child = self.root / name
-            child.mkdir(mode=_PRIVATE_DIR_MODE, exist_ok=True)
-            _secure_dir(child)
+            _require_real_dir(self.root / name)
+
+    def _check_environment_id(self, environment_id: str) -> str:
+        """Strict IDs always pass; a legacy-shaped ID passes only if already persisted.
+
+        A legacy ID therefore can service an environment whose state file
+        exists, but can never create one: ``clear_runtime_state`` and every
+        activation entry point use :func:`validate_environment_id` directly.
+        """
+
+        if isinstance(environment_id, str) and (
+            _ENVIRONMENT_ID_PATTERN.fullmatch(environment_id)
+            or (
+                is_legacy_environment_id(environment_id)
+                and self._persisted_regular(environment_id)
+            )
+        ):
+            return environment_id
+        return validate_environment_id(environment_id)  # raises EnvironmentIdError
+
+    def _persisted_regular(self, environment_id: str) -> bool:
+        """True only for a regular, non-symlink state file with this *exact* name.
+
+        The directory listing is compared byte-for-byte so a case-insensitive
+        filesystem cannot make ``ENV-1`` resolve to ``env-1.json``.
+        """
+
+        directory = self.root / "environments"
+        name = f"{environment_id}.json"
+        try:
+            if name not in os.listdir(directory):
+                return False
+            return stat.S_ISREG(os.lstat(directory / name).st_mode)
+        except OSError:
+            return False
 
     def _state_path(self, environment_id: str) -> Path:
-        safe = validate_environment_id(environment_id)
+        safe = self._check_environment_id(environment_id)
         return self.root / "environments" / f"{safe}.json"
 
     def _decision_path(self, decision_id: str) -> Path:
+        # Decision IDs are Edge-issued and use a different grammar from
+        # environment IDs: ASCII-or-Unicode alphanumerics plus "-", "_" and "."
+        # (dots allowed, any case, unbounded length up to the filesystem limit).
         safe = "".join(ch for ch in decision_id if ch.isalnum() or ch in "-_.")
-        if not safe or safe != decision_id:
+        if not safe or safe != decision_id or safe in {".", ".."}:
             raise ValueError("decision_id contains unsupported filesystem characters")
         return self.root / "decisions" / f"{safe}.json"
+
+    def classify_environment_id(self, environment_id: str) -> str:
+        """``supported`` | ``legacy`` | ``legacy_ambiguous`` | ``unsupported``.
+
+        ``legacy`` IDs predate the strict grammar: they are path-safe and can be
+        read, terminated and killed but never activated. ``legacy_ambiguous``
+        means another persisted ID shares the old Compose project name, so no
+        Compose operation is possible for it. ``unsupported`` IDs are not
+        path-safe and are never opened.
+        """
+
+        if _ENVIRONMENT_ID_PATTERN.fullmatch(environment_id):
+            return "supported"
+        if not is_legacy_environment_id(environment_id):
+            return "unsupported"
+        try:
+            self.legacy_project_name(environment_id)
+        except EnvironmentIdError:
+            return "legacy_ambiguous"
+        return "legacy"
+
+    def project_aliases(self, project: str, *, excluding: str) -> list[str]:
+        """Persisted environment IDs, other than ``excluding``, mapping to ``project``."""
+
+        return [
+            other
+            for other in self.list_environments()
+            if other != excluding and old_project_name(other) == project
+        ]
+
+    def legacy_project_name(self, environment_id: str) -> str:
+        """Compose project of an already-persisted legacy ID, or refuse.
+
+        Refuses when the ID is not legacy-shaped, has no persisted state, the
+        old project name was truncated, or any other persisted ID resolves to
+        the same project (two environments would share one Compose project).
+        """
+
+        if not is_legacy_environment_id(environment_id) or not self._persisted_regular(
+            environment_id
+        ):
+            raise EnvironmentIdError("not a persisted legacy environment_id")
+        project = old_project_name(environment_id)
+        if len(project) >= _PROJECT_MAX_LENGTH:
+            # The old derivation truncated to 63 characters: the name may
+            # collide with a longer ID's, so it is never addressed.
+            raise EnvironmentIdError("legacy environment_id project name was truncated")
+        aliases = self.project_aliases(project, excluding=environment_id)
+        if aliases:
+            raise EnvironmentIdError(
+                "legacy environment_id shares a Compose project with another "
+                f"persisted environment: {sorted(aliases)}"
+            )
+        return project
 
     def read(self, environment_id: str) -> dict[str, Any] | None:
         path = self._state_path(environment_id)
@@ -205,16 +345,13 @@ class RuntimeStateStore:
         return data
 
     def write(self, environment_id: str, state: dict[str, Any]) -> None:
+        # A legacy ID passes only while its state file already exists.
         path = self._state_path(environment_id)
-        tmp = path.with_suffix(".tmp")
-        # Never reuse a stale or planted temp file: unlink it first (this removes
-        # a symlink itself, not its target), then create the temp exclusively,
-        # refusing symlinks, with owner-only mode.
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
         payload = json.dumps(state, sort_keys=True, indent=2) + "\n"
+        # A unique, exclusively-created temp name: concurrent writers never
+        # share a temp, and a pre-existing file or symlink is never unlinked or
+        # reused. Only this call's own temp is cleaned up on failure.
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
         # Durable atomic replace: fsync the temp file's data before the rename,
         # then fsync the parent directory so the rename itself is durable --
         # otherwise a crash can leave the state reverted/truncated (the classic
@@ -225,11 +362,18 @@ class RuntimeStateStore:
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
             _PRIVATE_FILE_MODE,
         )
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         _fsync_dir(path.parent)
 
     def consume_decision(self, decision_id: str, record: dict[str, Any]) -> bool:
@@ -300,7 +444,7 @@ class RuntimeStateStore:
             data = (json.dumps(record, sort_keys=True, default=str) + "\n").encode("utf-8")
             resolved_path = Path(os.path.realpath(path))
             created = not resolved_path.exists()
-            fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+            fd = _open_regular(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
             try:
                 offset = os.lseek(fd, 0, os.SEEK_END)
                 try:
@@ -404,10 +548,13 @@ class RuntimeStateStore:
             return False
 
     def evidence_path(self, environment_id: str) -> Path:
-        safe = validate_environment_id(environment_id)
+        safe = self._check_environment_id(environment_id)
         return self.root / "evidence" / f"{safe}.jsonl"
 
     def clear_runtime_state(self, environment_id: str) -> None:
+        # Strict IDs only: a legacy ID is decommissioned (terminated) but its
+        # record is not deleted by the runtime; the operator removes it.
+        validate_environment_id(environment_id)
         path = self._state_path(environment_id)
         if path.exists():
             path.unlink()

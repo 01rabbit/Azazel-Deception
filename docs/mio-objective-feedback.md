@@ -88,14 +88,34 @@ accepts the empty observation list. Live-claim checks in `verify_feedback_bundle
 
 ## Session and generation
 
-Runtime `environment_id` values are accepted only in the strict form
-`[a-z0-9][a-z0-9_-]{0,57}`. Values are rejected without lowercasing, filtering
-or truncation because the identifier is also used in state/evidence paths and
-as the Compose project suffix. Existing deployments using uppercase, dots,
-slashes or longer values must plan an explicit remap before updating; this
-change does not rename existing records. Runtime state directories use mode
-`0700`; state, evidence,
-decision and temporary files use `0600` and must be owned by the service user.
+Runtime `environment_id` values for new activations and writes are accepted
+only in the strict form `[a-z0-9][a-z0-9_-]{0,57}`. Values are rejected without
+lowercasing, filtering or truncation because the identifier is also used in
+state/evidence paths and as the Compose project suffix. Edge decision IDs use a
+different grammar (alphanumerics plus `-`, `_`, `.`; any case) and are stored as
+`decisions/<decision_id>.json`; the two grammars are independent.
+
+Environments persisted under older, wider IDs (for example `Env.1`) are not
+renamed. If the ID is path-safe and its exact state file exists, it can be read,
+terminated with an Edge decision, or stopped with the operator kill switch, but
+never activated. Compose operations on it are refused when its old project name
+(`az06-` + lower-cased, filtered ID, 63 characters max) was truncated or is
+shared by another persisted ID. `health()` and `reconcile_with_edge()` list such
+IDs (`legacy`, `legacy_ambiguous`) and any non-path-safe ones (`unsupported`,
+state `unsupported_id`, never opened, reconcile reports inconsistent).
+
+The state store is POSIX-only (Linux, macOS); it fails closed on other
+platforms and Windows is not supported. The runtime never changes the mode of an
+existing state root, directory or record. New directories are `0700` and new
+state, evidence, decision and temp files are `0600`; existing files keep their
+permissions and need only be readable by the service user. A configured root may
+be a symlink to an existing, accessible directory; `environments`, `evidence`
+and `decisions` inside it must not be symlinks. Decision files are created by
+the service user.
+
+The chain seal is an HMAC under a per-session key stored in the state root. It
+detects accidental or untrusted-caller edits, not a same-user attacker: anyone
+who can read the state root can recompute the seal and forge a chain.
 
 `session_ref` is `session:` plus the evidence hash of the `activated` record,
 and `generation` is that record's evidence sequence number. Observation ids are

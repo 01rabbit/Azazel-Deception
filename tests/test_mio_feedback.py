@@ -1373,6 +1373,50 @@ def test_caller_replaced_effect_is_refused_everywhere(world):
     assert refused.value.code == "evidence_tampered"
 
 
+def _refused_everywhere(world, plan, chain, forged):
+    with pytest.raises(BindingRefused) as refused:
+        _bundle(world, forged)
+    assert refused.value.code == "evidence_tampered"
+    with pytest.raises(BindingRefused) as refused:
+        bound_observer(world.adapter, forged, world.package, plan)
+    assert refused.value.code == "evidence_tampered"
+    with pytest.raises(BindingRefused) as refused:
+        reset_feedback(world.adapter, forged, now=utcnow())
+    assert refused.value.code == "evidence_tampered"
+    genuine = _bundle(world, chain)
+    with pytest.raises(BindingRefused) as refused:
+        verify_feedback_bundle(genuine, **_kw(world, forged))
+    assert refused.value.code == "evidence_tampered"
+
+
+def test_duck_typed_effect_mimicking_the_sealed_dump_is_refused(world):
+    """A stand-in whose model_dump equals the sealed value but whose attributes
+    (read by consumers) differ must not pass: only exact Fabric effects do."""
+
+    _, plan, _, _, _, chain = _bind(world)
+    sealed_dump = chain.effect.model_dump(mode="json")
+
+    class _Impostor:
+        policy_ref = "policy:attacker"
+
+        def model_dump(self, mode="python"):
+            return dict(sealed_dump)
+
+    _refused_everywhere(world, plan, chain, dataclasses.replace(chain, effect=_Impostor()))
+
+
+def test_subclassed_effect_with_overridden_dump_is_refused(world):
+    _, plan, _, _, _, chain = _bind(world)
+    sealed_dump = chain.effect.model_dump(mode="json")
+
+    class _Subclass(type(chain.effect)):
+        def model_dump(self, *args, **kwargs):
+            return dict(sealed_dump)
+
+    forged_effect = _Subclass(**{**chain.effect.model_dump(), "policy_ref": "policy:attacker"})
+    _refused_everywhere(world, plan, chain, dataclasses.replace(chain, effect=forged_effect))
+
+
 def test_hand_built_reference_chain_without_seal_is_refused(world):
     _, plan, _, _, _, chain = _bind(world)
     unsealed = dataclasses.replace(chain, seal="")

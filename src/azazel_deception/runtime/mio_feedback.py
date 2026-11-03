@@ -720,7 +720,11 @@ def bind_reference_chain(
 def _chain_seal(store: RuntimeStateStore, chain: ReferenceChain, *, create: bool) -> str:
     """HMAC of the chain's serialized fields under the per-session protected key."""
 
-    effect = chain.effect.model_dump(mode="json") if chain.effect is not None else None
+    # Exactly Fabric's DefensiveEffectRef: a subclass or duck-typed stand-in can
+    # reproduce model_dump() while its attributes (read by consumers) differ.
+    if type(chain.effect) is not DefensiveEffectRef:
+        raise BindingRefused("evidence_tampered", "reference chain effect is not a Fabric effect")
+    effect = chain.effect.model_dump(mode="json")
     payload = "mio_chain_seal_v1\n" + _canon({"chain": chain.to_dict(), "effect": effect})
     key = _untrusted_key(store, chain, create=create)
     return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
