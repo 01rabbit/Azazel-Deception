@@ -593,3 +593,153 @@ def test_mio_frame_carries_desired_observation_known_facts(world_with_objective)
     handoff = build_no_model_handoff(frame, reason="dependency_unavailable").to_dict()
     assert handoff["counts"]["known_facts"] >= len(facts)
     assert handoff["model_contribution"] == "none"
+
+
+# ====== MIO objective producer (Azazel-MIO 453b4d3, PR #37) -> Deception admit ======
+#
+# GAP, stated plainly: MIO's producer emits `MioObservationObjective` (MIO ids,
+# no Fabric types). Deception's receiver accepts a different closed shape
+# (`advisory:mio-*` refs + a Fabric observation vocabulary). Nothing in production
+# converts one to the other yet. The conversion below is a SYNTHETIC Edge/contract
+# adapter that exists only in this test; it is not production code and does not
+# claim that Edge has such a mapping. Only the generated frame/trace/objective/
+# hypothesis IDs are copied; the desired-observation vocabulary is a fixed allowlist.
+
+SYNTHETIC_ADAPTER_DESIRED_OBSERVATIONS = {
+    # MIO gap capability -> allowlisted (observation_class, surface) pairs
+    "get_deception_state": (("interaction", "service"), ("interaction", "credential_lure")),
+}
+
+
+def _synthetic_edge_adapter(objective, gap_capability: str) -> dict:
+    """Test-only mapping from one MIO objective to the Deception receiver's shape."""
+
+    desired = SYNTHETIC_ADAPTER_DESIRED_OBSERVATIONS[gap_capability]
+    return {
+        "objective_ref": "advisory:mio-objective-" + objective.objective_id[len("obs-"):],
+        "hypothesis_refs": [f"advisory:mio-hypothesis-{hid}" for hid in objective.hypothesis_ids],
+        "frame_ref": f"advisory:mio-frame-{objective.frame_id}",
+        "desired_observations": [list(item) for item in desired],
+        "authority": "advisory_only",
+        "executable": False,
+    }
+
+
+def test_mio_453b4d3_objective_producer_through_synthetic_adapter_binds_content_and_refuses_mismatches(
+    tmp_path, monkeypatch
+):
+    import dataclasses
+
+    from azazel_mio import BoundedReasoningLoop, CapabilityBroker, MioSituationFrame
+    from azazel_mio.broker import CapabilitySpec
+    from azazel_mio.contracts import ReasoningState
+    from azazel_mio.observation_objectives import OBSERVATION_PLAYBOOK_ID
+    from azazel_mio.playbook import DEFAULT_PLAYBOOKS
+    from azazel_deception.runtime.mio_feedback import (
+        AdmittedObjective, AdvisoryRetained, ObjectiveRejected, objective_digest,
+    )
+
+    world = World(tmp_path, monkeypatch)
+    now = utcnow()
+    created = now.isoformat().replace("+00:00", "Z")
+
+    # 1. A real MIO completed reasoning cycle (deterministic stub model, no LLM).
+    def model(task, prompt):
+        if task in ("generate_hypotheses", "update_hypotheses"):
+            base = {"status": "proposed", "supporting_evidence_refs": ["ev:ssh:1"],
+                    "contradicting_evidence_refs": [], "assumptions": [],
+                    "expected_observations": [], "missing_evidence": []}
+            return {"hypotheses": [
+                {**base, "hypothesis_id": "h1", "hypothesis_alternative_id": "suspicious_behavior_interaction",
+                 "statement": "Interaction may reflect prior suspicious behavior.",
+                 "falsification_conditions": ["Lifecycle evidence is absent."]},
+                {**base, "hypothesis_id": "h2", "hypothesis_alternative_id": "generic_automated_interaction",
+                 "statement": "Interaction may be generic automated traffic.",
+                 "falsification_conditions": ["Targeted pattern appears."]},
+            ]}
+        if task == "identify_evidence_gaps":
+            return {"evidence_gaps": [{
+                "gap_id": "g1", "question": "Does interaction match the pre-declared objective?",
+                "discriminates_hypothesis_ids": ["h1", "h2"],
+                "capability": "get_deception_state", "priority": 80,
+            }]}
+        return {"summary": "Observe the decoy interaction", "recommended_action": "OBSERVE",
+                "rationale": "Evidence is limited", "evidence_refs": ["ev:ssh:1"], "limitations": []}
+
+    frame = MioSituationFrame.build(
+        frame_id="frame-dec-1", trace_id="trace-dec-1", created_at=created,
+        mission="az06-conformance", current_defensive_state="OBSERVE", threat_level="UNKNOWN",
+        evidence_refs=("ev:ssh:1",),
+        deception_context={"environment_id": world.environment_id, "lifecycle_state": "unknown"},
+    )
+    broker = CapabilityBroker({"get_deception_state": CapabilitySpec(handler=lambda args: {"rows": 1})})
+    try:
+        outcome = BoundedReasoningLoop(model=model, broker=broker).run(
+            frame=frame, playbook=DEFAULT_PLAYBOOKS[OBSERVATION_PLAYBOOK_ID], cycle_id="cycle-55-mio37"
+        )
+    finally:
+        broker.close()
+    assert outcome.state is ReasoningState.COMPLETE
+    (mio_objective,) = outcome.observation_objectives
+    gap = next(g for g in outcome.evidence_gaps if g.gap_id == mio_objective.source_gap_id)
+
+    # MIO's output stays advisory and non-executable, with its closed key set.
+    mio_data = mio_objective.to_dict()
+    assert set(mio_data) == {"objective_id", "frame_id", "trace_id", "source_gap_id",
+                             "hypothesis_ids", "authority", "executable"}
+    assert mio_data["authority"] == "advisory_only" and mio_data["executable"] is False
+    with pytest.raises(ObjectiveRejected):
+        accept_mio_objective(mio_data)
+
+    # 2. Test-only synthetic adapter -> Deception's closed receiver payload.
+    payload = _synthetic_edge_adapter(mio_objective, gap.capability)
+    assert set(payload) == {"objective_ref", "hypothesis_refs", "frame_ref",
+                            "desired_observations", "authority", "executable"}
+    text = json.dumps(payload)
+    assert "Does interaction match" not in text  # MIO's question text does not cross
+    for forbidden in ("command", "route", "package", "environment", "activation", "lease", "action"):
+        assert forbidden not in payload
+
+    accepted = accept_mio_objective(payload)
+    assert accepted.advisory_refs() == (
+        payload["objective_ref"], *payload["hypothesis_refs"], payload["frame_ref"]
+    )
+    assert accepted.authority == "advisory_only"
+    assert {f.name for f in dataclasses.fields(accepted)} == {
+        "objective_ref", "hypothesis_refs", "frame_ref", "desired_observations", "authority"
+    }
+
+    # 3. Test-only Edge decision binds the generated refs and content digest.
+    digest = objective_digest(accepted)
+    digest_ref = "advisory:mio-objective-digest-" + digest.split(":", 1)[1][:32]
+    generated = [*accepted.advisory_refs(), digest_ref]
+    decision_id = world.next_id()
+    plan = world.plan(decision_id)
+    signed = world.signed_decision(decision_id, plan, evidence_refs=generated)
+    admitted = admit_objective(accepted, signed, authenticator=world.authenticator, now=utcnow())
+    assert isinstance(admitted, AdmittedObjective)
+    assert admitted.decision_id == decision_id and admitted.objective == accepted
+    assert admitted.objective_content_bound is True
+
+    # 4. Admission is refused for every ref set that is not the generated one.
+    def refused(refs, *, sign=True):
+        decision = world.signed_decision(decision_id, plan, evidence_refs=refs, sign=sign)
+        result = admit_objective(accepted, decision, authenticator=world.authenticator, now=utcnow())
+        assert isinstance(result, AdvisoryRetained), refs
+        return result.reason
+
+    for missing in accepted.advisory_refs():
+        assert refused([r for r in generated if r != missing]) == "objective_not_in_authenticated_decision"
+    # Deception's documented compatibility mode accepts reference-only binding
+    # but marks the content unbound; it must not be mistaken for full binding.
+    without_digest = world.signed_decision(decision_id, plan, evidence_refs=generated[:-1])
+    reference_only = admit_objective(accepted, without_digest,
+                                     authenticator=world.authenticator, now=utcnow())
+    assert isinstance(reference_only, AdmittedObjective)
+    assert reference_only.objective_content_bound is False
+    other_objective = "advisory:mio-objective-" + "0" * 24
+    assert refused([other_objective, *generated[1:]]) == "objective_not_in_authenticated_decision"
+    wrong_digest = "advisory:mio-objective-digest-" + "0" * 32
+    assert refused([*generated[:-1], wrong_digest]) == "objective_not_in_authenticated_decision"
+    assert refused(generated, sign=False) == "decision_unauthenticated"
+    assert admit_objective(accepted, None, authenticator=world.authenticator, now=utcnow()).reason == "no_decision"
