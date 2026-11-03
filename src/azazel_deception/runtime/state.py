@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,34 @@ def _evidence_hash(record: dict[str, Any]) -> str:
     payload = {k: v for k, v in record.items() if k != _EVIDENCE_HASH}
     encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+_EVIDENCE_LOCKS_GUARD = threading.Lock()
+_EVIDENCE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _evidence_lock(path: Path) -> threading.Lock:
+    """Return the process-wide lock serializing appends to one evidence file.
+
+    Keyed by the resolved real path so every RuntimeStateStore instance in this
+    process that targets the same file through a symlinked path shares one
+    lock. Hard links, differently-cased path aliases, and separate processes
+    are not coordinated.
+    """
+
+    key = os.path.realpath(path)
+    with _EVIDENCE_LOCKS_GUARD:
+        lock = _EVIDENCE_LOCKS.get(key)
+        if lock is None:
+            lock = _EVIDENCE_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -132,23 +161,61 @@ class RuntimeStateStore:
         Each record embeds its sequence number, the previous record's hash, and
         its own hash. Any edit, deletion, or reordering of a prior record breaks
         :meth:`verify_evidence_chain`.
+
+        Appends to one file are serialized within this process (not across
+        processes). A failed write/fsync is rolled back to the prior EOF.
         """
 
         path = self.root / "evidence" / f"{environment_id}.jsonl"
-        prev_hash = ""
-        seq = 0
-        if path.exists():
-            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-            if lines:
-                last = json.loads(lines[-1])
-                prev_hash = str(last.get(_EVIDENCE_HASH, ""))
-                seq = int(last.get(_EVIDENCE_SEQ, -1)) + 1
-        record = dict(event)
-        record[_EVIDENCE_SEQ] = seq
-        record[_EVIDENCE_PREV] = prev_hash
-        record[_EVIDENCE_HASH] = _evidence_hash(record)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        with _evidence_lock(path):
+            prev_hash = ""
+            seq = 0
+            if path.exists():
+                lines = [
+                    line
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                if lines:
+                    # Pre-existing corruption raises here; it is never repaired.
+                    last = json.loads(lines[-1])
+                    prev_hash = str(last.get(_EVIDENCE_HASH, ""))
+                    seq = int(last.get(_EVIDENCE_SEQ, -1)) + 1
+            record = dict(event)
+            record[_EVIDENCE_SEQ] = seq
+            record[_EVIDENCE_PREV] = prev_hash
+            record[_EVIDENCE_HASH] = _evidence_hash(record)
+            data = (json.dumps(record, sort_keys=True, default=str) + "\n").encode("utf-8")
+            resolved_path = Path(os.path.realpath(path))
+            created = not resolved_path.exists()
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+            try:
+                offset = os.lseek(fd, 0, os.SEEK_END)
+                try:
+                    _write_all(fd, data)
+                    os.fsync(fd)
+                except BaseException:
+                    # Roll back a partial/unsynced append to the prior EOF so no
+                    # torn last line is left. If the rollback itself fails the
+                    # original error still propagates (fail closed), but the
+                    # file may then hold a torn line and nothing durable is
+                    # claimed; verify_evidence_chain would report it.
+                    try:
+                        os.ftruncate(fd, offset)
+                        os.fsync(fd)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                try:
+                    os.close(fd)
+                finally:
+                    if created:
+                        # Sync even if the first append failed and rolled back:
+                        # an empty file remains, so later appends must not be
+                        # the first attempt to persist its directory entry.
+                        # realpath also handles an evidence-file symlink target.
+                        _fsync_dir(resolved_path.parent)
         return path
 
     def evidence_head_hash(self, environment_id: str) -> str | None:
@@ -179,28 +246,34 @@ class RuntimeStateStore:
         """
 
         path = self.evidence_path(environment_id)
-        if not path.exists():
-            return True
-        prev_hash = ""
-        expected_seq = 0
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                return False
-            if not isinstance(record, dict):
-                return False
-            if int(record.get(_EVIDENCE_SEQ, -1)) != expected_seq:
-                return False
-            if str(record.get(_EVIDENCE_PREV, "")) != prev_hash:
-                return False
-            if _evidence_hash(record) != record.get(_EVIDENCE_HASH):
-                return False
-            prev_hash = str(record[_EVIDENCE_HASH])
-            expected_seq += 1
-        return True
+        try:
+            with _evidence_lock(path):
+                if not path.exists():
+                    return True
+                prev_hash = ""
+                expected_seq = 0
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        return False
+                    if not isinstance(record, dict):
+                        return False
+                    if int(record.get(_EVIDENCE_SEQ, -1)) != expected_seq:
+                        return False
+                    if str(record.get(_EVIDENCE_PREV, "")) != prev_hash:
+                        return False
+                    if _evidence_hash(record) != record.get(_EVIDENCE_HASH):
+                        return False
+                    prev_hash = str(record[_EVIDENCE_HASH])
+                    expected_seq += 1
+                return True
+        except (OSError, TypeError, ValueError, OverflowError, UnicodeDecodeError):
+            # Unreadable files, malformed JSON value types, and invalid UTF-8
+            # cannot prove chain integrity, so report a fail-closed result.
+            return False
 
     def evidence_path(self, environment_id: str) -> Path:
         return self.root / "evidence" / f"{environment_id}.jsonl"

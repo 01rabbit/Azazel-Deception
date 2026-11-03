@@ -16,9 +16,9 @@ Transport security model:
   identity must match this node.
 * Envelopes carry `issued_at` freshness (`heartbeat_is_fresh`) and a one-shot
   `request_id` anti-replay ledger, so stale or replayed envelopes fail closed.
-* All rejections are deterministic reason codes; every request/response pair
-  is appended to the tamper-evident evidence log for Edge audit and Knowledge
-  ingest.
+* All rejections are deterministic reason codes; an append-only evidence
+  record is attempted for each request. A failed append is reported explicitly
+  and is never claimed to have been persisted.
 
 The `heartbeat` and `reconcile` actions extend the same boundary to a live
 liveness/state-reconciliation loop: Edge can poll this node for a small health
@@ -35,6 +35,8 @@ endpoint being reachable.
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import threading
 from datetime import datetime, timezone
@@ -57,6 +59,8 @@ REQUEST_SCHEMA = "az06-shadow-request/v0.1"
 RESPONSE_SCHEMA = "az06-shadow-response/v0.1"
 ENVELOPE_SIGNATURE_FIELD = "signature"
 AUDIT_ENVIRONMENT_ID = "shadow-audit"
+MAX_REQUEST_BODY_BYTES = 1_048_576
+_MAX_AUDIT_LABEL_CHARS = 256
 
 _ACTIONS = frozenset(
     {
@@ -69,10 +73,63 @@ _ACTIONS = frozenset(
         "reconcile",
     }
 )
+_MUTATING_ACTIONS = frozenset({"activate", "terminate"})
+_MUTATING_REQUIRED_FIELDS = {
+    "activate": ("environment_id", "package", "placement", "decision"),
+    "terminate": ("environment_id", "decision"),
+}
+_MAX_ECHO_REQUEST_ID_CHARS = 1024
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _echo_request_id(envelope: Any) -> str:
+    """Return a printable request_id for responses and audit, never raising.
+
+    Valid non-empty string IDs up to the response cap are echoed verbatim;
+    longer IDs are represented by a SHA-256 reference. Absent/empty IDs keep
+    the legacy ``missing`` placeholder; any other type is reported as
+    ``unparsable`` so a hostile payload cannot shape or break the signed
+    response.
+    """
+
+    if not isinstance(envelope, dict):
+        return "unparsable"
+    value = envelope.get("request_id")
+    if value is None or value == "":
+        return "missing"
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            # Lone surrogates cannot be signed (canonical bytes are UTF-8).
+            return "unparsable"
+        if len(value) > _MAX_ECHO_REQUEST_ID_CHARS:
+            return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return value
+    return "unparsable"
+
+
+def _ledger_key(request_id: str) -> str | None:
+    """Derive the SHA-256 fallback one-shot ledger key for a request_id.
+
+    This is only used when the raw ``shadow-request-<request_id>`` marker is
+    rejected by state-store path validation (unsafe filesystem characters) or
+    is too long for the filesystem (ENAMETOOLONG). Older builds always wrote
+    the raw marker, so they could never have written such an ID; the SHA key therefore cannot be missed by a rollback. Returns
+    ``None`` for strings that cannot be encoded as UTF-8 (lone surrogates),
+    which the caller rejects as malformed.
+    """
+
+    try:
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        return None
+    # "_" after "request" can never be produced by the raw marker
+    # ("shadow-request-" + id), so this namespace cannot collide with a raw ID.
+    return f"shadow-request_sha256-{digest}"
 
 
 class ShadowReplayService:
@@ -154,17 +211,30 @@ class ShadowReplayService:
         )
 
     def _audit(self, envelope: Any, response: dict[str, Any]) -> None:
+        def bounded_label(value: Any) -> str:
+            text = str(value)
+            if len(text) > _MAX_AUDIT_LABEL_CHARS:
+                suffix = "[truncated]"
+                return text[: _MAX_AUDIT_LABEL_CHARS - len(suffix)] + suffix
+            return text
+
+        def bounded_request_id(value: Any) -> str:
+            text = str(value)
+            if len(text) <= _MAX_AUDIT_LABEL_CHARS:
+                return text
+            return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
         summary = {
             "schema_version": "az06-shadow-audit/v0.1",
             "observed_at": _utcnow().isoformat(),
-            "request_id": str(response.get("request_id")),
+            "request_id": bounded_request_id(response.get("request_id")),
             "edge_node_id": (
-                str(envelope.get("edge_node_id"))
+                bounded_label(envelope.get("edge_node_id"))
                 if isinstance(envelope, dict)
                 else "unparsable"
             ),
             "action": (
-                str(envelope.get("action")) if isinstance(envelope, dict) else "unparsable"
+                bounded_label(envelope.get("action")) if isinstance(envelope, dict) else "unparsable"
             ),
             "status": response.get("status"),
             "reason_codes": response.get("reason_codes"),
@@ -174,14 +244,89 @@ class ShadowReplayService:
     # -- request handling ----------------------------------------------------
 
     def handle(self, envelope: Any) -> dict[str, Any]:
-        response = self._handle_inner(envelope)
-        self._audit(envelope, response)
+        action_state = {"started": False, "completed": False, "result": None}
+        try:
+            response = self._handle_inner(envelope, action_state=action_state)
+        except Exception:  # fail closed; details stay out of the response
+            action_may_have_run = action_state["started"]
+            response = self._response(
+                _echo_request_id(envelope),
+                "rejected",
+                ["internal_error", "shadow_action_may_have_run"]
+                if action_may_have_run
+                else ["internal_error"],
+                {"runtime_action_state": "unknown"} if action_may_have_run else None,
+            )
+        try:
+            self._audit(envelope, response)
+        except Exception:
+            # Not persisted, so do not claim otherwise and do not retry here.
+            # A mutating adapter call may already have changed runtime state;
+            # preserve that uncertainty instead of implying no action occurred.
+            if action_state["started"]:
+                result = {
+                    "runtime_action_state": (
+                        "completed_unrecorded"
+                        if action_state["completed"]
+                        else "unknown"
+                    )
+                }
+                if action_state["completed"] and isinstance(action_state["result"], dict):
+                    result["action_result"] = action_state["result"]
+                return self._response(
+                    _echo_request_id(envelope),
+                    "rejected",
+                    ["audit_write_failed", "shadow_action_may_have_run"],
+                    result,
+                )
+            return self._response(
+                _echo_request_id(envelope), "rejected", ["audit_write_failed"]
+            )
         return response
 
-    def _handle_inner(self, envelope: Any) -> dict[str, Any]:
+    def _consume_request_marker(
+        self, request_id: str, fallback_key: str, envelope: dict[str, Any]
+    ) -> bool:
+        """Atomically consume the one-shot marker for a request_id.
+
+        The primary key is the raw ``shadow-request-<request_id>`` marker, the
+        same key older builds wrote, so a rollback sees and honours markers
+        written by this build. ``consume_decision`` is atomic on that key, so
+        old and new markers are checked without a separate pre-check. Only a
+        ``ValueError`` from path validation (unsafe filesystem characters) or an
+        ``OSError`` with ``ENAMETOOLONG`` falls back to ``fallback_key``, the
+        SHA-256 key. Other ``OSError`` values propagate (fail closed).
+        """
+
+        raw_key = f"shadow-request-{request_id}"
+
+        def _record(key: str) -> dict[str, Any]:
+            return {
+                "decision_id": key,
+                "kind": "shadow_request",
+                "edge_node_id": str(envelope.get("edge_node_id")),
+                "consumed_at": _utcnow().isoformat(),
+            }
+
+        try:
+            return self.state.consume_decision(raw_key, _record(raw_key))
+        except ValueError:
+            # Unsafe path characters: old builds could not have written this ID.
+            pass
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
+        return self.state.consume_decision(fallback_key, _record(fallback_key))
+
+    def _handle_inner(
+        self,
+        envelope: Any,
+        *,
+        action_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(envelope, dict):
             return self._response("unparsable", "rejected", ["malformed_envelope"])
-        request_id = str(envelope.get("request_id") or "missing")
+        request_id = _echo_request_id(envelope)
         if envelope.get("schema_version") != REQUEST_SCHEMA:
             return self._response(request_id, "rejected", ["unsupported_schema"])
         if not self._envelope_authenticator(envelope):
@@ -197,15 +342,24 @@ class ShadowReplayService:
         action = envelope.get("action")
         if action not in _ACTIONS:
             return self._response(request_id, "rejected", ["unsupported_action"])
-        if envelope.get("request_id") in (None, "") or not self.state.consume_decision(
-            f"shadow-request-{request_id}",
-            {
-                "decision_id": f"shadow-request-{request_id}",
-                "kind": "shadow_request",
-                "edge_node_id": str(envelope.get("edge_node_id")),
-                "consumed_at": _utcnow().isoformat(),
-            },
-        ):
+        raw_request_id = envelope.get("request_id")
+        fallback_key = (
+            _ledger_key(raw_request_id)
+            if isinstance(raw_request_id, str) and raw_request_id
+            else None
+        )
+        if fallback_key is None:
+            return self._response(request_id, "rejected", ["malformed_envelope"])
+        # Never burn a one-shot request marker or start a runtime action when
+        # the append-only audit chain is already corrupt/unreadable. The
+        # outer audit attempt will fail closed and return a signed response.
+        try:
+            audit_chain_healthy = self.state.verify_evidence_chain(AUDIT_ENVIRONMENT_ID)
+        except Exception:
+            audit_chain_healthy = False
+        if not audit_chain_healthy:
+            return self._response(request_id, "rejected", ["audit_chain_unavailable"])
+        if not self._consume_request_marker(raw_request_id, fallback_key, envelope):
             return self._response(request_id, "rejected", ["replayed_request"])
 
         payload = envelope.get("payload")
@@ -214,9 +368,32 @@ class ShadowReplayService:
         if not isinstance(payload, dict):
             return self._response(request_id, "rejected", ["malformed_payload"])
         handler = getattr(self, f"_action_{action}")
+        if action in _MUTATING_ACTIONS and action_state is not None:
+            missing = next(
+                (field for field in _MUTATING_REQUIRED_FIELDS[action] if field not in payload),
+                None,
+            )
+            if missing is not None:
+                return self._response(
+                    request_id,
+                    "rejected",
+                    ["shadow_validation_failed", "ValueError"],
+                    {"detail": f"{action} request requires {missing}"},
+                )
+            action_state["started"] = True
         try:
             result = handler(payload, envelope)
+            if action in _MUTATING_ACTIONS and action_state is not None:
+                action_state["completed"] = True
+                action_state["result"] = result
         except (RuntimeGateError, PackageValidationError, ValueError) as exc:
+            if action in _MUTATING_ACTIONS:
+                return self._response(
+                    request_id,
+                    "rejected",
+                    ["shadow_validation_failed", exc.__class__.__name__, "shadow_action_may_have_run"],
+                    {"runtime_action_state": "unknown"},
+                )
             return self._response(
                 request_id,
                 "rejected",
@@ -408,15 +585,25 @@ class _ShadowRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length > 0 else b""
-            envelope = json.loads(body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            if length > MAX_REQUEST_BODY_BYTES:
+                # Do not read an attacker-sized body into memory or leave its
+                # bytes to be parsed as another request on a keep-alive socket.
+                self.close_connection = True
+                envelope = None
+            else:
+                body = self.rfile.read(length) if length > 0 else b""
+                envelope = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # Unparsable body (incl. pathologically nested JSON): let handle()
+            # reject it as a malformed envelope, signed and audited.
             envelope = None
         response = self.service.handle(envelope)
         encoded = json.dumps(response).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(encoded)
 
