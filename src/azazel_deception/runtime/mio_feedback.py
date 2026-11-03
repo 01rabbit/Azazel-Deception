@@ -46,9 +46,12 @@ import math
 import os
 import re
 import secrets
+import stat
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal, get_args
 
 from azazel_fabric.deception_contracts import (
@@ -155,11 +158,11 @@ MAX_BUNDLE_BYTES = 2_500_000
 MAX_EXTRA_EVIDENCE_REFS = 16
 MAX_METADATA_KEYS = 16
 #: The only metadata keys a caller may set. Anything else is attacker-shaped
-#: until proven otherwise. ``outside_lease`` and the untrusted keys are set here.
+#: until proven otherwise. ``outside_lease`` and the untrusted keys are set by this module only.
 ALLOWED_METADATA_KEYS = frozenset(
     {
         "protocol", "port", "service_kind", "request_count", "byte_count",
-        "duration_ms", "status_class", "sensor_id", "outside_lease",
+        "duration_ms", "status_class", "sensor_id",
     }
 )
 _METADATA_STRING = re.compile(r"[A-Za-z0-9._:-]{1,64}")
@@ -602,9 +605,10 @@ def bind_reference_chain(
     """Tie objective, decision, effect and the activated session together.
 
     Precondition: the caller already ran ``adapter.activate_environment``.
-    Nothing here activates or consumes anything. The one thing it records is
-    which effect this decision was bound to (``mio_bound_effect_ref`` in the
-    runtime state), so that a decision binds one effect only.
+    Nothing here activates or consumes anything, and the runtime state is never
+    written. The one thing it records is which effect this decision was bound
+    to, as an exclusively-created file under ``mio_bindings/``, so that a
+    decision binds one effect only even when two binds race.
     """
 
     now = _aware(now)
@@ -647,7 +651,7 @@ def bind_reference_chain(
         raise BindingRefused(
             "session_reset" if resets else "session_mismatch", "no runtime state for environment"
         )
-    if str(state.get("environment_id") or environment_id) != environment_id:
+    if state.get("environment_id") != environment_id:
         raise BindingRefused("environment_mismatch", "runtime state belongs to another environment")
     if state.get("state") not in _LIVE_STATES:
         raise BindingRefused("session_mismatch", "environment is not active")
@@ -674,13 +678,7 @@ def bind_reference_chain(
     effect = _coerce_effect(defensive_effect_ref)
     if effect.decision_ref != f"decision:{decision.decision_id}":
         raise BindingRefused("effect_decision_mismatch", "effect names another decision")
-    already = state.get("mio_bound_effect_ref")
-    if already is not None and already != effect.effect_id:
-        raise BindingRefused("effect_rejected", "this decision is already bound to another effect")
-    if already is None:
-        state = dict(state)
-        state["mio_bound_effect_ref"] = effect.effect_id
-        adapter.state.write(environment_id, state)
+    _bind_effect_once(adapter.state, decision.decision_id, effect.effect_id)
 
     return ReferenceChain(
         objective_ref=admitted.objective.objective_ref,
@@ -704,8 +702,63 @@ def bind_reference_chain(
     )
 
 
+def _private_dir(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise BindingRefused("evidence_tampered", "private directory has unexpected ownership or mode")
+
+
+def _create_once(path: Path, data: bytes) -> bool:
+    """Atomically create ``path`` (0600) with complete content; False if it exists."""
+
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _read_private(path: Path) -> bytes:
+    info = os.lstat(path)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise BindingRefused("evidence_tampered", "private file has unexpected type, owner or mode")
+    return path.read_bytes()
+
+
+def _bind_effect_once(store: RuntimeStateStore, decision_id: str, effect_id: str) -> None:
+    directory = store.root / "mio_bindings"
+    _private_dir(directory)
+    path = directory / hashlib.sha256(decision_id.encode("utf-8")).hexdigest()[:32]
+    if _create_once(path, effect_id.encode("utf-8")):
+        return
+    if _read_private(path).decode("utf-8", errors="replace") != effect_id:
+        raise BindingRefused("effect_rejected", "this decision is already bound to another effect")
+
+
 def _check_state_identity(state: Mapping[str, Any], chain: ReferenceChain) -> None:
-    if str(state.get("environment_id") or chain.environment_id) != chain.environment_id:
+    if state.get("environment_id") != chain.environment_id:
         raise BindingRefused("environment_mismatch", "runtime state is for another environment")
     if str(state.get("decision_id") or "") != chain.decision_id:
         raise BindingRefused("decision_mismatch", "runtime state is for another decision")
@@ -751,20 +804,27 @@ def _check_live_session(adapter: Any, chain: ReferenceChain) -> Mapping[str, Any
 
 
 def _untrusted_key(store: RuntimeStateStore, chain: ReferenceChain) -> bytes:
-    """Per-session random key, kept beside (not in) the evidence chain."""
+    """Per-session random key, kept beside (not in) the evidence chain.
+
+    Created atomically with complete content, read back only if it is a regular
+    0600 file of ours holding exactly 32 bytes. It is never discarded on reset:
+    digests recorded earlier must stay checkable.
+    """
 
     if not _SAFE_ENV.fullmatch(chain.environment_id):
         raise ValueError("environment id is not usable as a key file name")
     directory = store.root / "mio_feedback_keys"
-    directory.mkdir(parents=True, exist_ok=True)
+    _private_dir(directory)
     path = directory / f"{chain.environment_id}.s{chain.generation}.key"
+    _create_once(path, secrets.token_hex(32).encode("ascii"))
+    raw = _read_private(path).strip()
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return bytes.fromhex(path.read_text(encoding="utf-8").strip())
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(secrets.token_hex(32))
-    return bytes.fromhex(path.read_text(encoding="utf-8").strip())
+        key = bytes.fromhex(raw.decode("ascii"))
+    except (ValueError, UnicodeDecodeError):
+        raise BindingRefused("evidence_tampered", "session key is malformed") from None
+    if len(key) != 32:
+        raise BindingRefused("evidence_tampered", "session key has the wrong length")
+    return key
 
 
 def _clean_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -805,6 +865,10 @@ def _package_lure_ids(package: Any) -> frozenset[str]:
     return frozenset(ids)
 
 
+_RECORD_LOCKS_GUARD = threading.Lock()
+_RECORD_LOCKS: dict[str, threading.Lock] = {}
+
+
 class BoundObserver:
     """Records interactions through the existing observer, stamped with the chain."""
 
@@ -829,6 +893,11 @@ class BoundObserver:
         records = _evidence(self._adapter, self._chain.environment_id)
         nxt = (_seq(records[-1]) + 1) if records else 0
         return f"{self._chain.environment_id}-s{self._chain.generation}-obs-{nxt:06d}"
+
+    def _locked(self) -> Any:
+        key = os.path.realpath(self._adapter.state.evidence_path(self._chain.environment_id))
+        with _RECORD_LOCKS_GUARD:
+            return _RECORD_LOCKS.setdefault(key, threading.Lock())
 
     def record(
         self,
@@ -884,19 +953,22 @@ class BoundObserver:
             raise ValueError("evidence_refs must be at most 16 short opaque references")
         assert_no_secret_material(extra, field="evidence_refs")
         refs = list(dict.fromkeys([*extra, *self._chain.evidence_refs()]))
-        return self._observer.record(
-            observation_class=observation_class,
-            surface=surface,
-            reaction_kind=reaction_kind,
-            lure_id=lure_id,
-            first_contact_latency_ms=first_contact_latency_ms,
-            dwell_ms=dwell_ms,
-            attempt_count=attempt_count,
-            confounder_tags=confounder_tags,
-            evidence_refs=refs,
-            metadata=meta,
-            observed_at=when,
-        )
+        # Numbering and appending happen under one lock, so concurrent records
+        # of this process cannot draw the same evidence sequence.
+        with self._locked():
+            return self._observer.record(
+                observation_class=observation_class,
+                surface=surface,
+                reaction_kind=reaction_kind,
+                lure_id=lure_id,
+                first_contact_latency_ms=first_contact_latency_ms,
+                dwell_ms=dwell_ms,
+                attempt_count=attempt_count,
+                confounder_tags=confounder_tags,
+                evidence_refs=refs,
+                metadata=meta,
+                observed_at=when,
+            )
 
 
 def bound_observer(
@@ -1081,17 +1153,26 @@ def _objective_coverage(
     entries = []
     for hypothesis in objective.hypothesis_refs:
         for observation_class, surface in objective.desired_observations:
-            ids = [
-                i["observation_id"]
+            matching = [
+                i
                 for i in interactions
                 if i["observation_class"] == observation_class and i["surface"] == surface
             ]
-            if ids:
+            ids = [i["observation_id"] for i in matching]
+            confounded = [i for i in matching if i.get("confounder_tags")]
+            outside_lease = [i for i in matching if i.get("metadata", {}).get("outside_lease") is True]
+            clean = [i for i in matching if i not in confounded and i not in outside_lease]
+            if clean:
                 status = "observed"
+            elif matching:
+                # Contact happened, but never in a form that can be read as the
+                # desired observation: noise-tagged, or outside the lease.
+                inside = [i for i in matching if i not in outside_lease]
+                status = "observed_confounded_only" if inside else "observed_outside_lease_only"
             else:
                 name = surface_telemetry.get(surface)
                 if name is None:
-                    status = "undeterminable_telemetry_gap:unmapped_surface"
+                    status = f"undeterminable_unmapped_surface:{surface}"
                 elif name in observed:
                     status = "not_observed_with_coverage"
                 else:
@@ -1102,6 +1183,9 @@ def _objective_coverage(
                     "observation_class": observation_class,
                     "surface": surface,
                     "status": status,
+                    "observed_count": len(matching),
+                    "confounded_count": len(confounded),
+                    "outside_lease_count": len(outside_lease),
                     "observation_ids": ids[:8],
                     "truncated": len(ids) > 8,
                 }
@@ -1111,7 +1195,19 @@ def _objective_coverage(
     section["frame_ref"] = objective.frame_ref
     section["desired_observations"] = [list(item) for item in objective.desired_observations]
     section["entries"] = entries
+    section["limitations"] = ["desired_observations_not_hypothesis_specific"]
     return section
+
+
+def _declared_mac(store: RuntimeStateStore, chain: ReferenceChain, declared: Mapping[str, Any]) -> str:
+    """HMAC over the caller's declarations, under the session key.
+
+    It detects a declaration rewritten after build. It cannot say the
+    declaration was true: that was the build caller's word.
+    """
+
+    canonical = json.dumps(declared, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_untrusted_key(store, chain), canonical, hashlib.sha256).hexdigest()
 
 
 def _derive(
@@ -1227,6 +1323,8 @@ def _derive(
         limitations.append("objective_content_not_bound")
     if objective is None:
         limitations.append("objective_not_supplied")
+    else:
+        limitations.append("desired_observations_not_hypothesis_specific")
     if not interactions:
         limitations.append("no_interaction_observed_is_not_evidence_of_safety")
     limitations.extend(f"telemetry_gap:{gap}" for gap in gaps)
@@ -1333,6 +1431,13 @@ def _derive(
     except ValueError:
         raise BindingRefused("effect_decision_mismatch", "outcome chain is inconsistent") from None
 
+    caller_declared = {
+        "expected_telemetry": expected,
+        "observed_telemetry": observed,
+        "isolation_assertion_refs": list(assertions),
+        "active_surface_refs": list(surfaces),
+        "surface_telemetry": dict(sorted(surface_telemetry.items())),
+    }
     bundle: dict[str, Any] = {
         "schema": BUNDLE_SCHEMA,
         "contract_status": "local_container_not_a_contract",
@@ -1347,13 +1452,8 @@ def _derive(
             "activated_evidence_seq": chain.generation,
             "activated_evidence_hash": str(activated.get("_evidence_hash")),
         },
-        "caller_declared": {
-            "expected_telemetry": expected,
-            "observed_telemetry": observed,
-            "isolation_assertion_refs": list(assertions),
-            "active_surface_refs": list(surfaces),
-            "surface_telemetry": dict(sorted(surface_telemetry.items())),
-        },
+        "caller_declared": caller_declared,
+        "caller_declared_mac": _declared_mac(store, chain, caller_declared),
         "runtime_materialization": {
             "environment_state": env_state,
             "effect_observation": effect_observation.model_dump(mode="json"),
@@ -1383,6 +1483,7 @@ def _derive(
             "age_seconds": age,
             "max_age_seconds": float(max_age),
             "fresh": fresh,
+            "anchor_kind": "last_interaction" if interactions else "activation",
         },
         "isolation": {
             "status": isolation_status,
@@ -1520,8 +1621,14 @@ def verify_feedback_bundle(
     now: datetime,
     max_age: float,
     mechanism: Any = None,
+    allow_historical: bool = False,
 ) -> None:
     """Raise :class:`BindingRefused` unless the bundle is what the evidence says.
+
+    The bundle's head must be the chain's current head: evidence appended after
+    the bundle was built (a drift, a new contact) makes it ``stale``. For audit
+    only, ``allow_historical=True`` accepts an earlier head, but never for a
+    bundle that claims a live effect. The consumers cannot ask for it.
 
     Nothing the bundle declares about itself is trusted. The bundle is rebuilt
     from the evidence chain (cut at the head it names), the chain, and the
@@ -1565,7 +1672,19 @@ def verify_feedback_bundle(
         if head_record is None:
             raise BindingRefused("evidence_tampered", "bundle evidence head is not in the chain")
 
+        current_head = store.evidence_head_hash(env)
+        if head != current_head:
+            if not allow_historical:
+                raise BindingRefused("stale", "evidence was appended after this bundle was built")
+            if bundle["runtime_materialization"]["effect_observation"]["status"] in ("started", "active"):
+                raise BindingRefused("stale", "a historical bundle may not claim a live effect")
+
         caller = bundle["caller_declared"]
+        mac = bundle.get("caller_declared_mac")
+        if not isinstance(mac, str) or not hmac.compare_digest(
+            mac, _declared_mac(store, expected_chain, caller)
+        ):
+            raise BindingRefused("evidence_tampered", "caller_declared was changed after build")
         coverage = bundle["objective_coverage"]
         objective = None
         if coverage.get("status") == "evaluated":
@@ -1730,12 +1849,24 @@ def mio_frame_inputs(
     _verified(bundle, expected_chain, state, now, max_age, mechanism)
     limitations = set(bundle["limitations"])
     unknowns: list[str] = []
+    known_facts: list[str] = []
     for gap in bundle["outcome"]["telemetry_gaps"]:
         unknowns.append(f"DECEPTION_TELEMETRY_GAP_{_marker(gap)}")
     for entry in bundle["objective_coverage"].get("entries", []):
         status = entry["status"]
+        suffix = f"{_marker(entry['observation_class'])}_{_marker(entry['surface'])}"
         if status.startswith("undeterminable_telemetry_gap:"):
             unknowns.append(f"DECEPTION_TELEMETRY_GAP_{_marker(status.split(':', 1)[1])}")
+        elif status.startswith("undeterminable_unmapped_surface:"):
+            unknowns.append(f"DECEPTION_UNMAPPED_SURFACE_{_marker(status.split(':', 1)[1])}")
+        elif status == "observed":
+            known_facts.append(f"DECEPTION_DESIRED_OBSERVED_{suffix}")
+        elif status == "not_observed_with_coverage":
+            known_facts.append(f"DECEPTION_DESIRED_NOT_OBSERVED_WITH_COVERAGE_{suffix}")
+        elif status == "observed_confounded_only":
+            unknowns.append(f"DECEPTION_DESIRED_OBSERVED_CONFOUNDED_ONLY_{suffix}")
+        elif status == "observed_outside_lease_only":
+            unknowns.append(f"DECEPTION_DESIRED_OBSERVED_OUTSIDE_LEASE_ONLY_{suffix}")
     if "stale" in limitations:
         unknowns.append("DECEPTION_EVIDENCE_STALE")
     if bundle["isolation"]["status"] == "unknown":
@@ -1752,6 +1883,7 @@ def mio_frame_inputs(
     return {
         "deception_context": _context(bundle),
         "deception_status": "available",
+        "known_facts": list(dict.fromkeys(known_facts)),
         "unknowns": unknowns,
         "explicit_unknowns": list(unknowns),
         "freshness_seconds": int(bundle["freshness"]["age_seconds"]),

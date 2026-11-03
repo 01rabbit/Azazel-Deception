@@ -468,3 +468,50 @@ def test_objective_coverage_and_frame_inputs(lifecycle):
     )
     assert "DECEPTION_TELEMETRY_GAP_NETWORK" in inputs["unknowns"]
     assert inputs["deception_context"]["lifecycle_state"] == "active"
+
+
+# --- regressions for the second review (R1, R2) -----------------------------
+
+
+def test_r1_a_bundle_older_than_the_chain_head_is_stale(lifecycle):
+    from azazel_deception.runtime.isolation_drift import IsolationDriftObserver
+
+    lc = lifecycle
+    _, chain = _activate(lc)
+    now, bundle = _built(lc, chain)
+    _verify(lc, chain, bundle, now)
+    IsolationDriftObserver(
+        lc["adapter"].state, environment_id=ENV, package_id=chain.package_id, node_id=chain.node_id
+    ).observe({"route_to_protected": ["10.0.0.0/8"], "published_port": [], "capability_regranted": []})
+    later = now + timedelta(seconds=5)
+    with pytest.raises(BindingRefused) as info:
+        _verify(lc, chain, bundle, later)
+    assert info.value.code == "stale"
+    with pytest.raises(BindingRefused):
+        mio_deception_context(
+            bundle, expected_chain=chain, state=lc["adapter"].state, now=later, max_age=300
+        )
+    # audit mode never accepts a bundle that claims a live effect
+    with pytest.raises(BindingRefused):
+        _verify(lc, chain, bundle, later, allow_historical=True)
+
+
+def test_r2_bind_does_not_write_state_and_binds_one_effect(lifecycle):
+    lc = lifecycle
+    admitted, chain = _activate(lc)
+    state = lc["adapter"].state.read(ENV)
+    assert "mio_bound_effect_ref" not in state
+    again = bind_reference_chain(
+        admitted=admitted, signed_activation_decision=lc["signed"],
+        defensive_effect_ref=_effect(now=lc["now"]), adapter=lc["adapter"],
+        environment_id=ENV, now=lc["now"],
+    )
+    assert again.effect_ref == chain.effect_ref
+    other = _effect(now=lc["now"])
+    other["effect_id"] = "effect:e2"
+    with pytest.raises(BindingRefused) as info:
+        bind_reference_chain(
+            admitted=admitted, signed_activation_decision=lc["signed"],
+            defensive_effect_ref=other, adapter=lc["adapter"], environment_id=ENV, now=lc["now"],
+        )
+    assert info.value.code == "effect_rejected"
