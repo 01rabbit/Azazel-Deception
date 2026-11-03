@@ -632,7 +632,14 @@ def bind_reference_chain(
     digest = objective_digest(admitted.objective)
     if admitted.objective_digest and admitted.objective_digest != digest:
         raise BindingRefused("decision_mismatch", "objective content changed after admission")
-    if admitted.objective_content_bound and _digest_ref(digest) not in decision.evidence_refs:
+    # Binding is derived from the authenticated decision, never from the
+    # caller-supplied AdmittedObjective flag: a directly constructed admission
+    # cannot claim content binding the signed decision does not carry.
+    signed_digest_refs = [
+        r for r in decision.evidence_refs if r.startswith(f"advisory:{_OBJECTIVE_DIGEST_PREFIX}")
+    ]
+    content_bound = bool(signed_digest_refs)
+    if content_bound and _digest_ref(digest) not in signed_digest_refs:
         raise BindingRefused("decision_mismatch", "decision does not bind this objective content")
     if not adapter.state.decision_consumed(decision.decision_id):
         raise BindingRefused("decision_not_consumed", "activation has not consumed the decision")
@@ -697,7 +704,7 @@ def bind_reference_chain(
         session_ref=_session_ref_of(activated),
         generation=int(activated["_evidence_seq"]),
         objective_digest=digest,
-        objective_content_bound=admitted.objective_content_bound,
+        objective_content_bound=content_bound,
         effect=effect,
     )
 
