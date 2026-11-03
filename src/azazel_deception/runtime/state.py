@@ -242,10 +242,10 @@ class RuntimeStateStore:
         reordering locally evident.
         """
 
-        path = self.evidence_path(environment_id)
-        if not path.exists():
+        snapshot = self.read_evidence_snapshot(environment_id)
+        if snapshot is None:
             return None
-        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lines = [line for line in snapshot.splitlines() if line.strip()]
         if not lines:
             return None
         return str(json.loads(lines[-1]).get(_EVIDENCE_HASH)) or None

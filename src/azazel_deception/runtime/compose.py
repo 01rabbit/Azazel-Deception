@@ -768,11 +768,11 @@ class DockerComposeAdapter:
         }
 
     def export_evidence(self, environment_id: str) -> list[dict[str, Any]]:
-        path = self.state.evidence_path(environment_id)
-        if not path.exists():
+        snapshot = self.state.read_evidence_snapshot(environment_id)
+        if snapshot is None:
             return []
         events: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in snapshot.splitlines():
             if line.strip():
                 events.append(json.loads(line))
         return events

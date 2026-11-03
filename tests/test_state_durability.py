@@ -77,6 +77,13 @@ def test_mio_evidence_reader_waits_for_in_progress_append(tmp_path, monkeypatch)
         real_write_all(fd, data[split:])
 
     monkeypatch.setattr(state_module, "_write_all", paused_write)
+    real_snapshot = store.read_evidence_snapshot
+
+    def signaled_snapshot(environment_id):
+        read_attempted.set()
+        return real_snapshot(environment_id)
+
+    monkeypatch.setattr(store, "read_evidence_snapshot", signaled_snapshot)
 
     def append():
         try:
@@ -85,7 +92,6 @@ def test_mio_evidence_reader_waits_for_in_progress_append(tmp_path, monkeypatch)
             write_errors.append(exc)
 
     def read():
-        read_attempted.set()
         try:
             records.extend(_read_records(store, "env-1"))
         except Exception as exc:  # noqa: BLE001 - surfaced below
@@ -93,8 +99,8 @@ def test_mio_evidence_reader_waits_for_in_progress_append(tmp_path, monkeypatch)
         finally:
             read_done.set()
 
-    writer = threading.Thread(target=append)
-    reader = threading.Thread(target=read)
+    writer = threading.Thread(target=append, daemon=True)
+    reader = threading.Thread(target=read, daemon=True)
     writer.start()
     try:
         assert partial_written.wait(5)
@@ -102,7 +108,7 @@ def test_mio_evidence_reader_waits_for_in_progress_append(tmp_path, monkeypatch)
         assert read_attempted.wait(5)
         # The append holds the same lock as snapshot readers while the line is
         # incomplete; a reader must wait rather than misclassify it as corrupt.
-        assert not read_done.wait(0.05)
+        assert not read_done.wait(0.2)
     finally:
         finish_write.set()
         writer.join(5)
