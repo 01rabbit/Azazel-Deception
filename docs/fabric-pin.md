@@ -26,6 +26,19 @@ drifted to `0.1.0.dev0` while `pyproject.toml` said `0.2.0.dev0`
 (`Azazel-Deception#38` item 1); removing the second copy makes that class of
 drift structurally impossible rather than merely noticed.
 
+### Versioning during 0.x
+
+AZ-06 uses the repository's existing `0.2.0.dev0` development line until a
+release candidate is deliberately prepared. Pull requests accumulate under
+`[Unreleased]`; a commit or PR does not mechanically bump the product version.
+Compatible fixes and additive changes are grouped into the next planned release.
+An externally visible incompatible change, including newly refusing a value
+that the prior runtime accepted, belongs in the next `0.(y+1).0` development
+line and needs a migration note. A `0.y.z` patch release must remain compatible
+with the preceding `0.y` release. `.devN` and `rcN` identify candidates only;
+they are not stable releases. A stable tag/version is created only after the
+release checks pass and explicit release authorization is present.
+
 ## Fabric pin
 
 AZ-06 pins the Azazel-Fabric release tag:

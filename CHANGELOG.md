@@ -103,6 +103,9 @@ are not proven (see `docs/live-gate-checklist.md`).
   Compose calls. State, evidence and decision directories/files are kept
   owner-only, existing state/evidence files are tightened when opened, and
   symlinked record paths are refused. Existing persisted IDs are not renamed.
+  Uppercase, dotted, whitespace, path-containing and overlong IDs that were
+  previously accepted by some entry points are now rejected; operators must
+  explicitly remap those IDs before using the new runtime.
 - **Deception#55 objective digest binding** — `bind_reference_chain` now derives
   content binding from the authenticated Edge decision. A caller-constructed
   `AdmittedObjective` cannot turn a signed objective digest into reference-only
