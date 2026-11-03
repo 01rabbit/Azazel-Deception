@@ -11,10 +11,11 @@ safe live deception deployment.
 ### Canonical contracts
 
 AZ-06 consumes the Azazel-Fabric `azazel_fabric.deception_contracts`
-family through an exact stable release tag. The pinned tag is stated in exactly
-one place — the `azazel-fabric` requirement in `pyproject.toml`, described in
-[`docs/fabric-pin.md`](fabric-pin.md). This document deliberately does not
-restate the version, so it cannot drift out of date behind a pin bump.
+family through an exact published release tag, which may be a prerelease. The
+pinned tag is stated in exactly one place — the `azazel-fabric` requirement in
+`pyproject.toml`, described in [`docs/fabric-pin.md`](fabric-pin.md). This
+document deliberately does not restate the version, so it cannot drift out of
+date behind a pin bump.
 
 Implemented canonical boundaries include:
 
