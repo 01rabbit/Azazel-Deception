@@ -10,7 +10,7 @@
 # Env:   MIO_REPO KNOWLEDGE_REPO (default: sibling of this checkout, else one level up)
 #        MIO_COMMIT (full public pin)  KNOWLEDGE_COMMIT (required, local full commit)
 #        PYTHON (python3.12)  AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP (default 1; 0 skips it)
-# Knowledge is private: provide its exact commit locally; its output stays in WORKDIR/interop.log, never stdout.
+# Provide the exact Knowledge commit locally; its full ID and run output stay in WORKDIR/interop.log, never stdout.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,7 +24,7 @@ find_repo() { # name: sibling of this checkout first, then one level further up
 }
 MIO_REPO="${MIO_REPO:-$(find_repo Azazel-MIO MIO_REPO)}"
 KNOWLEDGE_REPO="${KNOWLEDGE_REPO:-$(find_repo Azazel-Knowledge KNOWLEDGE_REPO)}"
-MIO_COMMIT="${MIO_COMMIT:-b441d431532507387fb81f1e03e31fd1aea57b68}"
+MIO_COMMIT="${MIO_COMMIT:-4d92b4451a3bf1ec44eb7215ebadb0fd05879c1d}"
 if [[ -z "${KNOWLEDGE_COMMIT:-}" ]]; then
   echo "KNOWLEDGE_COMMIT must be set to a full local commit ID" >&2
   exit 2
@@ -96,7 +96,7 @@ pytest_args=(tests/test_mio_feedback_interop.py -p no:cacheprovider)
 export AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP="${AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP:-1}"
 case "$AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP" in
   1) expected_tests=15 ;;
-  0) expected_tests=14; pytest_args+=(-k 'not test_mio_b441d431_objective_producer') ;;
+  0) expected_tests=14; pytest_args+=(-k 'not test_mio_pinned_objective_producer') ;;
   *) echo "AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP must be 0 or 1, got '$AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP'" >&2; exit 2 ;;
 esac
 if "$mio_venv/bin/python" -m pytest "${pytest_args[@]}" \

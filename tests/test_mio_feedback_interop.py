@@ -141,7 +141,7 @@ def world_with_objective(tmp_path, monkeypatch):
     return world, chain, bundle
 
 
-# =========================== MIO (Azazel-MIO b441d43) ======================
+# =========================== MIO (exact pinned source) ====================
 
 
 def test_mio_context_frame_and_no_model_handoff(scenario):
@@ -599,7 +599,7 @@ def test_mio_frame_carries_desired_observation_known_facts(world_with_objective)
     assert handoff["model_contribution"] == "none"
 
 
-# ====== MIO objective producer (Azazel-MIO b441d43, current main) -> Deception admit ======
+# ====== MIO objective producer (runner's exact pinned source) -> Deception admit ======
 #
 # GAP, stated plainly: MIO's producer emits `MioObservationObjective` (MIO ids,
 # no Fabric types). Deception's receiver accepts a different closed shape
@@ -634,9 +634,9 @@ def _synthetic_edge_adapter(objective, gap_capability: str) -> dict:
 
 @pytest.mark.skipif(
     os.environ.get("AZAZEL_DECEPTION_MIO_OBJECTIVE_INTEROP") != "1",
-    reason="requires explicit opt-in (the runner sets it by default) with the pinned MIO b441d43 producer",
+    reason="requires explicit opt-in (the runner sets it by default) with the pinned MIO producer",
 )
-def test_mio_b441d431_objective_producer_through_synthetic_adapter_binds_content_and_refuses_mismatches(
+def test_mio_pinned_objective_producer_through_synthetic_adapter_binds_content_and_refuses_mismatches(
     tmp_path, monkeypatch, knowledge
 ):
     import dataclasses
