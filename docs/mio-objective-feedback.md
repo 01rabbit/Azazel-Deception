@@ -244,7 +244,7 @@ key is not discarded on reset, because earlier digests must stay checkable;
 key files must be regular, owner-only (0600) files of exactly 32 bytes in a
 0700 directory, otherwise `evidence_tampered`.
 
-`mio_frame_inputs` returns what MIO ce9c2c9's `MioSituationFrameBuilder.build`
+`mio_frame_inputs` returns what MIO b441d43's `MioSituationFrameBuilder.build`
 accepts (`deception_context`, `explicit_unknowns`) and what
 `MioSituationFrame.build` accepts (`unknowns`, `freshness_seconds`,
 `evidence_refs`) plus `known_facts` (`DECEPTION_DESIRED_OBSERVED_<CLASS>_<SURFACE>`
