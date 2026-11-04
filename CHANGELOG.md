@@ -158,11 +158,13 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 - **Pre-release compatibility change (`0.2.0.dev0`, not a stable release)** —
   the runtime environment-ID and state-root hardening described under `Fixed`
-  refuses some identifiers and layouts that older development code accepted.
-  New activations and writes require strict IDs; persisted safe legacy records
-  are limited to decommissioning. Migrate before adopting this unreleased
-  candidate. The package version remains `0.2.0.dev0` until an authorized
-  release candidate is prepared.
+  refuses identifiers and layouts that older development code accepted:
+  uppercase, dotted, whitespace, path-containing and overlong IDs cannot be
+  used for new activation or writes; persisted safe legacy IDs are limited to
+  decommissioning; and symlinked record directories/files and FIFO records are
+  refused. Existing legacy deployments may need the manual recovery documented
+  under `Fixed`. Migrate before adopting this unreleased candidate. The package
+  version remains `0.2.0.dev0` until an authorized release candidate is prepared.
 - **MIO objective feedback interop runner** — `scripts/dev/mio_feedback_interop.sh` pins exact MIO `main` (`ce9c2c9f242d2f9476f8d49d4b237fb6208c5a7c`) and requires an exact full Knowledge commit through a local environment variable. It validates both revisions as commit objects, keys virtual environments by both revisions and the resolved Python interpreter, and records the Deception tree and actual executed count in the local log. The full Knowledge commit ID appears only in the local log, not in public files. CPython 3.12.14 exact-candidate run: **15 passed, 0 skipped**. One static scenario follows the deterministic MIO objective through a test-only synthetic Edge mapping/decision, Deception's existing activation and evidence gates, a real local Knowledge API process, and MIO's no-model explanation. The harness records the service interaction; it is not an independent runtime observation and does not prove attacker belief, deception success, or delay. This does not establish a production Edge issuer/withdrawal path, Nexus handoff, hardware isolation, or HIL; the private Knowledge run remains local-only and is not CI-gated. The earlier `7a35288` MIO/Knowledge run remains historical.
 - **Azazel-Fabric pin `v0.9.0rc4` → `v0.9.0rc5`; `trace_id` and the synthetic
   identity / credential references reach `PresentedTerrainRef`**

@@ -234,7 +234,7 @@ def test_decision_marker_is_one_shot(tmp_path):
     [("Decision-A", "decision-a"), ("\u212b", "\u00c5")],
     ids=["case-fold", "unicode-normalization"],
 )
-@posix_only
+@pytest.mark.skipif(os.name != "posix", reason="runtime state store is POSIX-only")
 def test_decision_id_folding_collision_fails_closed_when_filesystem_folds(
     tmp_path, first, folded
 ):
