@@ -221,6 +221,35 @@ def test_new_directories_and_records_are_owner_only(tmp_path):
         assert _mode(f) == 0o600
 
 
+def test_decision_marker_is_one_shot(tmp_path):
+    store = RuntimeStateStore(tmp_path / "state")
+
+    assert store.consume_decision("decision-1", {"attempt": 1}) is True
+    assert store.consume_decision("decision-1", {"attempt": 2}) is False
+    assert store.decision_consumed("decision-1") is True
+
+
+@pytest.mark.parametrize(
+    ("first", "folded"),
+    [("Decision-A", "decision-a"), ("\u212b", "\u00c5")],
+    ids=["case-fold", "unicode-normalization"],
+)
+@posix_only
+def test_decision_id_folding_collision_fails_closed_when_filesystem_folds(
+    tmp_path, first, folded
+):
+    probe_dir = tmp_path / "fold-probe"
+    probe_dir.mkdir()
+    (probe_dir / first).write_text("probe", encoding="utf-8")
+    if not (probe_dir / folded).exists():
+        pytest.skip("the temporary filesystem does not fold these names")
+
+    store = RuntimeStateStore(tmp_path / "state")
+    assert store.consume_decision(first, {"attempt": 1}) is True
+    assert store.consume_decision(folded, {"attempt": 2}) is False
+    assert store.decision_consumed(folded) is True
+
+
 @posix_only
 def test_read_does_not_require_service_user_ownership(tmp_path, monkeypatch):
     store = RuntimeStateStore(tmp_path / "state")
