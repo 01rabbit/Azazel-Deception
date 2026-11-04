@@ -61,7 +61,7 @@ Three things are easy to conflate. They are different in kind:
 | Thing | What it is | What it can do |
 |---|---|---|
 | MIO objective (observation objective) | Advice, carried as `advisory:` references | Nothing. It starts, selects, extends and ends nothing. |
-| Edge decision | The **sole authorization** for an activation or transition | Signed (HMAC), one-shot, time-limited. Only an unexpired, authenticated Edge decision may cause a live change. |
+| Edge decision | The **sole authorization** for activation or transition | Must be authenticated, unexpired, unconsumed and correctly bound. The operator kill switch can terminate/reset; it cannot activate an environment. |
 | Deception execution and observation boundary | Deception executes only Edge-approved decisions through its adapter, and records what it observed | Materializes, transitions, records and resets within the decision's window. It does not decide, and an observation is never a decision. |
 
 An objective can be listed in an Edge decision's `evidence_refs`; that binds
@@ -141,7 +141,7 @@ See [`docs/safety-model.md`](docs/safety-model.md).
 
 ## Install and verify
 
-Use a virtual environment. Installing pulls `azazel-fabric` from GitHub at the
+Use Python 3.10 or later in a virtual environment. Installing pulls `azazel-fabric` from GitHub at the
 exact tag declared in [`pyproject.toml`](pyproject.toml) (policy in
 [`docs/fabric-pin.md`](docs/fabric-pin.md)), so this step needs network access and `git`.
 
@@ -154,7 +154,7 @@ pytest
 
 `pytest` runs the deterministic test suite. Real-container tests are opt-in and
 are not part of a plain `pytest` run: they require `AZAZEL_DECEPTION_DOCKER_TESTS=1`
-and a reachable Docker daemon.
+and Docker Engine with the Compose v2 plugin.
 
 Minimal read-only checks of the non-executing bootstrap CLI, using the
 reference package:
@@ -178,7 +178,9 @@ These two are separate and must not be confused:
   can start and stop an environment, but only through a gated path that is
   **off by default**. Having the adapter is not the same as enabling exposure.
   Enabling it requires the Phase-1 live gates to close, including the HIL
-  gates above.
+  gates above. The combined networked Edge→AZ-06 flow remains open; see
+  [the live-flip runbook](docs/live-flip-runbook.md) and
+  [Edge issue #325](https://github.com/01rabbit/Azazel-Edge/issues/325).
 
 ## Bootstrap CLI
 
