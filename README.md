@@ -12,7 +12,14 @@ It materializes bounded, coherent deception environments from versioned packages
 
 ## Status
 
-**Phase 0 complete; Phase 1 in progress.** The AZ-06 designation is ratified and the canonical Azazel-Fabric deception-environment contracts are landed and pinned to an exact release tag (see [`docs/fabric-pin.md`](docs/fabric-pin.md)). Live engagement remains **disabled by default** and stays that way until the Phase-1 live gates close — including physical/hardware-in-the-loop isolation gates that no CI run can satisfy. Per-item status is in [`docs/roadmap.md`](docs/roadmap.md), [`docs/implementation-status.md`](docs/implementation-status.md) and [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
+**Phase 0 complete; Phase 1 in progress.** The AZ-06 designation is ratified and the canonical Azazel-Fabric deception-environment contracts are landed. Live engagement remains **disabled by default** and stays that way until the Phase-1 live gates close — including physical/hardware-in-the-loop isolation gates that no CI run can satisfy. Per-item status is in [`docs/roadmap.md`](docs/roadmap.md), [`docs/implementation-status.md`](docs/implementation-status.md) and [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
+
+Versions (details in [`docs/fabric-pin.md`](docs/fabric-pin.md)):
+
+- **Product version: `0.2.0.dev0`.** A pre-release development version. No stable version has been released and the repository carries **no release tag**. Work in progress is under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md).
+- **Fabric pin: `v0.9.0rc5`**, a release **candidate** (not stable), declared in `pyproject.toml`. It is pinned to an exact tag, never a branch. The pin is revisited when `v0.9.0` is cut.
+
+Hardware-in-the-loop evidence does not exist yet. Container, virtual-lab and CI results are software evidence only; they do not close any HIL gate.
 
 Initial portability target:
 
@@ -44,6 +51,21 @@ Azazel-Deception does **not** own:
 - unrestricted autonomous planning
 - hack-back, attacker-system compromise, arbitrary code delivery, or uncontrolled decoy egress
 - runtime LLM authority
+
+## Authority: three different things
+
+Three things are easy to conflate. They are different in kind:
+
+| Thing | What it is | What it can do |
+|---|---|---|
+| MIO objective (observation objective) | Advice, carried as `advisory:` references | Nothing. It starts, selects, extends and ends nothing. |
+| Edge decision | The **sole authorization** for an activation or transition | Signed (HMAC), one-shot, time-limited. Only an unexpired, authenticated Edge decision may cause a live change. |
+| Deception execution and observation boundary | Deception executes only Edge-approved decisions through its adapter, and records what it observed | Materializes, transitions, records and resets within the decision's window. It does not decide, and an observation is never a decision. |
+
+An objective can be listed in an Edge decision's `evidence_refs`; that binds
+it to the signature, and it still authorizes nothing. The full binding rules,
+lease, and feedback bundle are in
+[`docs/mio-objective-feedback.md`](docs/mio-objective-feedback.md).
 
 ## Architecture
 
@@ -115,6 +137,45 @@ Approved packages remain fully executable with **no LLM available at runtime**. 
 
 See [`docs/safety-model.md`](docs/safety-model.md).
 
+## Install and verify
+
+Use a virtual environment. Installing pulls `azazel-fabric` from GitHub at the
+`v0.9.0rc5` tag, so this step needs network access and `git`.
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'
+pytest
+```
+
+`pytest` runs the deterministic test suite. Real-container tests are opt-in
+(`AZAZEL_DECEPTION_DOCKER_TESTS=1`) and are not part of a plain `pytest` run.
+
+Minimal read-only checks of the non-executing bootstrap CLI, using the
+reference package:
+
+```bash
+python -m azazel_deception capabilities
+python -m azazel_deception validate examples/packages/municipal-linux-v1/package.yaml
+```
+
+The same commands are also available as the installed `azazel-deception`
+script. The `validate` command exits non-zero on an invalid package.
+
+## Shadow/replay and the live Compose path
+
+These two are separate and must not be confused:
+
+- **Shadow / replay (non-executing).** The Edge shadow/replay boundary is
+  non-executing. AZ-06's default mode is `planned_shadow`, which starts no
+  runtime.
+- **Live Compose lifecycle (gated, default-off).** The Docker Compose adapter
+  can start and stop an environment, but only through a gated path that is
+  **off by default**. Having the adapter is not the same as enabling exposure.
+  Enabling it requires the Phase-1 live gates to close, including the HIL
+  gates above.
+
 ## Bootstrap CLI
 
 The initial CLI is intentionally non-executing. It reports host capabilities, validates the bootstrap reference package, and produces a deterministic placement plan while the Fabric and Edge activation contracts stabilize.
@@ -162,7 +223,7 @@ Primary cross-repository dependencies:
 
 ## Implementation trackers
 
-Issue states below were read from GitHub on 2026-09-19. Route work only to the open trackers.
+Issue states below were last read from GitHub on 2026-09-19 and were **not re-read** for this revision. Check each tracker link for its current state before routing work to it.
 
 | Open issue | Purpose |
 |---|---|
