@@ -16,10 +16,12 @@ It materializes bounded, coherent deception environments from versioned packages
 
 Versions (details in [`docs/fabric-pin.md`](docs/fabric-pin.md)):
 
-- **Product version: `0.2.0.dev0`.** A pre-release development version. No stable version has been released and the repository carries **no release tag**. Work in progress is under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md).
-- **Fabric pin: `v0.9.0rc5`**, a release **candidate** (not stable), declared in `pyproject.toml`. It is pinned to an exact tag, never a branch. The pin is revisited when `v0.9.0` is cut.
+- **Product version:** see the `version` field in [`pyproject.toml`](pyproject.toml). It is a pre-release development version. Release state (no stable release, no release tag, work in progress under `[Unreleased]`) is recorded in [`CHANGELOG.md`](CHANGELOG.md).
+- **Fabric pin:** the exact `azazel-fabric` tag is declared in [`pyproject.toml`](pyproject.toml). It is pinned to an exact tag, never a branch, and the version/pin policy (including the candidate status and when the pin is revisited) is set out in [`docs/fabric-pin.md`](docs/fabric-pin.md).
 
 Hardware-in-the-loop evidence does not exist yet. Container, virtual-lab and CI results are software evidence only; they do not close any HIL gate.
+
+A read-only package and host check is described in [Install and verify](#install-and-verify); it does not activate an environment.
 
 Initial portability target:
 
@@ -140,7 +142,8 @@ See [`docs/safety-model.md`](docs/safety-model.md).
 ## Install and verify
 
 Use a virtual environment. Installing pulls `azazel-fabric` from GitHub at the
-`v0.9.0rc5` tag, so this step needs network access and `git`.
+exact tag declared in [`pyproject.toml`](pyproject.toml) (policy in
+[`docs/fabric-pin.md`](docs/fabric-pin.md)), so this step needs network access and `git`.
 
 ```bash
 python -m venv .venv
@@ -149,8 +152,9 @@ pip install -e '.[dev]'
 pytest
 ```
 
-`pytest` runs the deterministic test suite. Real-container tests are opt-in
-(`AZAZEL_DECEPTION_DOCKER_TESTS=1`) and are not part of a plain `pytest` run.
+`pytest` runs the deterministic test suite. Real-container tests are opt-in and
+are not part of a plain `pytest` run: they require `AZAZEL_DECEPTION_DOCKER_TESTS=1`
+and a reachable Docker daemon.
 
 Minimal read-only checks of the non-executing bootstrap CLI, using the
 reference package:
