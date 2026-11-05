@@ -28,8 +28,9 @@ two narrowing consumers. Positive controls and the planned_shadow case are
 therefore built from a real capture with one named field changed; each says so
 and is labelled ``derived``. They prove the consumer's rule, not Edge's output.
 
-Valid with Fabric >= v0.10.0rc1 (captures landed after v0.9.0); skipped on
-v0.9.0, where the repository pin stays.
+The captures first ship in the Fabric tag this repository pins (see
+``docs/fabric-pin.md``), so this module is never skipped: a Fabric without them
+fails the import below instead of passing silently.
 """
 
 from __future__ import annotations
@@ -37,15 +38,7 @@ from __future__ import annotations
 import copy
 
 import pytest
-
-_testing = pytest.importorskip("azazel_fabric.testing")
-if not hasattr(_testing, "producer_capture_names"):  # Fabric < v0.10.0rc1
-    pytest.skip(
-        "requires azazel_fabric >= v0.10.0rc1 producer captures (valid from v0.10.0rc1 on)",
-        allow_module_level=True,
-    )
-
-from azazel_fabric.testing import (  # noqa: E402
+from azazel_fabric.testing import (
     GOLDEN_DECISION_SIGNATURE_KEY,
     load_producer_capture,
     make_transition_catalog,
@@ -54,17 +47,17 @@ from azazel_fabric.testing import (  # noqa: E402
     producer_capture_provenance,
 )
 
-from azazel_deception.runtime.compose import RuntimeGateError  # noqa: E402
-from azazel_deception.runtime.effect_projection import (  # noqa: E402
+from azazel_deception.runtime.compose import RuntimeGateError
+from azazel_deception.runtime.effect_projection import (
     EffectRefRejected,
     accept_defensive_effect_ref,
 )
-from azazel_deception.runtime.producer_evidence import (  # noqa: E402
+from azazel_deception.runtime.producer_evidence import (
     producer_redirection_from_shared_mechanism,
 )
-from azazel_deception.runtime.state import RuntimeStateStore  # noqa: E402
-from azazel_deception.runtime.transitions import TransitionExecutor  # noqa: E402
-from azazel_deception.runtime.transport import HmacDecisionAuthenticator  # noqa: E402
+from azazel_deception.runtime.state import RuntimeStateStore
+from azazel_deception.runtime.transitions import TransitionExecutor
+from azazel_deception.runtime.transport import HmacDecisionAuthenticator
 
 # Inside every Edge transition capture's [effective_at, expires_at).
 AS_OF = "2026-08-21T00:00:00+00:00"
