@@ -178,8 +178,8 @@ These two are separate and must not be confused:
   can start and stop an environment, but only through a gated path that is
   **off by default**. Having the adapter is not the same as enabling exposure.
   Enabling it requires the Phase-1 live gates to close, including the HIL
-  gates above. The combined networked Edge→AZ-06 flow remains open; see
-  [the live-flip runbook](docs/live-flip-runbook.md) and
+  gates above. The combined networked Edge→AZ-06 flow remains open; Edge #325
+  is its integration tracker. See [the live-flip runbook](docs/live-flip-runbook.md) and
   [Edge issue #325](https://github.com/01rabbit/Azazel-Edge/issues/325).
 
 ## Bootstrap CLI
@@ -231,7 +231,7 @@ Primary cross-repository dependencies:
 
 The [current issue map](docs/implementation-status.md#current-issue-map) distinguishes
 open software work, research, hardware gates, and closed history. Issue states
-were read from GitHub on **2026-11-05**. Do not route work to a closed issue or
+were read from GitHub on **2026-11-06**. Do not route work to a closed issue or
 treat a software test as evidence that a hardware-in-the-loop gate has passed.
 
 The phase order remains **#3 → live Phase 1 gate → #6**. #55, #39, #41, #35,
