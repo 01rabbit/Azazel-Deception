@@ -100,6 +100,16 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Changed
 
+- **Azazel-Fabric pin `v0.9.0` → `v0.10.0rc1` (candidate)** — additive over
+  `v0.9.0` (Fabric adds the experimental `knowledge_context` profile, which
+  AZ-06 does not use, and the producer captures in `azazel_fabric.testing`);
+  no AZ-06 behaviour or test changes. Pinned for one reason: it is the first
+  tag carrying Azazel-Edge's real producer output as captures, which the
+  consumer tests of Deception#71 read and which skip on `v0.9.0`. Leave for
+  `v0.10.0` when it is cut. Tag `v0.10.0rc1` → commit
+  `36db04412679e2694d697595cbf913d0bfc72019`; digest
+  `sha256:114402979360855ccaeb92fcc1851db1b03572a289c43e3591633f263b7559eb`,
+  signed inside the tag's tree. See `docs/fabric-pin.md`.
 - **Azazel-Fabric pin `v0.9.0rc6` → `v0.9.0` (stable)** — the contract surface
   is unchanged (Fabric `src/` differs from `rc6` only in `version.py`), so no
   AZ-06 behaviour or test changes. Tag `v0.9.0` → commit
