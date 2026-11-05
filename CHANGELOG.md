@@ -100,6 +100,15 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Changed
 
+- **Azazel-Fabric pin `v0.9.0rc6` → `v0.9.0` (stable)** — the contract surface
+  is unchanged (Fabric `src/` differs from `rc6` only in `version.py`), so no
+  AZ-06 behaviour or test changes. Tag `v0.9.0` → commit
+  `ee2ab8cf5173b5967481d2452dfd5fd8cf76ade6`; digest
+  `sha256:5107054682802f1e615615d0de51471859014d31a8808b61d8cbf6c16b27dbf4`;
+  the signature is inside the tag's tree (unlike `rc6`). Stable families:
+  deception, effect, engagement, outcome; experimental: cti, mio,
+  external_security, provisioning; no aggregate attestation or real-producer
+  golden-fixture interoperability is claimed. See `docs/fabric-pin.md`.
 - **Azazel-Fabric pin `v0.9.0rc5` → `v0.9.0rc6`** — not additive (Fabric#65
   trailing newlines refused, Fabric#23 directive depth limit 32, Fabric#72
   `observation_objective:` / `hypothesis:` / `frame:` typed refs). AZ-06's

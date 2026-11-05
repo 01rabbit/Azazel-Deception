@@ -283,7 +283,7 @@ def _require_opaque(value: object, *, field: str) -> None:
     here as well as in Fabric: until `v0.9.0rc5` the grammar did not check it
     (`OPAQUE_REF_PATTERN` ends in `$` and was applied with `.match`, so
     `credential:x\n` parsed as a typed reference, Azazel-Fabric#65), and
-    `v0.9.0rc6` now refuses a typed one. The projector's check stays: it is
+    `v0.9.0rc6` and later (including `v0.9.0`) refuse a typed one. The projector's check stays: it is
     independent of the installed release and also covers untyped references.
     A reference is opaque because it has no
     structure a reader could act on, and a trailing newline is structure --

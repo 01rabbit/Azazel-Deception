@@ -637,7 +637,7 @@ _NEWLINE_CASES = [
 
 @pytest.mark.parametrize("source,field,value", _NEWLINE_CASES)
 def test_a_trailing_newline_reference_is_never_emitted(source, field, value):
-    """Azazel-Fabric#65: the pinned grammar refuses `kind:body\\n` (`v0.9.0rc6`).
+    """Azazel-Fabric#65: the pinned grammar refuses `kind:body\\n` (`v0.9.0rc6` onward).
 
     Until `v0.9.0rc5` `OPAQUE_REF_PATTERN` ended in `$` and was applied with
     `.match`, and `$` matches before one trailing newline, so Fabric accepted

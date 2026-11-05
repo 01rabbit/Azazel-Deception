@@ -30,11 +30,15 @@ drift structurally impossible rather than merely noticed.
 
 AZ-06 pins the Azazel-Fabric release tag:
 
-`v0.9.0rc6`
+`v0.9.0`
+
+The pin is now a stable tag, so the exact-stable-tag policy below applies
+without deviation. The section below is kept as the historical record of why
+the pin was a candidate until `v0.9.0`; it no longer describes the current pin.
 
 ### Why a release candidate
 
-This is a deliberate, narrow deviation from the "exact stable tag" policy
+This was a deliberate, narrow deviation from the "exact stable tag" policy
 below, recorded here rather than left to be discovered in `pyproject.toml`.
 
 `v0.9.0rc2` is the first tag carrying `azazel_fabric.schema.defensive_state` —
@@ -47,8 +51,8 @@ holding AC-7 or copying the five values here, and the copy is precisely what
 the boundary forbids.
 
 The risk is bounded by what AZ-06 uses it for: one function, on a field that no
-runtime path reads. A candidate promises no stability, so this pin is revisited
-when `v0.9.0` is cut — `git+...@v0.9.0` and nothing else changes.
+runtime path reads. A candidate promises no stability, so this pin was to be revisited
+when `v0.9.0` was cut (done: see the `v0.9.0` section below) — `git+...@v0.9.0` and nothing else changes.
 
 `v0.9.0rc3` is the pin now, and the move was **not** optional for this
 repository. It widens the `effect_contracts` reference grammar so that a typed
@@ -145,7 +149,7 @@ What AZ-06 adopts:
   degraded path in which AZ-06 runs without Fabric, so there is none to
   verify.
 
-`v0.9.0rc6` is the pin now. It is **not additive** over `rc5`, in three
+`v0.9.0rc6` was the pin until `v0.9.0`. It is **not additive** over `rc5`, in three
 places (see Azazel-Fabric `CHANGELOG.md` and `docs/release-compatibility.md`):
 
 - **Fabric#65.** A typed reference, a provisioning digest or a MAC that ends
@@ -168,7 +172,7 @@ places (see Azazel-Fabric `CHANGELOG.md` and `docs/release-compatibility.md`):
   does not produce that envelope and adopts none of them. AZ-06 mints none of
   these three kinds.
 
-Rolling back is a pin change: set the requirement in `pyproject.toml` back to
+Rolling back to `rc6`'s predecessor is a pin change: set the requirement in `pyproject.toml` back to
 `v0.9.0rc5`, reinstall, and revert this section together with the test change
 named above (the `rc5` precondition that Fabric accepts the trailing newline).
 The two states cannot be mixed: the test asserts the `rc6` behaviour.
@@ -189,6 +193,41 @@ The pin was verified before the move, against the same four criteria:
   (`tests/test_fabric_pin_documentation.py` checks it on every run).
 - **Compatibility.** This repository's full suite is green against it.
 - **Degradation.** As above: none exists to verify.
+
+### v0.9.0 (stable)
+
+`v0.9.0` is the pin now. It replaces `v0.9.0rc6` and is the first stable
+Azazel-Fabric release since `v0.8.0`.
+
+- **Contract surface.** Unchanged from `rc6`. Azazel-Fabric's `src/` differs
+  between `v0.9.0rc6` and `v0.9.0` only in `version.py`, so no behaviour AZ-06
+  relies on moves and no AZ-06 code or test changes. The `rc6` section above
+  (Fabric#65, #23, #72) therefore still describes the grammar in force.
+- **Stable families.** Per Azazel-Fabric's `CHANGELOG.md` `[0.9.0]`:
+  `deception`, `effect`, `engagement` and `outcome`. The experimental families
+  are `cti`, `mio`, `external_security` and `provisioning`.
+- **What the release does not claim.** Per the same changelog: no aggregate
+  attestation, and no golden-fixture interoperability against real producer
+  output. AZ-06 does not read this pin as either.
+- **Tag and release.** The annotated tag `v0.9.0` peels to commit
+  `ee2ab8cf5173b5967481d2452dfd5fd8cf76ade6`. The GitHub Release is **stable
+  and Latest**; its Release workflow (run `41953612183`) succeeded including
+  signature verification.
+- **Signature.** The digest is
+  `sha256:5107054682802f1e615615d0de51471859014d31a8808b61d8cbf6c16b27dbf4`
+  (`release/v0.9.0.digest.json`). Unlike `rc6`, **the signature
+  `release/v0.9.0.digest.json.sig` is inside the tag's own tree** (signed
+  before tagging), so the tag checkout alone verifies. Results of
+  `tools/rc_digest.py --check` and `tools/rc_signature.py --check` on the tag
+  checkout: see the pull request that moved the pin. What is signed is the
+  digest of the tag's tree; the tag itself is not a trust boundary.
+- **Version / compatibility.** The installed distribution equals the pin
+  (`tests/test_fabric_pin_documentation.py`), and the full suite was run on
+  Python 3.11 and 3.12 against it. Degradation: none exists (required
+  dependency).
+
+Rolling back is a pin change to `v0.9.0rc6` and a revert of this section; the
+two are behaviourally identical.
 
 ## What this release provides
 
@@ -302,20 +341,17 @@ never authority.
 
 ## Release status
 
-The pin is `v0.9.0rc6`, the latest published Azazel-Fabric prerelease. Its tag
-peels to source commit `023381371b56b3883a89a28a69625ddb87742f2e` and the
-GitHub Release was published 2026-11-05 as a **prerelease**. Fabric's `release.yml` classifies
-anything that is not exactly `vMAJOR.MINOR.PATCH` as a prerelease, so a
-candidate cannot appear where a consumer looks for the latest stable release.
-
-The latest stable Azazel-Fabric release is `v0.8.0`, at commit
-`b2fd983d411489457e719d018f06172846f115e1`. Fabric cuts tags through its
+The pin is `v0.9.0`, the latest stable Azazel-Fabric release (GitHub Release
+marked stable and Latest). Its annotated tag peels to source commit
+`ee2ab8cf5173b5967481d2452dfd5fd8cf76ade6`. Fabric cuts tags through its
 tag-driven `release.yml` workflow, which enforces that the tag matches
 `azazel_fabric.__version__` and that the test suite passes before the release
-is cut.
+is cut, and (for `v0.9.0`) verifies the signed digest. `v0.9.0rc6` was the
+prerelease pin before it; `v0.8.0` (commit
+`b2fd983d411489457e719d018f06172846f115e1`) was the previous stable release.
 
 In series status vocabulary
-(`Azazel/docs/roadmaps/third-party-development-handoff.md` §7) the `rc6` pin is
+(`Azazel/docs/roadmaps/third-party-development-handoff.md` §7) the `v0.9.0` pin is
 **verified** for AZ-06's software suite only to the extent of the checks on the
 pull request that moved it (CI, Portability and Executed Evidence); this
 document does not restate run numbers, which would go stale at the next change.
@@ -329,8 +365,8 @@ HIL gate; those remain open in [`live-gate-checklist.md`](live-gate-checklist.md
 ## Pin policy
 
 Consumers pin an exact tag, never `main` and never a development commit. A
-stable `vX.Y.Z` is the default; a candidate is pinned only with a recorded
-reason and a stated condition for leaving it, as above. Moving to a newer Fabric release is an explicit, reviewed pin bump that
+stable `vX.Y.Z` is the default (and the current pin); a candidate is pinned only with a recorded
+reason and a stated condition for leaving it, as the historical section above did. Moving to a newer Fabric release is an explicit, reviewed pin bump that
 updates `pyproject.toml`, this document, and the CHANGELOG together.
 
 ## Pin history
@@ -344,4 +380,5 @@ updates `pyproject.toml`, this document, and the CHANGELOG together.
 | `effect_contracts` producer (2026-09-20) | `v0.9.0rc2` → `v0.9.0rc3` — the reference grammar; see above |
 | `EffectObservation` authority narrowing (2026-09-20) | `v0.9.0rc3` → `v0.9.0rc4` — AZ-06 emits this record, so it moves with the contract it emits under; see above |
 | Deception#50 (2026-10-24) | `v0.9.0rc4` → `v0.9.0rc5` — carries `trace_id` and the synthetic identity / credential references, and binds a shadow run to its effect; see above |
-| Fabric pin `rc6` (2026-11-05) | `v0.9.0rc5` → `v0.9.0rc6` (current) — **not additive** (Fabric#65 trailing newlines, Fabric#23 depth 32, Fabric#72 typed-ref kinds); signed after the tag; see above |
+| Fabric pin `rc6` (2026-11-05) | `v0.9.0rc5` → `v0.9.0rc6` — **not additive** (Fabric#65 trailing newlines, Fabric#23 depth 32, Fabric#72 typed-ref kinds); signed after the tag; see above |
+| Fabric pin `v0.9.0` (2026-11-05) | `v0.9.0rc6` → `v0.9.0` (current) — stable; contract surface unchanged from `rc6` (`src/` differs only in `version.py`); signature is inside the tag's tree; see above |
