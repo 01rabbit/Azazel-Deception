@@ -28,7 +28,7 @@ the objective is retained as advice and nothing is exposed
 
 Tenant
 ------
-Fabric ``v0.9.0rc5`` has no tenant field. ``node_id`` (from the recorded
+Fabric ``v0.9.0rc6`` has no tenant field (as ``v0.9.0rc5`` had none). ``node_id`` (from the recorded
 runtime state and checked against the decision's ``target_node_id``) together
 with ``trace_id`` (from the Edge effect) stands in for it. See
 ``docs/mio-objective-feedback.md``.

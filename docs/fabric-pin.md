@@ -30,7 +30,7 @@ drift structurally impossible rather than merely noticed.
 
 AZ-06 pins the Azazel-Fabric release tag:
 
-`v0.9.0rc5`
+`v0.9.0rc6`
 
 ### Why a release candidate
 
@@ -85,7 +85,7 @@ did. The stand-in values are gone from
 `tests/test_effect_contracts_producer.py`; AZ-06's own references now go into
 `PresentedTerrainRef` unchanged.
 
-`v0.9.0rc5` is the pin now (Azazel-Deception#50). It is **additive** over
+`v0.9.0rc5` was the pin from Azazel-Deception#50 until `rc6`. It is **additive** over
 `rc4` (Azazel-Fabric#51): `PresentedTerrainRef` gains `trace_id`,
 `synthetic_identity_refs`, `synthetic_credential_refs` and `source_effect_ref`,
 `activation_decision_ref` becomes optional, and a terrain may bind to its
@@ -126,7 +126,7 @@ What AZ-06 adopts:
   producer evidence and the snapshot also refuse them where they enter, since
   their trace and decision references were checked only for length.
 
-The pin was verified before the move, against the same four criteria as
+`rc5` was verified before its move, against the same four criteria as
 `rc4`:
 
 - **Signature.** The `v0.9.0rc5` tag's own checkout (`450d950`) reproduces
@@ -140,10 +140,55 @@ The pin was verified before the move, against the same four criteria as
   signatures by that key; `rc5` was signed and published before it.
 - **Version.** The installed distribution equals the pin
   (`tests/test_fabric_pin_documentation.py` checks it on every run).
-- **Compatibility.** This repository's full suite is green against it.
+- **Compatibility.** This repository's full suite was green against it.
 - **Degradation.** `azazel-fabric` is a required dependency. There is no
   degraded path in which AZ-06 runs without Fabric, so there is none to
   verify.
+
+`v0.9.0rc6` is the pin now. It is **not additive** over `rc5`, in three
+places (see Azazel-Fabric `CHANGELOG.md` and `docs/release-compatibility.md`):
+
+- **Fabric#65.** A typed reference, a provisioning digest or a MAC that ends
+  in a newline, and validated under `rc5`, is refused. This is the gap the
+  `rc5` section above says AZ-06 did not rely on: the projector already
+  refused whitespace and control characters in every reference it emits, so
+  AZ-06's behaviour does not change. What changes is that Fabric now refuses
+  the same value too, and `tests/test_effect_contracts_producer.py` asserts
+  that (`parse_ref("credential:smb-1\n")` is untyped) instead of the former
+  precondition that Fabric accepted it. The projector's own check is kept: it
+  is independent of the installed release, and it also covers untyped
+  references.
+- **Fabric#23.** A payload nested more than 32 levels deep, passed to a
+  deception, engagement or effect directive guard, is refused even when it
+  carries no directive. AZ-06 does not build payloads of that depth.
+- **Fabric#72.** A `decision_ref`, `activation_decision_ref`, `trace_id` or
+  `EffectObservation.execution_ref` typed `observation_objective:`,
+  `hypothesis:` or `frame:` is refused where `rc5` read it as untyped. The
+  `OutcomeObservationEnvelope` gains optional fields for those refs; AZ-06
+  does not produce that envelope and adopts none of them. AZ-06 mints none of
+  these three kinds.
+
+Rolling back is a pin change: set the requirement in `pyproject.toml` back to
+`v0.9.0rc5`, reinstall, and revert this section together with the test change
+named above (the `rc5` precondition that Fabric accepts the trailing newline).
+The two states cannot be mixed: the test asserts the `rc6` behaviour.
+
+The pin was verified before the move, against the same four criteria:
+
+- **Signature.** The `v0.9.0rc6` tag's own checkout
+  (`023381371b56b3883a89a28a69625ddb87742f2e`) reproduces
+  `release/v0.9.0rc6.digest.json`
+  (`sha256:f1b76901bee8938b45b5a600d967286b7a397933acdbecb30328c6adad1ab1e6`)
+  with `tools/rc_digest.py --check`. **The signature was added after the tag,
+  not at it:** the tag's tree carries the digest but no `.sig`, and
+  `release/v0.9.0rc6.digest.json.sig` first appears on Azazel-Fabric `main`
+  (`88c47d5`). `tools/rc_signature.py --check` on that `main` checkout verifies
+  it under `release-owner`. What is signed is the digest of the tag's tree; the
+  tag itself is unsigned and is not a trust boundary.
+- **Version.** The installed distribution equals the pin
+  (`tests/test_fabric_pin_documentation.py` checks it on every run).
+- **Compatibility.** This repository's full suite is green against it.
+- **Degradation.** As above: none exists to verify.
 
 ## What this release provides
 
@@ -257,12 +302,9 @@ never authority.
 
 ## Release status
 
-As of source commit `9cd7987f55d3837c4a8142769e6e0b47e5d3887b` (Deception
-`main` at that commit), the pin is `v0.9.0rc5`, the latest published
-Azazel-Fabric prerelease. This documentation candidate is a later, docs-only
-commit; it does not change the pin. Its tag peels to
-source commit `450d9502884ba533653210056a6fb85012b96b84` and the GitHub Release
-was published 2026-09-20 as a **prerelease**. Fabric's `release.yml` classifies
+The pin is `v0.9.0rc6`, the latest published Azazel-Fabric prerelease. Its tag
+peels to source commit `023381371b56b3883a89a28a69625ddb87742f2e` and the
+GitHub Release was published 2026-11-05 as a **prerelease**. Fabric's `release.yml` classifies
 anything that is not exactly `vMAJOR.MINOR.PATCH` as a prerelease, so a
 candidate cannot appear where a consumer looks for the latest stable release.
 
@@ -273,15 +315,12 @@ tag-driven `release.yml` workflow, which enforces that the tag matches
 is cut.
 
 In series status vocabulary
-(`Azazel/docs/roadmaps/third-party-development-handoff.md` §7) the pin is
-**verified** for AZ-06's software suite as of source commit `9cd7987`, the
-Deception `main` commit the evidence below was run against. All three cited
-GitHub Actions runs apply to source commit `9cd7987`, not to this later,
-docs-only documentation candidate.
-
-- [CI run `40181193506`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193506): Python 3.10 and 3.12.
-- [Portability run `40181193444`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193444): Linux arm64, Linux amd64 and macOS arm64.
-- [Executed Evidence run `40181193459`](https://github.com/01rabbit/Azazel-Deception/actions/runs/40181193459): `docker-lifecycle` (Real-container lifecycle (Docker)), `virtual-lab` (Virtual Phase-1 Lab report), `so08-virtual-lab` (SO-08 isolation-drift virtual lab, regression, not a gate), and `cross-repo-heartbeat-e2e` (Networked Edge→AZ-06 heartbeat E2E) all completed successfully on the cited source commit.
+(`Azazel/docs/roadmaps/third-party-development-handoff.md` §7) the `rc6` pin is
+**verified** for AZ-06's software suite only to the extent of the checks on the
+pull request that moved it (CI, Portability and Executed Evidence); this
+document does not restate run numbers, which would go stale at the next change.
+The runs cited for `rc5` (`40181193506`, `40181193444`, `40181193459`, against
+source commit `9cd7987`) no longer describe the pin.
 
 These are software evidence only. They are not a claim about field or HIL
 properties, and they do not close the combined networked Edge→AZ-06 gate or any
@@ -304,4 +343,5 @@ updates `pyproject.toml`, this document, and the CHANGELOG together.
 | Deception#28 AC-7 (2026-09-20) | `v0.8.0` → `v0.9.0rc2` |
 | `effect_contracts` producer (2026-09-20) | `v0.9.0rc2` → `v0.9.0rc3` — the reference grammar; see above |
 | `EffectObservation` authority narrowing (2026-09-20) | `v0.9.0rc3` → `v0.9.0rc4` — AZ-06 emits this record, so it moves with the contract it emits under; see above |
-| Deception#50 (2026-10-24) | `v0.9.0rc4` → `v0.9.0rc5` (current) — carries `trace_id` and the synthetic identity / credential references, and binds a shadow run to its effect; see above |
+| Deception#50 (2026-10-24) | `v0.9.0rc4` → `v0.9.0rc5` — carries `trace_id` and the synthetic identity / credential references, and binds a shadow run to its effect; see above |
+| Fabric pin `rc6` (2026-11-05) | `v0.9.0rc5` → `v0.9.0rc6` (current) — **not additive** (Fabric#65 trailing newlines, Fabric#23 depth 32, Fabric#72 typed-ref kinds); signed after the tag; see above |

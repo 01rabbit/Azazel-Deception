@@ -100,6 +100,12 @@ are not proven (see `docs/live-gate-checklist.md`).
 
 ### Changed
 
+- **Azazel-Fabric pin `v0.9.0rc5` → `v0.9.0rc6`** — not additive (Fabric#65
+  trailing newlines refused, Fabric#23 directive depth limit 32, Fabric#72
+  `observation_objective:` / `hypothesis:` / `frame:` typed refs). AZ-06's
+  behaviour is unchanged (the projector already refused trailing newlines);
+  `tests/test_effect_contracts_producer.py` now asserts that Fabric refuses
+  them too. See `docs/fabric-pin.md`.
 - **MIO objective feedback interop runner** — `scripts/dev/mio_feedback_interop.sh` pins exact MIO `main` (`ce9c2c9f242d2f9476f8d49d4b237fb6208c5a7c`) and requires an exact full Knowledge commit through a local environment variable. It validates both revisions as commit objects, keys virtual environments by both revisions and the resolved Python interpreter, and records the Deception tree and actual executed count in the local log. The full Knowledge commit ID appears only in the local log, not in public files. CPython 3.12.14 exact-candidate run: **15 passed, 0 skipped**. One static scenario follows the deterministic MIO objective through a test-only synthetic Edge mapping/decision, Deception's existing activation and evidence gates, a real local Knowledge API process, and MIO's no-model explanation. The harness records the service interaction; it is not an independent runtime observation and does not prove attacker belief, deception success, or delay. This does not establish a production Edge issuer/withdrawal path, Nexus handoff, hardware isolation, or HIL; the private Knowledge run remains local-only and is not CI-gated. The earlier `7a35288` MIO/Knowledge run remains historical.
 - **Azazel-Fabric pin `v0.9.0rc4` → `v0.9.0rc5`; `trace_id` and the synthetic
   identity / credential references reach `PresentedTerrainRef`**

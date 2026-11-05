@@ -637,19 +637,23 @@ _NEWLINE_CASES = [
 
 @pytest.mark.parametrize("source,field,value", _NEWLINE_CASES)
 def test_a_trailing_newline_reference_is_never_emitted(source, field, value):
-    """Azazel-Fabric#65: the pinned grammar accepts `kind:body\\n`.
+    """Azazel-Fabric#65: the pinned grammar refuses `kind:body\\n` (`v0.9.0rc6`).
 
-    `OPAQUE_REF_PATTERN` ends in `$` and is applied with `.match`, and `$`
-    matches before one trailing newline. AZ-06 does not rely on that. Where a
-    local model already refuses the value, the record is copied without
-    validation to reach the projector with it anyway: the projector's own
-    refusal is what this checks, independent of every layer upstream.
+    Until `v0.9.0rc5` `OPAQUE_REF_PATTERN` ended in `$` and was applied with
+    `.match`, and `$` matches before one trailing newline, so Fabric accepted
+    such a reference. `rc6` refuses it. The projector keeps its own refusal
+    anyway, as a second, independent layer that does not rely on which Fabric
+    release is installed (and that also covers untyped references, which no
+    typed grammar sees). Where a local model already refuses the value, the
+    record is copied without validation to reach the projector with it anyway:
+    the projector's own refusal is what this checks, independent of every
+    layer upstream.
     """
 
     kind, _ = parse_ref("credential:smb-1\n")
-    assert kind is not None, (
-        "Fabric#65 is fixed in the pinned release: keep the refusal below, "
-        "drop this precondition and the note that explains it"
+    assert kind is None, (
+        "Fabric#65 is fixed in the pinned release (v0.9.0rc6): a typed "
+        "reference with a trailing newline is no longer typed"
     )
 
     snapshot = _snapshot()
