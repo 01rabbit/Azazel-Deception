@@ -280,10 +280,12 @@ def _require_opaque(value: object, *, field: str) -> None:
     Applied to **every** reference the projector emits -- typed or untyped,
     from the snapshot, from the caller or from a bound effect -- by the
     loop over emitted references in `project_presented_terrain`. Checked
-    here rather than left to Fabric, because the pinned grammar does not
-    check it: `OPAQUE_REF_PATTERN` ends in `$` and is applied with `.match`,
-    so `credential:x\n` parses as a typed reference (Azazel-Fabric#65).
-    AZ-06 does not rely on that. A reference is opaque because it has no
+    here as well as in Fabric: until `v0.9.0rc5` the grammar did not check it
+    (`OPAQUE_REF_PATTERN` ends in `$` and was applied with `.match`, so
+    `credential:x\n` parsed as a typed reference, Azazel-Fabric#65), and
+    `v0.9.0rc6` now refuses a typed one. The projector's check stays: it is
+    independent of the installed release and also covers untyped references.
+    A reference is opaque because it has no
     structure a reader could act on, and a trailing newline is structure --
     a value that ends a line in a log or a header. An empty value is refused
     too, with its own message: it names nothing, and saying it carries
