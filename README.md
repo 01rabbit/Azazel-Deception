@@ -17,7 +17,7 @@ It materializes bounded, coherent deception environments from versioned packages
 Versions (details in [`docs/fabric-pin.md`](docs/fabric-pin.md)):
 
 - **Product version:** see the `version` field in [`pyproject.toml`](pyproject.toml). It is a pre-release development version. Release state (no stable release, no release tag, work in progress under `[Unreleased]`) is recorded in [`CHANGELOG.md`](CHANGELOG.md).
-- **Fabric pin:** the exact `azazel-fabric` tag is declared in [`pyproject.toml`](pyproject.toml). It is pinned to an exact tag, never a branch, and the version/pin policy (including the candidate status and when the pin is revisited) is set out in [`docs/fabric-pin.md`](docs/fabric-pin.md).
+- **Fabric pin:** the exact `azazel-fabric` tag is declared in [`pyproject.toml`](pyproject.toml). It is pinned to an exact tag, never a branch, and the version/pin policy (including pin history and when the pin is revisited) is set out in [`docs/fabric-pin.md`](docs/fabric-pin.md).
 
 Hardware-in-the-loop evidence does not exist yet. Container, virtual-lab and CI results are software evidence only; they do not close any HIL gate.
 
