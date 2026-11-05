@@ -229,20 +229,16 @@ Primary cross-repository dependencies:
 
 ## Implementation trackers
 
-Issue states below were last read from GitHub on 2026-09-19 and were **not re-read** for this revision. Check each tracker link for its current state before routing work to it.
+The [current issue map](docs/implementation-status.md#current-issue-map) distinguishes
+open software work, research, hardware gates, and closed history. Issue states
+were read from GitHub on **2026-11-05**. Do not route work to a closed issue or
+treat a software test as evidence that a hardware-in-the-loop gate has passed.
 
-| Open issue | Purpose |
-|---|---|
-| [#3](https://github.com/01rabbit/Azazel-Deception/issues/3) | Prove one signed reference package on ARM64 and AMD64 — reviewed SBOM-content policy and equivalent end-to-end lifecycle on both architectures remain open |
-| [#28](https://github.com/01rabbit/Azazel-Deception/issues/28) | Separate Deception lifecycle state from Edge/Gadget Defensive State |
-| [#30](https://github.com/01rabbit/Azazel-Deception/issues/30) | Research: Deception as a Presented Terrain engine with transition, fingerprint, and outcome-evidence discipline |
-| [#31](https://github.com/01rabbit/Azazel-Deception/issues/31) | Static Presented Terrain vertical slice — the v0 slice is delivered and CI-green; the issue tracks the adaptive/fingerprint/benchmark follow-ons its body excludes |
-| [#35](https://github.com/01rabbit/Azazel-Deception/issues/35) | Reconcile AZ-06 assurance evidence and define bounded Nexus/Boot Lite profiles |
-| [#6](https://github.com/01rabbit/Azazel-Deception/issues/6) | Phase 2 coherent narrative, honey artifacts, credentials, personas, and finite-state transitions — **gated, not started** |
-
-Closed, kept only as history: [#1](https://github.com/01rabbit/Azazel-Deception/issues/1) (canonical Fabric contracts), [#2](https://github.com/01rabbit/Azazel-Deception/issues/2) (feature-disabled Compose lifecycle adapter), [#4](https://github.com/01rabbit/Azazel-Deception/issues/4) (isolation/evidence/termination/reset harness), [#5](https://github.com/01rabbit/Azazel-Deception/issues/5) (Edge shadow/replay integration). Closing them did **not** close the hardware-in-the-loop gates; those remain open in [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
-
-The remaining order is **#3 → live Phase 1 gate → #6**, with #28/#30/#31 running alongside. Live exposure must not be enabled merely because a runtime adapter can start containers, and Phase 2 must not begin merely because CI is green.
+The phase order remains **#3 → live Phase 1 gate → #6**. #55, #39, #41, #35,
+#31, and #30 track separate feedback, integration, assurance, static-slice
+follow-on, and research work; their detailed status and dependencies are in
+the issue map above. Live exposure remains gated, and Phase 2 does not start
+merely because CI is green.
 
 ## Phase order
 
