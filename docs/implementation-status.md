@@ -1,6 +1,6 @@
 # AZ-06 Implementation Status
 
-Last updated: 2026-11-03
+Last updated: 2026-11-06
 
 This document separates **implemented software properties** from **field/HIL
 properties that are not yet proven**. A green unit/CI suite is not a claim of
@@ -383,7 +383,7 @@ at the required assurance level.
 
 ## Current issue map
 
-Issue states below were read from GitHub on 2026-11-03. **Open trackers are
+Issue states below were read from GitHub on 2026-11-06. **Open trackers are
 `#55`, `#41`, `#39`, `#35`, `#31`, `#30`, `#6`, `#3`.** `#50`, `#38`, `#28`,
 `#5`, `#4`, `#2` and `#1` are closed and are listed only as history — do not
 route work to them.

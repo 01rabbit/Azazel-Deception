@@ -12,7 +12,16 @@ It materializes bounded, coherent deception environments from versioned packages
 
 ## Status
 
-**Phase 0 complete; Phase 1 in progress.** The AZ-06 designation is ratified and the canonical Azazel-Fabric deception-environment contracts are landed and pinned to an exact release tag (see [`docs/fabric-pin.md`](docs/fabric-pin.md)). Live engagement remains **disabled by default** and stays that way until the Phase-1 live gates close — including physical/hardware-in-the-loop isolation gates that no CI run can satisfy. Per-item status is in [`docs/roadmap.md`](docs/roadmap.md), [`docs/implementation-status.md`](docs/implementation-status.md) and [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
+**Phase 0 complete; Phase 1 in progress.** The AZ-06 designation is ratified and the canonical Azazel-Fabric deception-environment contracts are landed. Live engagement remains **disabled by default** and stays that way until the Phase-1 live gates close — including physical/hardware-in-the-loop isolation gates that no CI run can satisfy. Per-item status is in [`docs/roadmap.md`](docs/roadmap.md), [`docs/implementation-status.md`](docs/implementation-status.md) and [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
+
+Versions (details in [`docs/fabric-pin.md`](docs/fabric-pin.md)):
+
+- **Product version:** see the `version` field in [`pyproject.toml`](pyproject.toml). It is a pre-release development version. Release state (no stable release, no release tag, work in progress under `[Unreleased]`) is recorded in [`CHANGELOG.md`](CHANGELOG.md).
+- **Fabric pin:** the exact `azazel-fabric` tag is declared in [`pyproject.toml`](pyproject.toml). It is pinned to an exact tag, never a branch, and the version/pin policy (including pin history and when the pin is revisited) is set out in [`docs/fabric-pin.md`](docs/fabric-pin.md).
+
+Hardware-in-the-loop evidence does not exist yet. Container, virtual-lab and CI results are software evidence only; they do not close any HIL gate.
+
+A read-only package and host check is described in [Install and verify](#install-and-verify); it does not activate an environment.
 
 Initial portability target:
 
@@ -44,6 +53,21 @@ Azazel-Deception does **not** own:
 - unrestricted autonomous planning
 - hack-back, attacker-system compromise, arbitrary code delivery, or uncontrolled decoy egress
 - runtime LLM authority
+
+## Authority: three different things
+
+Three things are easy to conflate. They are different in kind:
+
+| Thing | What it is | What it can do |
+|---|---|---|
+| MIO objective (observation objective) | Advice, carried as `advisory:` references | Nothing. It starts, selects, extends and ends nothing. |
+| Edge decision | The **sole authorization** for activation or transition | Must be authenticated, unexpired, unconsumed and correctly bound. The operator kill switch can terminate/reset; it cannot activate an environment. |
+| Deception execution and observation boundary | Deception executes only Edge-approved decisions through its adapter, and records what it observed | Materializes, transitions, records and resets within the decision's window. It does not decide, and an observation is never a decision. |
+
+An objective can be listed in an Edge decision's `evidence_refs`; that binds
+it to the signature, and it still authorizes nothing. The full binding rules,
+lease, and feedback bundle are in
+[`docs/mio-objective-feedback.md`](docs/mio-objective-feedback.md).
 
 ## Architecture
 
@@ -115,6 +139,49 @@ Approved packages remain fully executable with **no LLM available at runtime**. 
 
 See [`docs/safety-model.md`](docs/safety-model.md).
 
+## Install and verify
+
+Use Python 3.10 or later in a virtual environment. Installing pulls `azazel-fabric` from GitHub at the
+exact tag declared in [`pyproject.toml`](pyproject.toml) (policy in
+[`docs/fabric-pin.md`](docs/fabric-pin.md)), so this step needs network access and `git`.
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e '.[dev]'
+pytest
+```
+
+`pytest` runs the deterministic test suite. Real-container tests are opt-in and
+are not part of a plain `pytest` run: they require `AZAZEL_DECEPTION_DOCKER_TESTS=1`
+and Docker Engine with the Compose v2 plugin.
+
+Minimal read-only checks of the non-executing bootstrap CLI, using the
+reference package:
+
+```bash
+python -m azazel_deception capabilities
+python -m azazel_deception validate examples/packages/municipal-linux-v1/package.yaml
+```
+
+The same commands are also available as the installed `azazel-deception`
+script. The `validate` command exits non-zero on an invalid package.
+
+## Shadow/replay and the live Compose path
+
+These two are separate and must not be confused:
+
+- **Shadow / replay (non-executing).** The Edge shadow/replay boundary is
+  non-executing. AZ-06's default mode is `planned_shadow`, which starts no
+  runtime.
+- **Live Compose lifecycle (gated, default-off).** The Docker Compose adapter
+  can start and stop an environment, but only through a gated path that is
+  **off by default**. Having the adapter is not the same as enabling exposure.
+  Enabling it requires the Phase-1 live gates to close, including the HIL
+  gates above. The combined networked Edge→AZ-06 flow remains open; Edge #325
+  is its integration tracker. See [the live-flip runbook](docs/live-flip-runbook.md) and
+  [Edge issue #325](https://github.com/01rabbit/Azazel-Edge/issues/325).
+
 ## Bootstrap CLI
 
 The initial CLI is intentionally non-executing. It reports host capabilities, validates the bootstrap reference package, and produces a deterministic placement plan while the Fabric and Edge activation contracts stabilize.
@@ -162,20 +229,16 @@ Primary cross-repository dependencies:
 
 ## Implementation trackers
 
-Issue states below were read from GitHub on 2026-09-19. Route work only to the open trackers.
+The [current issue map](docs/implementation-status.md#current-issue-map) distinguishes
+open software work, research, hardware gates, and closed history. Issue states
+were read from GitHub on **2026-11-06**. Do not route work to a closed issue or
+treat a software test as evidence that a hardware-in-the-loop gate has passed.
 
-| Open issue | Purpose |
-|---|---|
-| [#3](https://github.com/01rabbit/Azazel-Deception/issues/3) | Prove one signed reference package on ARM64 and AMD64 — reviewed SBOM-content policy and equivalent end-to-end lifecycle on both architectures remain open |
-| [#28](https://github.com/01rabbit/Azazel-Deception/issues/28) | Separate Deception lifecycle state from Edge/Gadget Defensive State |
-| [#30](https://github.com/01rabbit/Azazel-Deception/issues/30) | Research: Deception as a Presented Terrain engine with transition, fingerprint, and outcome-evidence discipline |
-| [#31](https://github.com/01rabbit/Azazel-Deception/issues/31) | Static Presented Terrain vertical slice — the v0 slice is delivered and CI-green; the issue tracks the adaptive/fingerprint/benchmark follow-ons its body excludes |
-| [#35](https://github.com/01rabbit/Azazel-Deception/issues/35) | Reconcile AZ-06 assurance evidence and define bounded Nexus/Boot Lite profiles |
-| [#6](https://github.com/01rabbit/Azazel-Deception/issues/6) | Phase 2 coherent narrative, honey artifacts, credentials, personas, and finite-state transitions — **gated, not started** |
-
-Closed, kept only as history: [#1](https://github.com/01rabbit/Azazel-Deception/issues/1) (canonical Fabric contracts), [#2](https://github.com/01rabbit/Azazel-Deception/issues/2) (feature-disabled Compose lifecycle adapter), [#4](https://github.com/01rabbit/Azazel-Deception/issues/4) (isolation/evidence/termination/reset harness), [#5](https://github.com/01rabbit/Azazel-Deception/issues/5) (Edge shadow/replay integration). Closing them did **not** close the hardware-in-the-loop gates; those remain open in [`docs/live-gate-checklist.md`](docs/live-gate-checklist.md).
-
-The remaining order is **#3 → live Phase 1 gate → #6**, with #28/#30/#31 running alongside. Live exposure must not be enabled merely because a runtime adapter can start containers, and Phase 2 must not begin merely because CI is green.
+The phase order remains **#3 → live Phase 1 gate → #6**. #55, #39, #41, #35,
+#31, and #30 track separate feedback, integration, assurance, static-slice
+follow-on, and research work; their detailed status and dependencies are in
+the issue map above. Live exposure remains gated, and Phase 2 does not start
+merely because CI is green.
 
 ## Phase order
 
