@@ -34,6 +34,8 @@ Initial portability target:
 
 Implemented today: host capability discovery, fail-closed package validation with a normalize-first canonical content digest, deterministic non-executing placement planning, a synthetic Linux reference package on an immutable multi-architecture image digest, isolated Compose assets with a static isolation policy, a gated Compose lifecycle adapter (default-off), a tamper-evident evidence chain, authenticated one-shot Edge decision handling, an operator kill switch, an Edge shadow/replay boundary, native ARM64/AMD64 portability CI, tests, and safety/integration documentation. These are software properties; they are not field or HIL certification.
 
+Local canary preparation and its remaining runtime gates: [local canaries](docs/local-canaries.md).
+
 ## Responsibility boundary
 
 Azazel-Deception owns:

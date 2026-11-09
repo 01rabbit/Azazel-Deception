@@ -1,0 +1,13 @@
+{
+  "profile": "local-web-v1",
+  "purpose": "synthetic local link and fake API description",
+  "enabled_by_default": false,
+  "content_kind": "synthetic_openapi",
+  "token_path_prefix": "/__azazel_canary__/",
+  "max_tokens": 128,
+  "max_events": 2048,
+  "ttl_seconds": 600,
+  "external_callback": false,
+  "instruction_following": false,
+  "limitations": "preparation profile only; not an admitted or materialized service"
+}
