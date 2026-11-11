@@ -39,6 +39,7 @@ def material():
         root.write_bytes(b"synthetic-root-not-a-cryptographic-fixture")
         bundle.write_bytes(b"synthetic-bundle-not-a-cryptographic-fixture")
         yield offline.OfflineGitHubAttestationPackageVerifier(
+            temporary_parent=directory,
             gh_path=cli,
             gh_sha256=hashlib.sha256(cli.read_bytes()).hexdigest(),
             bundle_path=bundle,
@@ -232,6 +233,7 @@ def test_real_prestaged_sigstore_package_verification(material, monkeypatch):
             "explicit prestaged public Sigstore material and trusted CLI required"
         )
     verifier = offline.OfflineGitHubAttestationPackageVerifier(
+        temporary_parent=Path(os.environ["AZ06_OFFLINE_TEMP_PARENT"]),
         gh_path=Path(os.environ["AZ06_OFFLINE_GH_PATH"]),
         gh_sha256=os.environ["AZ06_OFFLINE_GH_SHA256"],
         bundle_path=Path(os.environ["AZ06_OFFLINE_BUNDLE_PATH"]),
@@ -260,3 +262,60 @@ def test_real_prestaged_sigstore_package_verification(material, monkeypatch):
     # Test-only altered policy proves the real CLI rejects a wrong source ref.
     monkeypatch.setattr(offline, "SOURCE_REF", "refs/heads/not-the-reviewed-main")
     assert verifier(package()) is False
+
+
+def test_unsafe_ambient_tmpdir_is_not_used_for_executable_snapshot(
+    material, monkeypatch
+):
+    ambient = material.temporary_parent / "unsafe-ambient"
+    ambient.mkdir(mode=0o777)
+    ambient.chmod(0o777)
+    monkeypatch.setenv("TMPDIR", str(ambient))
+    monkeypatch.setenv("TMP", str(ambient))
+    monkeypatch.setenv("TEMP", str(ambient))
+    # Even a cached stdlib ambient temp directory must not enter this path.
+    monkeypatch.setattr(offline.tempfile, "tempdir", str(ambient))
+
+    def invoke(command, **kwargs):
+        snapshot = Path(command[0]).parent
+        assert snapshot.parent == material.temporary_parent
+        assert snapshot.stat().st_mode & 0o777 == 0o700
+        assert not list(ambient.iterdir())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(offline.subprocess, "run", invoke)
+    assert material(package()) is True  # Actual filesystem, mocked CLI only.
+    assert not list(ambient.iterdir())
+    assert not list(material.temporary_parent.glob("az06-offline-package-*"))
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["writable", "symlink", "writable_ancestor", "missing", "relative", "invalid"],
+)
+def test_bad_explicit_workspace_refuses_before_execution(material, monkeypatch, fault):
+    parent = material.temporary_parent / "workspace"
+    parent.mkdir(mode=0o700)
+    if fault == "writable":
+        parent.chmod(0o777)
+    elif fault == "symlink":
+        target = parent.with_name("actual-workspace")
+        parent.rename(target)
+        parent.symlink_to(target, target_is_directory=True)
+    elif fault == "writable_ancestor":
+        parent.chmod(0o777)
+        child = parent / "protected-child"
+        child.mkdir(mode=0o700)
+        parent = child
+    elif fault == "missing":
+        parent = parent / "absent"
+    elif fault == "relative":
+        parent = Path("relative")
+    else:
+        parent = None
+    monkeypatch.setattr(
+        offline.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("unsafe workspace execution"),
+    )
+    assert replace(material, temporary_parent=parent)(package()) is False

@@ -41,6 +41,27 @@ def _fingerprint(info):
     )
 
 
+def _protected_directory(path: Path) -> Path:
+    """Require an operator-provisioned workspace, independent of TMPDIR."""
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("absolute physical workspace required")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
+    fd = os.open("/", flags)
+    try:
+        for name in (*path.parts[1:], None):
+            info = os.fstat(fd)
+            if info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022:
+                raise ValueError("untrusted workspace ancestor")
+            if name is not None:
+                child = os.open(name, flags, dir_fd=fd)
+                os.close(fd)
+                fd = child
+        return path
+    finally:
+        os.close(fd)
+
+
 def _read_protected(path: Path, maximum: int, *, executable: bool = False) -> bytes:
     """Pin every parent with no-follow opens; reject writable trust paths."""
     path = Path(path)
@@ -116,6 +137,7 @@ class OfflineGitHubAttestationPackageVerifier:
     bundle_path: Path
     trusted_root_path: Path
     trusted_root_sha256: str
+    temporary_parent: Path
 
     def __call__(self, package: DeceptionPackage) -> bool:
         if package.signer_ref != "github:" + WORKFLOW:
@@ -129,6 +151,7 @@ class OfflineGitHubAttestationPackageVerifier:
             return False
         try:
             assert_package_content_digest(package)
+            temporary_parent = _protected_directory(self.temporary_parent)
             payload = canonical_package_signing_bytes(package)
             if len(payload) > MAX_PAYLOAD_BYTES:
                 return False
@@ -141,7 +164,9 @@ class OfflineGitHubAttestationPackageVerifier:
             bundle = _read_protected(self.bundle_path, MAX_BUNDLE_BYTES)
             if not bundle or not root:
                 return False
-            with tempfile.TemporaryDirectory(prefix="az06-offline-package-") as temp:
+            with tempfile.TemporaryDirectory(
+                prefix="az06-offline-package-", dir=temporary_parent
+            ) as temp:
                 directory = Path(temp)
                 # Snapshot even the executable: never hash one pathname and
                 # later execute replacement bytes at that pathname.

@@ -61,6 +61,7 @@ Construct the optional verifier explicitly with:
 
 ```python
 OfflineGitHubAttestationPackageVerifier(
+    temporary_parent=Path("/opt/offline-workspace"),
     gh_path=Path("/opt/offline-trust/gh"),
     gh_sha256=reviewed_cli_sha256,
     bundle_path=Path("/opt/offline-trust/package.bundle.jsonl"),
@@ -68,6 +69,13 @@ OfflineGitHubAttestationPackageVerifier(
     trusted_root_sha256=reviewed_root_sha256,
 )
 ```
+
+The required `temporary_parent` must already exist and be operator-provisioned.
+Every physical ancestor and the directory itself must be root/current-UID owned,
+without group/other writes or symlinks. Snapshot subdirectories are private 0700.
+The module always passes this explicit parent to temporary-directory creation;
+ambient TMPDIR/TEMP/TMP and cached stdlib temp paths are ignored. The same trusted
+owner/root limitation applies: this is not isolation from malicious same-UID code.
 
 Every input must be a bounded regular single-link file with an absolute literal
 path, owned by root or the verifier's UID, without group/other writes, setuid or
@@ -107,7 +115,8 @@ explicitly **not** cryptographic-positive evidence.
 
 The opt-in real test requires `AZ06_OFFLINE_ATTESTATION_TEST=1` plus
 `AZ06_OFFLINE_GH_PATH`, `AZ06_OFFLINE_GH_SHA256`, `AZ06_OFFLINE_BUNDLE_PATH`,
-`AZ06_OFFLINE_ROOT_PATH` and `AZ06_OFFLINE_ROOT_SHA256`. Run it inside a
+`AZ06_OFFLINE_ROOT_PATH`, `AZ06_OFFLINE_ROOT_SHA256` and the precreated protected
+`AZ06_OFFLINE_TEMP_PARENT`. Run it inside a
 network-disabled Linux environment with protected prestaged material. It requires
 an actual successful canonical-package verification and actual CLI refusal for
 corrupted bundle/root and wrong source-ref, in addition to pin mismatch refusals.
