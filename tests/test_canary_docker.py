@@ -26,13 +26,22 @@ from azazel_deception.planner import build_placement_plan
 from azazel_deception.runtime.compose import DockerComposeAdapter
 from azazel_deception.runtime.observation_export import export_observations
 from azazel_deception.runtime.transport import HmacDecisionAuthenticator, sign_decision
-from tests.test_docker_integration import (
-    COMPOSE, PACKAGE, _docker_available, _inspect, _project_containers, _single_container_id,
-)
 from tests.test_runtime import _decision, _host, _termination
+from tests._canary_strict_offline import strict_mode_requested, strict_preflight
+
+if strict_mode_requested():
+    # The legacy integration module probes Docker at import when opted in.
+    # Strict collection must wait for VM/material/local-context guards first.
+    COMPOSE = Path("runtime/compose/reference-linux.compose.yaml")
+    PACKAGE = Path("examples/packages/municipal-linux-v1/package.yaml")
+else:
+    from tests.test_docker_integration import (
+        COMPOSE, PACKAGE, _docker_available, _inspect, _project_containers, _single_container_id,
+    )
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("AZAZEL_DECEPTION_DOCKER_TESTS") != "1" or not _docker_available(),
+    os.environ.get("AZAZEL_DECEPTION_DOCKER_TESTS") != "1"
+    or (not strict_mode_requested() and not _docker_available()),
     reason="requires explicit Docker opt-in and a reachable daemon",
 )
 PACKAGE_SHA256 = "baca710857669a1901afaf18f32c44f7b0d18a913c11dad6030a40aa8785de53"
@@ -48,6 +57,26 @@ def _require(condition, message):
 def _run(*args, input=None, timeout=15):
     return subprocess.run(["docker", *args], input=input, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, timeout=timeout, check=False)
+
+
+if strict_mode_requested():
+    # Same finite readbacks as the legacy harness, without its import-time
+    # daemon probe. These only run after strict_preflight verifies local context.
+    def _project_containers(adapter, environment):
+        result = _run("ps", "-a", "--filter", "label=com.docker.compose.project=" + adapter._project_name(environment),
+                      "--format", "{{json .}}")
+        _require(result.returncode == 0, "actual project readback unavailable")
+        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+    def _single_container_id(adapter, environment):
+        containers = _project_containers(adapter, environment)
+        _require(len(containers) == 1, "expected exactly one actual lab container")
+        return containers[0]["ID"]
+
+    def _inspect(container):
+        result = _run("inspect", container)
+        _require(result.returncode == 0, "actual container inspection unavailable")
+        return json.loads(result.stdout)[0]
 
 
 def _fixture_pin(package):
@@ -77,38 +106,58 @@ def _networks(project):
 def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
     raw = load_package(PACKAGE)
     package = parse_package(raw)
-    _require(_fixture_pin(package), "checked-in lab package fixture changed; review required")
+    strict = strict_mode_requested()
+    if strict:
+        package_verifier, sbom_verifier, planning_host, measured = strict_preflight(package, tmp_path)
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        _require(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", boot), "actual kernel boot UUID unavailable")
+        boot = "kernel-boot-" + boot
+    else:
+        _require(_fixture_pin(package), "checked-in lab package fixture changed; review required")
+        package_verifier = sbom_verifier = _fixture_pin
+        planning_host, measured, boot = _host(), None, "fixture-boot"
     image = _run("image", "inspect", IMAGE)
     _require(image.returncode == 0, "pinned reference image must be prestaged; this test never pulls")
+    if strict:
+        local_image = json.loads(image.stdout)[0]
+        _require(local_image.get("Os") == "linux" and local_image.get("Architecture") == measured["daemon_platform"],
+                 "prestaged image platform differs from measured local daemon")
+        measured["image_platform"] = local_image["Architecture"]
     environment = "canary-lab-" + uuid.uuid4().hex[:10]
     decision_id = "fixture-" + uuid.uuid4().hex
     key = os.urandom(32)  # per-run synthetic lab signer, no real Edge authority
-    plan = build_placement_plan(raw, _host(), "lite", edge_decision_id=decision_id)
-    scope = CanaryScope(package.package_id, PACKAGE_SHA256, environment, "fixture-boot",
+    plan = build_placement_plan(raw, planning_host, "lite", edge_decision_id=decision_id)
+    scope = CanaryScope(package.package_id, package.package_digest.removeprefix("sha256:"), environment, boot,
                         decision_id, "intranet-web-http")
     registry = CanaryRegistry(scope)
     now = lambda: datetime.now(timezone.utc).isoformat()
-    issued = registry.issue(issued_at=now(), ttl_seconds=30)
-    document = synthetic_openapi(issued).encode()
+    issued = document = marker = None
     marker_body = b'{"synthetic_marker":true}\n'
     # Private host parent; bind only its readable leaf into the nonroot decoy.
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
     web = private / "web"
     web.mkdir(mode=0o755)
-    (web / "openapi.json").write_bytes(document)
     markers = web / "__azazel_canary__"
     markers.mkdir(mode=0o755)
-    marker = markers / issued.token
-    try:
-        marker.write_bytes(marker_body)
-    except OSError:
-        pytest.fail("private canary marker creation failed", pytrace=False)
-    for path in (web / "openapi.json", marker):
+
+    def plant():
+        nonlocal marker
+        prepared = registry.issue(issued_at=now(), ttl_seconds=30)
+        prepared_document = synthetic_openapi(prepared).encode()
+        prepared_marker = markers / prepared.token
+        marker = prepared_marker  # cleanup knows the secret path even if planting fails
         try:
-            path.chmod(0o644)
+            (web / "openapi.json").write_bytes(prepared_document)
+            prepared_marker.write_bytes(marker_body)
+            for path in (web / "openapi.json", prepared_marker):
+                path.chmod(0o644)
         except OSError:
-            pytest.fail("private canary artifact permissions failed", pytrace=False)
+            pytest.fail("private canary artifact planting failed", pytrace=False)
+        return prepared, prepared_document, prepared_marker
+
+    if not strict:
+        issued, document, marker = plant()  # retain original fixture-mode timing
     config = private / "nginx.conf"
     config.write_text(Path("runtime/compose/nginx.conf").read_text().replace("access_log /dev/stdout;", "access_log off;"))
     config.chmod(0o644)
@@ -123,7 +172,7 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
     compose.write_text(yaml.safe_dump(composed))
     adapter = DockerComposeAdapter(
         compose, tmp_path / "state", live_enabled=True,
-        package_verifier=_fixture_pin, sbom_verifier=_fixture_pin,
+        package_verifier=package_verifier, sbom_verifier=sbom_verifier,
         decision_authenticator=HmacDecisionAuthenticator(key),
         require_authenticated_decisions=True, require_sbom_verification=True,
     )
@@ -132,6 +181,10 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
         signed = sign_decision(_decision(raw, plan, decision_id=decision_id), key)
         activation = adapter.activate_environment(environment, raw, plan, signed)
         _require(activation["status"] == "active", "lab activation did not complete")
+        if strict:
+            # Real callbacks run again inside activation before decision use.
+            # Begin the actual 30s TTL only after their potentially slow work.
+            issued, document, marker = plant()
         container = _single_container_id(adapter, environment)
         inspected = _inspect(container)
         host = inspected["HostConfig"]
@@ -201,7 +254,11 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
         _require(adapter.collect_status(environment)["state"] == "absent", "runtime state remains after reset")
         # Safe, explicit scope report; no token/document/path/log is serialized.
         (tmp_path / "canary-result.json").write_text(json.dumps({
-            "production_admission": False, "admission": "exact_fixture_pin_and_synthetic_HMAC",
+            "production_admission": False,
+            "admission": "genuine_offline_package_and_SPDX_with_synthetic_HMAC" if strict else "exact_fixture_pin_and_synthetic_HMAC",
+            "strict_offline": strict, "package_authentication_verified": strict, "sbom_platform_authentication_verified": strict,
+            "edge_decision_authority": "synthetic_lab_HMAC_only", "genuine_edge_approval": False,
+            "protected_host_isolation_verified": False, "measured_host": measured,
             "scope": "local_container_static_canary_plumbing_only", "hardware_acceptance": False,
             "presentation_http": 200, "touch_http": 200, "expiry_http": 404,
             "observations": len(observations), "teardown_readback": True,
@@ -212,7 +269,8 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
         _require(_project_containers(adapter, environment) == [] and _networks(project) == [],
                  "FAILURE CLEANUP INCOMPLETE: lab container/network still present")
         try:
-            marker.unlink(missing_ok=True)
+            if marker is not None:
+                marker.unlink(missing_ok=True)
         except OSError:
             pytest.fail("private marker cleanup failed", pytrace=False)
         (web / "openapi.json").unlink(missing_ok=True)
