@@ -81,3 +81,39 @@ duplicate/event/token caps, reset/restart refusal, no token echo, evidence-chain
 projection, failed storage and no process/network calls. Container/CI/portability
 results remain software evidence; physical isolation/engagement efficacy and
 static fingerprint comparisons remain open.
+
+## Hardware-free process regression (#31/#74)
+
+`tests/test_static_canary_process.py` runs the registry and evidence emitter in
+an actual child process. Its test-only `LoopbackComposeDouble` retains the
+existing strict `DockerComposeAdapter.activate_environment` admission gates,
+including HMAC validation, package/placement binding, validity window, safe
+Compose policy, required verifier hooks and the durable one-shot ledger. It
+replaces Compose execution with one fixed `127.0.0.1` listener on an OS-chosen
+port. Package and SBOM verifier results and the signing key are explicit test
+fixtures. They are not genuine package verification or Edge approval evidence.
+The fixture is never imported by the product or installed as a command.
+
+The parent independently fetches the synthetic OpenAPI document, follows its
+relative marker, and reopens the on-disk chain through the existing
+`export_observations` reader. Tests verify token-free evidence, an active-state
+reset refusal, listener closure after the operator kill switch and registry
+invalidation, preserved evidence after reset, consumed admission after process
+restart, and rejection of an old token in a separately admitted fixture session.
+Unsigned, forged, expired, package-mismatched and missing-verifier admissions
+must fail before any socket bind. Expiry advances the fixture's explicit clock;
+it does not measure a real-time expiry scheduler. Parent stdin EOF closes the
+listener but deliberately leaves the last recorded runtime state unchanged,
+rather than claiming a reset that never ran. Parent waits, HTTP operations and
+child cleanup are bounded; no environment proxy is used for loopback requests.
+
+```sh
+PYTHONPATH=src:. python -m pytest -q tests/test_static_canary_process.py
+```
+
+This is process/canary/admission plumbing evidence only. The loopback socket is
+real; Compose execution remains a test double. It does not prove actual static
+container materialization, runtime isolation, Edge route/exposure, a production
+listener, Knowledge receipt, hardware behavior, or engagement effectiveness.
+Independent active/isolation readback against the actual admitted runtime and
+its teardown/reset remain #31 acceptance work under the existing live gates.
