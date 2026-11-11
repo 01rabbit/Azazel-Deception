@@ -50,7 +50,11 @@ A separate failure test injects an evidence error after actual HTTP readback:
 it must produce no success result, independently confirm actual teardown and
 remove the secret artifacts. Every runtime exit path attempts project cleanup
 and independently checks for remaining containers/networks; cleanup failure
-fails the test.
+fails the test. Compose teardown, independent container/network absence checks,
+marker removal and document removal are each attempted even if earlier steps
+fail. A failed marker unlink cannot skip document cleanup. Aggregate cleanup
+errors retain the original runtime error and individual failed steps; error
+messages omit secret filenames and raw artifact contents.
 
 These are local container/static-canary plumbing checks. They do not certify
 production package trust, Edge routing, protected-network isolation, independent
@@ -112,9 +116,13 @@ Strict planning reads the local VM's actual Docker `Architecture`, `NCPU`,
 `MemTotal`, `KernelVersion`, `DockerRootDir` and identity. Controller architecture
 and kernel must agree; free storage is measured on that local Docker directory.
 The Docker context must be `default` pointing to `unix:///var/run/docker.sock`;
-remote hosts/contexts refuse before a daemon connection. The actual prestaged
-image architecture must agree with the daemon. There is no fixed amd64 host
-plan in strict mode. Reports separate controller, daemon and image platform,
+remote hosts/contexts refuse before a daemon connection. An incompatible
+`DOCKER_DEFAULT_PLATFORM` refuses before any Docker command. The actual
+prestaged image architecture must agree with the daemon, and strict Compose
+explicitly pins `platform: linux/<measured daemon architecture>`. After startup,
+independent container/image inspection must show the same native image ID,
+Linux OS and architecture; prestart metadata alone cannot establish which
+variant actually ran. There is no fixed amd64 host plan in strict mode. Reports separate controller, daemon and image platform,
 actual resources and supply-chain verification from the synthetic HMAC lab
 signer. The real kernel boot UUID is used in the scoped canary registry.
 

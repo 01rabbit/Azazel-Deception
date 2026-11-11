@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -27,7 +28,9 @@ from azazel_deception.runtime.compose import DockerComposeAdapter
 from azazel_deception.runtime.observation_export import export_observations
 from azazel_deception.runtime.transport import HmacDecisionAuthenticator, sign_decision
 from tests.test_runtime import _decision, _host, _termination
-from tests._canary_strict_offline import strict_mode_requested, strict_preflight
+from tests._canary_strict_offline import (
+    strict_mode_requested, strict_preflight, native_service_platform, verify_native_container,
+)
 
 if strict_mode_requested():
     # The legacy integration module probes Docker at import when opted in.
@@ -103,6 +106,39 @@ def _networks(project):
     return result.stdout.split()
 
 
+class CanaryCleanupError(RuntimeError):
+    def __init__(self, original_error, errors):
+        self.original_error = original_error
+        self.cleanup_errors = tuple(errors)
+        super().__init__("canary cleanup incomplete; original=" +
+                         (type(original_error).__name__ if original_error else "none") +
+                         "; steps=" + ",".join(step for step, _ in errors))
+
+
+def _cleanup_canary(adapter, environment, project, compose, marker, document, original_error):
+    errors = []
+    def attempt(step, operation):
+        try:
+            operation()
+        except BaseException as exc:
+            errors.append((step, exc))
+    def down():
+        result = _run("compose", "-f", str(compose), "-p", project, "down", "--remove-orphans", timeout=60)
+        _require(result.returncode == 0, "lab compose teardown failed")
+    attempt("compose-down", down)
+    attempt("container-absence", lambda: _require(_project_containers(adapter, environment) == [],
+                                                 "lab container remains or readback unavailable"))
+    attempt("network-absence", lambda: _require(_networks(project) == [],
+                                               "lab network remains or readback unavailable"))
+    # Each secret artifact has its own cleanup attempt, even after teardown or
+    # the other unlink fails. Preserve errors without echoing secret filenames.
+    if marker is not None:
+        attempt("marker-removal", lambda: marker.unlink(missing_ok=True))
+    attempt("document-removal", lambda: document.unlink(missing_ok=True))
+    if errors:
+        raise CanaryCleanupError(original_error, errors) from original_error
+
+
 def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
     raw = load_package(PACKAGE)
     package = parse_package(raw)
@@ -164,6 +200,8 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
     composed = yaml.safe_load(COMPOSE.read_text())
     service = composed["services"]["intranet-web"]
     service["pull_policy"] = "never"
+    if strict:
+        service["platform"] = native_service_platform(measured["daemon_platform"])
     service["volumes"] = [
         {"type": "bind", "source": str(web), "target": "/usr/share/nginx/html", "read_only": True},
         {"type": "bind", "source": str(config), "target": "/etc/nginx/nginx.conf", "read_only": True},
@@ -187,6 +225,11 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
             issued, document, marker = plant()
         container = _single_container_id(adapter, environment)
         inspected = _inspect(container)
+        if strict:
+            actual_image = _run("image", "inspect", inspected["Image"])
+            _require(actual_image.returncode == 0, "actual container image readback unavailable")
+            measured.update(verify_native_container(measured["daemon_platform"], local_image,
+                                                    inspected, json.loads(actual_image.stdout)[0]))
         host = inspected["HostConfig"]
         _require(inspected["State"]["Running"] is True, "container is not running")
         _require(host["ReadonlyRootfs"] and not host["Privileged"] and host["CapDrop"] == ["ALL"]
@@ -264,16 +307,7 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
             "observations": len(observations), "teardown_readback": True,
         }, sort_keys=True))
     finally:
-        # Also cover assertion/HTTP/export/termination failures; never trust only local state.
-        _run("compose", "-f", str(compose), "-p", project, "down", "--remove-orphans", timeout=60)
-        _require(_project_containers(adapter, environment) == [] and _networks(project) == [],
-                 "FAILURE CLEANUP INCOMPLETE: lab container/network still present")
-        try:
-            if marker is not None:
-                marker.unlink(missing_ok=True)
-        except OSError:
-            pytest.fail("private marker cleanup failed", pytrace=False)
-        (web / "openapi.json").unlink(missing_ok=True)
+        _cleanup_canary(adapter, environment, project, compose, marker, web / "openapi.json", sys.exc_info()[1])
 
 
 def test_canary_evidence_failure_still_removes_actual_container_and_network(tmp_path, monkeypatch):

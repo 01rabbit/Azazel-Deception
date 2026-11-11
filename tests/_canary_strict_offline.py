@@ -84,6 +84,11 @@ def offline_callbacks(environment=None):
 
 def measured_host(environment=None):
     env = os.environ if environment is None else environment
+    aliases = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}
+    controller_arch = aliases.get(platform.machine().lower())
+    require(controller_arch in ("arm64", "amd64"), "unsupported actual controller platform")
+    require(env.get("DOCKER_DEFAULT_PLATFORM", "") in ("", "linux/" + controller_arch),
+            "incompatible Docker default platform; native strict execution required")
     require(env.get("DOCKER_HOST", "") in ("", "unix:///var/run/docker.sock")
             and env.get("DOCKER_CONTEXT", "") in ("", "default"), "strict Docker daemon must be local")
     require(_command("docker", "context", "show").strip() == b"default", "strict local default Docker context required")
@@ -91,8 +96,6 @@ def measured_host(environment=None):
     require(endpoint == "unix:///var/run/docker.sock", "strict Docker context is not the local VM socket")
     info = _json(_command("docker", "info", "--format", "{{json .}}"))
     require(type(info) is dict, "actual Docker information must be an object")
-    aliases = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}
-    controller_arch = aliases.get(platform.machine().lower())
     daemon_arch = aliases.get(info.get("Architecture"))
     require(info.get("OSType") == "linux" and controller_arch == daemon_arch and daemon_arch in ("arm64", "amd64")
             and info.get("KernelVersion") == platform.release(), "Docker/controller Linux platform mismatch")
@@ -123,3 +126,20 @@ def strict_preflight(package, workspace, environment=None):
     require(sbom_verifier(package) is True, "strict offline SPDX/platform authentication refused")
     host, measured = measured_host(environment)
     return package_verifier, sbom_verifier, host, measured
+
+
+def native_service_platform(daemon_platform):
+    require(daemon_platform in ("arm64", "amd64"), "unsupported native daemon platform")
+    return "linux/" + daemon_platform
+
+
+def verify_native_container(daemon_platform, prestaged, container, actual_image):
+    image_id = prestaged.get("Id")
+    require(type(image_id) is str and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id),
+            "native prestaged image identity unavailable")
+    require(container.get("Image") == image_id == actual_image.get("Id"),
+            "actual container image identity differs from native prestaged image")
+    require(container.get("Platform") == "linux" and prestaged.get("Os") == actual_image.get("Os") == "linux"
+            and prestaged.get("Architecture") == actual_image.get("Architecture") == daemon_platform,
+            "actual container image platform differs from native local daemon")
+    return dict(container_image_id=image_id, container_platform=daemon_platform)

@@ -149,3 +149,58 @@ def test_strict_collection_never_probes_docker_before_guards(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.strict_mode_requested() is True
+
+
+def test_incompatible_default_platform_refuses_before_any_docker_work(monkeypatch):
+    monkeypatch.setattr(strict.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(strict, "_command", lambda *args: pytest.fail("platform refusal must precede Docker work"))
+    with pytest.raises(ValueError, match="incompatible Docker default platform"):
+        strict.measured_host({"DOCKER_DEFAULT_PLATFORM": "linux/amd64"})
+
+
+def test_native_compose_platform_and_actual_container_identity_readback():
+    assert strict.native_service_platform("arm64") == "linux/arm64"
+    native_id = "sha256:" + "a" * 64
+    native = dict(Id=native_id, Os="linux", Architecture="arm64")
+    container = dict(Image=native_id, Platform="linux")
+    assert strict.verify_native_container("arm64", native, container, native)["container_platform"] == "arm64"
+    for actual in (dict(native, Architecture="amd64"), dict(native, Id="sha256:" + "b" * 64)):
+        with pytest.raises(ValueError): strict.verify_native_container("arm64", native, container, actual)
+    with pytest.raises(ValueError):
+        strict.verify_native_container("arm64", native, dict(container, Image="sha256:" + "c" * 64), native)
+
+
+def test_teardown_failure_still_attempts_both_secret_removals_and_retains_original(tmp_path, monkeypatch):
+    from tests import test_canary_docker as canary
+    marker, document = tmp_path / "marker", tmp_path / "document"
+    marker.write_text("synthetic marker")
+    document.write_text("synthetic document")
+    original = ValueError("original unit-only runtime failure")
+    monkeypatch.setattr(canary, "_run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("teardown failed")))
+    monkeypatch.setattr(canary, "_project_containers", lambda *args: [])
+    monkeypatch.setattr(canary, "_networks", lambda *args: ["remaining-network"])
+    with pytest.raises(canary.CanaryCleanupError) as caught:
+        canary._cleanup_canary(object(), "env", "project", tmp_path / "compose", marker, document, original)
+    assert not marker.exists() and not document.exists()
+    assert caught.value.original_error is original and caught.value.__cause__ is original
+    assert {step for step, _ in caught.value.cleanup_errors} == {"compose-down", "network-absence"}
+
+
+def test_one_secret_unlink_failure_never_skips_the_other(tmp_path, monkeypatch):
+    from tests import test_canary_docker as canary
+    marker, document = tmp_path / "marker", tmp_path / "document"
+    marker.write_text("synthetic marker")
+    document.write_text("synthetic document")
+    unlink = Path.unlink
+    def fail_marker(path, **kwargs):
+        if path == marker: raise OSError("synthetic private path failure")
+        return unlink(path, **kwargs)
+    monkeypatch.setattr(Path, "unlink", fail_marker)
+    monkeypatch.setattr(canary, "_run", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(canary, "_project_containers", lambda *args: [])
+    monkeypatch.setattr(canary, "_networks", lambda *args: [])
+    with pytest.raises(canary.CanaryCleanupError) as caught:
+        canary._cleanup_canary(object(), "env", "project", tmp_path / "compose", marker, document, None)
+    assert marker.exists() and not document.exists()
+    assert [step for step, _ in caught.value.cleanup_errors] == ["marker-removal"]
+    assert "synthetic private path failure" not in str(caught.value)
