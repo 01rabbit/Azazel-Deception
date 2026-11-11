@@ -204,3 +204,18 @@ def test_one_secret_unlink_failure_never_skips_the_other(tmp_path, monkeypatch):
     assert marker.exists() and not document.exists()
     assert [step for step, _ in caught.value.cleanup_errors] == ["marker-removal"]
     assert "synthetic private path failure" not in str(caught.value)
+
+
+def test_mounted_directories_traversable_under_restrictive_umask_private_parent_unchanged(tmp_path):
+    import os
+    import stat
+    from tests import test_canary_docker as canary
+    previous = os.umask(0o077)
+    try:
+        private = tmp_path / "private"
+        web, markers = canary._create_canary_directories(private)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(private.stat().st_mode) == 0o700
+    assert stat.S_IMODE(web.stat().st_mode) == 0o755
+    assert stat.S_IMODE(markers.stat().st_mode) == 0o755

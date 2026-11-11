@@ -27,8 +27,10 @@ read-only into the same reference component. It retains user 101, read-only
 rootfs, all capabilities dropped, no-new-privileges, existing CPU/memory/PID
 limits, one internal network and no host ports. Actual container/network inspect
 readback checks those settings and the read-only mounts. No runtime socket is
-mounted. The private host parent directory is mode 0700; the readable leaf alone
-is mounted into the decoy. Access logging is disabled before the first request.
+mounted. The private host parent directory is mode 0700; only the two synthetic served
+directories are explicitly chmodded 0755 after creation so UID101 can traverse
+them even when the runner keeps umask 077. The private ancestor and runner umask
+are unchanged; the readable leaf alone is mounted into the decoy. Access logging is disabled before the first request.
 
 A separate `docker exec` client reads actual nginx HTTP status and body over
 container-local `127.0.0.1:8080`. The token-bearing path is passed over stdin,

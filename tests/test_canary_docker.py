@@ -106,6 +106,17 @@ def _networks(project):
     return result.stdout.split()
 
 
+def _create_canary_directories(private):
+    private.mkdir(mode=0o700)
+    web = private / "web"
+    web.mkdir(mode=0o755)
+    web.chmod(0o755)  # mkdir's mode is filtered by the caller's restrictive umask
+    markers = web / "__azazel_canary__"
+    markers.mkdir(mode=0o755)
+    markers.chmod(0o755)  # UID101 must traverse both mounted synthetic directories
+    return web, markers
+
+
 class CanaryCleanupError(RuntimeError):
     def __init__(self, original_error, errors):
         self.original_error = original_error
@@ -171,11 +182,7 @@ def test_real_nginx_canary_presentation_expiry_and_reset(tmp_path):
     marker_body = b'{"synthetic_marker":true}\n'
     # Private host parent; bind only its readable leaf into the nonroot decoy.
     private = tmp_path / "private"
-    private.mkdir(mode=0o700)
-    web = private / "web"
-    web.mkdir(mode=0o755)
-    markers = web / "__azazel_canary__"
-    markers.mkdir(mode=0o755)
+    web, markers = _create_canary_directories(private)
 
     def plant():
         nonlocal marker
