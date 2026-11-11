@@ -16,16 +16,25 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler
+from unittest import mock
 
 import pytest
 
 from azazel_deception.runtime.observation_export import export_observations
 from azazel_deception.runtime.state import RuntimeStateStore
-from tests._static_canary_process import ENVIRONMENT
+from tests._static_canary_process import ENVIRONMENT, FixedLoopbackServer
 
 REPO = Path(__file__).resolve().parents[1]
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 TIMEOUT = 20
+
+
+def test_fixed_loopback_server_never_requests_ambient_dns():
+    with mock.patch("socket.getfqdn", side_effect=AssertionError("ambient DNS")):
+        with FixedLoopbackServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
+            assert server.server_name == "localhost"
+            assert server.server_port > 0
 
 
 def receive(proc):

@@ -8,6 +8,7 @@ Control is inherited stdin/stdout, never an HTTP management endpoint.
 from __future__ import annotations
 
 import json
+import socketserver
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,20 @@ from tests.test_strict_live_posture import COMPOSE, KEY, PACKAGE, _decision, _ho
 
 ENVIRONMENT = "static-process-test"
 TTL = 60
+
+
+class FixedLoopbackServer(HTTPServer):
+    """Avoid HTTPServer's ambient reverse-DNS lookup for a fixed lab address."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(2)
+        return connection, address
 
 
 class LoopbackComposeDouble(DockerComposeAdapter):
@@ -84,14 +99,8 @@ class LoopbackComposeDouble(DockerComposeAdapter):
                             return
                         self.send_error(404)
 
-            class BoundedServer(HTTPServer):
-                def get_request(self):
-                    connection, address = super().get_request()
-                    connection.settimeout(2)
-                    return connection, address
-
             # Bind only an OS-chosen IPv4 loopback port, never configurable.
-            self.server = BoundedServer(("127.0.0.1", 0), Handler)
+            self.server = FixedLoopbackServer(("127.0.0.1", 0), Handler)
             self.server.timeout = 1
             self.bind_count += 1
             # No requests are served until activate_environment returns and
